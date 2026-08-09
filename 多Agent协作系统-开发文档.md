@@ -8,7 +8,7 @@
 > **v0.3 变更**：新增 §11 实现现状（文档 ↔ 代码对照）与 §12 开发路线图；§9 风险表按原型实测结果更新状态。
 > **v0.2 变更**：新增 §10 技术栈决策；§4.1 TaskSpec 增加 `task_class` / `hard_signals` / `silence_policy` / `model` 字段；§3.2 补充信号覆盖面差异说明；风险 #4 给出缓解方案。
 
-**原型结论（2026-08-10）**：核心架构假设成立。§10.1 的判断得到验证——自持 step 循环后，「外部抢占」确实退化成循环开头的一次状态检查（`runtime/loop.py:128`），没有引入任何框架依赖。`L0 信号 → 中断 → 架构师决策 → REBASE → 恢复 → 验收通过`全链路跑通。
+**原型结论（2026-08-10）**：核心架构假设成立。§10.1 的判断得到验证——自持 step 循环后，「外部抢占」确实退化成循环开头的一次状态检查（`runtime/loop.py` 里的 `bus.take_preempt()`），没有引入任何框架依赖。`L0 信号 → 中断 → 架构师决策 → REBASE → 恢复 → 验收通过`全链路跑通。
 
 **M1 阶段结论（2026-08-10）**：四项全部收口，82 个测试通过（Postgres + Docker + LiteLLM + DeepSeek/Kimi 全部在线，零 skip）。三个值得记的发现：
 
@@ -577,8 +577,8 @@ HTTP 429
 
 | 后端 | 方言 | 覆盖供应商 | 状态 |
 |---|---|---|---|
-| `llm/anthropic_backend.py` | Anthropic Messages | Claude 全系 | 管道已验证到上游边界，待 key |
-| `llm/openai_compat.py` | OpenAI Chat Completions | DeepSeek、Kimi(Moonshot)、任何 OpenAI 兼容端点 | 待 key |
+| `llm/anthropic_backend.py` | Anthropic Messages | Claude 全系 | 管道验证到上游边界，无 key 未跑通 |
+| `llm/openai_compat.py` | OpenAI Chat Completions | DeepSeek、Kimi(Moonshot)、任何 OpenAI 兼容端点 | ✅ 完整链路已跑通（§11.5） |
 
 **为什么需要第二个后端，而不是让 LiteLLM 翻译**：实测确认 LiteLLM 的 Anthropic 形状 `/v1/messages` 确实能路由到 DeepSeek/Moonshot（请求到了上游，回来的是各家自己的鉴权错误）。但我们依赖 `output_config.format`（Anthropic 专有的结构化输出），能否被忠实翻译成对方的 `response_format` 无法验证。**结构化输出被静默丢弃比不支持更糟**——Subagent 的动作解析会崩在一个看似正常的响应上。
 
@@ -686,14 +686,14 @@ artifacts    (id, task_id, kind, content_ref, summary)
 | §7.2 确定性升级下限 | `escalation.py` | ✅ 五条全实现 |
 | §7.2 成本兜底（硬限制） | `llm/errors.py` + LiteLLM virtual key | ✅ **M1.4 实测** |
 | §7.3 可见性 | `cli.py --json` 结构化日志 | ⚠️ 仅 CLI（M6） |
-| §10.3 多供应商 | `llm/anthropic_backend.py` + `llm/openai_compat.py` | ⚠️ 管道通，待 key |
+| §10.3 多供应商 | `llm/anthropic_backend.py` + `llm/openai_compat.py` | ✅ **M1.3 实测**（DeepSeek / Kimi） |
 | §10.4 沙箱隔离 | `runtime/sandbox.py` 只读挂载 + scope 覆盖 | ✅ **M1.2 实测** |
 | §10.5 五张表 | `schema.sql` + `store/postgres.py` | ✅ **M1.1 实测** |
 | — | `store/sqlite.py`（零依赖，默认） | ✅ |
 
 | §10.6 密钥与配置 | `config.py` + `.env.example` + `SignalBus.emit()` 脱敏 | ✅ |
 
-79 个测试。不起 Docker 时依赖真实服务的 14 个 skip，其余照常跑。
+82 个测试。不起 Docker 时依赖真实服务的 14 个 skip，其余照常跑。
 
 ### 11.2 四条架构不变量已有测试守护
 
@@ -708,7 +708,7 @@ artifacts    (id, task_id, kind, content_ref, summary)
 
 ### 11.3 原型暴露的两个设计补充
 
-**（a）抢占队列必须清空**（`loop.py:110`）
+**（a）抢占队列必须清空**（`loop.py` 的 `interrupted()`）
 中断时如果只取走触发的那一条硬信号，队列里剩余的会在下一轮循环开头再次触发抢占，**把一次中断放大成无限中断**。修正：中断时 `drain_preempt()` 全部取出并统一标记 `PREEMPTED`。文档 §5 未覆盖此细节，已在代码中处理。
 
 **（b）模型不走工具调用循环**
@@ -808,7 +808,7 @@ M6    群聊界面层          （与 M3–M5 无代码耦合，可独立启动�
 
 ### M1 — 真实环境收口
 
-**目标**：把 §11.4 的三项「已写未测」变成「已验证」。
+**目标**：把 §11.4 原列的三项「已写未测」变成「已验证」。
 
 | # | 任务 | 出口标准 | 状态 |
 |---|---|---|---|
@@ -860,7 +860,7 @@ M1.3 实测给这个前置加了两条硬要求（§11.5a / §11.5d）：
 
 ### M3 — PROBE 模式（`GENERATIVE` 类）
 
-**目标**：解掉 `orchestrator.py:59` 的 `NotImplementedError`，让没有客观判据的任务可被观测。
+**目标**：解掉 `Orchestrator.__init__` 里对 `silence_policy=PROBE` 抛的 `NotImplementedError`，让没有客观判据的任务可被观测。
 
 | # | 任务 | 说明 |
 |---|---|---|
