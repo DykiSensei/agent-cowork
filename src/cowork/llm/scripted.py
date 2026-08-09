@@ -26,13 +26,16 @@ class ScriptedBackend:
         *,
         verdict_for: Callable[[TaskSpec, list[Signal]], ArchitectVerdict] | None = None,
         triage_for: Callable[[Signal], str] | None = None,
+        probe_for: Callable[[TaskSpec, AgentContext], tuple[bool, str]] | None = None,
         token_cost: int = 500,
     ) -> None:
         self.steps = steps
         self.verdict_for = verdict_for
         self.triage_for = triage_for or (lambda s: "escalate")
+        self.probe_for = probe_for
         self.token_cost = token_cost
         self._cursor: dict[int, int] = {}
+        self.probe_calls = 0
 
     # -- Subagent ---------------------------------------------------------- #
 
@@ -73,3 +76,12 @@ class ScriptedBackend:
 
     def verify(self, spec: TaskSpec, ctx: AgentContext) -> tuple[bool, str, int]:
         return True, "脚本后端：非机器可检项默认通过", self.token_cost // 10
+
+    def probe(
+        self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]
+    ) -> tuple[bool, str, int]:
+        self.probe_calls += 1
+        if self.probe_for is None:
+            return True, "脚本后端：中间产出默认在轨", self.token_cost // 5
+        on_track, reason = self.probe_for(spec, ctx, excerpts)
+        return on_track, reason, self.token_cost // 5

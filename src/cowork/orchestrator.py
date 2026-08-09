@@ -20,7 +20,7 @@ from .llm.errors import ModelError
 from .policy import DEFAULT_POLICY, Policy
 from .resume import apply_resume
 from .runtime.bus import SignalBus
-from .runtime.loop import StepLoop
+from .runtime.loop import StepLoop, StepOutcome
 from .runtime.sandbox import Sandbox
 from .signals import SignalSource, SignalType
 from .types import (
@@ -56,13 +56,9 @@ class Orchestrator:
         human_gate: HumanGate | None = None,
         log: Callable[[str], None] = print,
     ) -> None:
-        if spec.silence_policy is SilencePolicy.PROBE:
-            raise NotImplementedError(
-                "silence_policy=PROBE（GENERATIVE 类任务）不在 v0.1 链路内。"
-                "见开发文档 §11 第 3 条：PROBE 的 token 成本需先实测。"
-            )
         if spec.sandbox is None:
-            raise ValueError("v0.1 需要 sandbox（CODE 类任务）")
+            # 产出必须落在某个可观测的地方，否则架构师既验收不了也探查不了
+            raise ValueError("需要 sandbox：产出要写进 workspace 才能被观测")
 
         self.spec = spec
         self.backend = backend
@@ -79,6 +75,9 @@ class Orchestrator:
         self.ctx = AgentContext(task_spec=spec)
         self.decisions: list[DecisionRecord] = []
         self._rebase_count = 0
+        self._last_probe = time.monotonic()
+        self.probe_count = 0
+        self.probe_tokens = 0
 
     # ------------------------------------------------------------------ #
 
@@ -99,6 +98,7 @@ class Orchestrator:
 
     def run(self, max_cycles: int = 8) -> RunResult:
         self.state.started_at = time.time()
+        self._last_probe = time.monotonic()
         self.store.save_task(self.state)
 
         for cycle in range(1, max_cycles + 1):
@@ -111,17 +111,7 @@ class Orchestrator:
                 f"agent={subagent.id} step={self.state.current_step}"
             )
 
-            outcome = self.loop.run(
-                self.ctx,
-                subagent,
-                start_step=self.state.current_step,
-                tokens_used=self.state.tokens_used,
-            )
-            self.ctx = outcome.context
-            self.state.current_step += outcome.steps_run
-            self.state.tokens_used = outcome.tokens_used
-            self.state.checkpoint_id = outcome.checkpoint_id
-            self.state.artifacts = [a.id for a in self.ctx.produced]
+            outcome, probe_sig = self._run_with_probes(subagent)
 
             # 软信号在检查点批量消费（§3.4）
             if outcome.soft_signals:
@@ -133,7 +123,10 @@ class Orchestrator:
                     f"升级 {len(escalated)} 条"
                 )
 
-            if outcome.status is TaskStatus.COMPLETED:
+            if probe_sig is not None:
+                # 探查发现跑偏。走的是和「架构师验收不通过」完全相同的路径。
+                triggers = [probe_sig]
+            elif outcome.status is TaskStatus.COMPLETED:
                 passed, reason = self.architect.verify(self.ctx.task_spec, self.ctx)
                 if passed:
                     self.state.status = TaskStatus.COMPLETED
@@ -213,6 +206,93 @@ class Orchestrator:
         self.store.save_task(self.state)
         self.log(f"[STOP] 超过 max_cycles={max_cycles}")
         return RunResult(self.state, self.ctx, self.decisions)
+
+    # ------------------------------------------------------------------ #
+    # PROBE（§3.2.1）
+    # ------------------------------------------------------------------ #
+
+    def _run_with_probes(self, subagent) -> tuple[StepOutcome, Signal | None]:
+        """跑一段，途中把 PROBE 探查消化掉。
+
+        **探查不是中断**，所以它不消耗一个 cycle、不换 Subagent、不动 revision ——
+        在轨就直接接着跑。只有探查判定跑偏时才升级成信号，走既有的中断链路。
+
+        `silence_policy=TRUST` 时 `_probe_at()` 返回 None，整段退化成一次
+        `loop.run()`，与 M2 之前的行为逐字相同。
+        """
+        soft: list[Signal] = []
+        # 一轮的步数与时间预算跨探查分段累计，不能每段清零（见 loop.run 的注释）
+        cycle_steps = 0
+        cycle_started = time.monotonic()
+        while True:
+            outcome = self.loop.run(
+                self.ctx,
+                subagent,
+                start_step=self.state.current_step,
+                tokens_used=self.state.tokens_used,
+                probe_at=self._probe_at(),
+                cycle_steps_used=cycle_steps,
+                cycle_started=cycle_started,
+            )
+            cycle_steps += outcome.steps_run
+            self.ctx = outcome.context
+            self.state.current_step += outcome.steps_run
+            self.state.tokens_used = outcome.tokens_used
+            self.state.checkpoint_id = outcome.checkpoint_id
+            self.state.artifacts = [a.id for a in self.ctx.produced]
+            soft.extend(outcome.soft_signals)
+            outcome.soft_signals = soft
+
+            if not outcome.probe_due:
+                return outcome, None
+
+            on_track, reason, tokens = self.architect.probe(
+                self.ctx.task_spec, self.ctx, self._produced_excerpts()
+            )
+            self.state.tokens_used += tokens
+            self.probe_count += 1
+            self.probe_tokens += tokens
+            self._last_probe = time.monotonic()
+            self.log(
+                f"[PROBE] #{self.probe_count} @step={self.state.current_step} "
+                f"{'在轨' if on_track else '跑偏'}: {reason[:80]}"
+            )
+            if on_track:
+                continue
+
+            # 跑偏 -> 当作 L0 信号处理，与「架构师验收不通过」同构。
+            # 注意信号是 Orchestrator 发的而不是 Runtime 发的：判定来自模型，
+            # 不是确定性观测。用 payload.origin 把这个区别留在数据里。
+            sig = self.bus.emit_hard(
+                SignalType.VALIDATION_FAILED,
+                self.spec.id,
+                payload={"origin": "architect_probe", "probe_index": self.probe_count},
+                evidence=reason,
+            )
+            self.store.save_signal(sig)
+            return outcome, sig
+
+    def _probe_at(self) -> float | None:
+        if self.ctx.task_spec.silence_policy is not SilencePolicy.PROBE:
+            return None
+        interval = (
+            self.ctx.task_spec.probe_interval_s or self.policy.default_probe_interval_s
+        )
+        return self._last_probe + interval
+
+    def _produced_excerpts(self) -> dict[str, str]:
+        """把产出内容读出来给架构师看。
+
+        读文件是确定性操作，归 Runtime 的 sandbox —— 架构师没有也不该有
+        文件系统访问权。同一路径被写多次时天然去重（dict 按路径收敛）。
+        """
+        cap = self.policy.probe_excerpt_chars
+        out: dict[str, str] = {}
+        for a in self.ctx.produced:
+            res = self.sandbox.read_file(a.content_ref)
+            if res.ok:
+                out[a.content_ref] = res.stdout[:cap]
+        return out
 
     # ------------------------------------------------------------------ #
 

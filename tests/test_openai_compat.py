@@ -12,6 +12,8 @@ import os
 import shutil
 import unittest
 
+from cowork.llm.anthropic_backend import _parse_action
+from cowork.llm.errors import ModelError
 from cowork.llm.openai_compat import _parse_and_validate
 
 ACTION_LIKE = {
@@ -62,6 +64,55 @@ class TestJsonSalvage(unittest.TestCase):
         data, errs = _parse_and_validate('[{"kind":"finish"}]', ACTION_LIKE)
         self.assertIsNone(data)
         self.assertIn("顶层必须是对象", errs[0])
+
+
+class TestActionParsing(unittest.TestCase):
+    """schema 通过 ≠ 语义有效。
+
+    ACTION_SCHEMA 用空串表示「本字段不适用」，于是 kind=tool_call + tool="" 是
+    合法 JSON、能过本地校验，再往下才炸。M2 跑批里 75 次运行有 3 次死在这里
+    （§11.6b）。解析失败必须是 ModelError —— 那样 step 循环会把它变成硬信号交给
+    架构师，而不是让异常穿透整个 run。
+    """
+
+    def _full(self, **over):
+        base = {
+            "kind": "finish", "thought": "", "tool": "", "path": "", "content": "",
+            "command": [], "output_json": "", "summary": "", "signal_type": "", "detail": "",
+        }
+        base.update(over)
+        return base
+
+    def test_empty_tool_becomes_model_error(self):
+        with self.assertRaises(ModelError):
+            _parse_action(self._full(kind="tool_call", tool=""))
+
+    def test_unknown_tool_becomes_model_error(self):
+        with self.assertRaises(ModelError):
+            _parse_action(self._full(kind="tool_call", tool="rm_rf"))
+
+    def test_empty_signal_type_becomes_model_error(self):
+        with self.assertRaises(ModelError):
+            _parse_action(self._full(kind="soft_signal", signal_type=""))
+
+    def test_hard_signal_type_rejected_as_soft(self):
+        """软信号通道不能用来伪造硬信号 —— 那是 Runtime 的专属职责（§3.1）。"""
+        with self.assertRaises(ModelError):
+            _parse_action(self._full(kind="soft_signal", signal_type="TEST_FAILED"))
+
+    def test_unknown_kind_becomes_model_error(self):
+        with self.assertRaises(ModelError):
+            _parse_action(self._full(kind="rm -rf /"))
+
+    def test_valid_actions_still_parse(self):
+        a = _parse_action(self._full(kind="tool_call", tool="write_file",
+                                     path="x.py", content="y"))
+        self.assertEqual((a.name, a.args["path"]), ("write_file", "x.py"))
+        b = _parse_action(self._full(kind="soft_signal", signal_type="AMBIGUITY",
+                                     detail="不确定"))
+        self.assertEqual(b.signal_type, "AMBIGUITY")
+        c = _parse_action(self._full(kind="finish", output_json='{"a":1}', summary="s"))
+        self.assertEqual(c.output, {"a": 1})
 
 
 class TestProviderResolution(unittest.TestCase):
@@ -168,7 +219,13 @@ class TestLiveProvider(unittest.TestCase):
         self.assertGreater(tokens, 0, "usage 必须能读出来，否则预算统计是假的")
 
     def test_full_chain_with_real_model(self):
-        """M1.3 出口：demo 场景用真实模型跑通。"""
+        """M1.3 出口：demo 场景用真实模型跑通。
+
+        断言只到「终局状态合法且有账可查」为止。原来这里要求必须
+        COMPLETED 或 AWAITING_HUMAN，M2 实测证明那是错的：同一 spec 同一模型
+        跨 75 次运行中断次数落在 0–5，跑满 max_cycles 后 FAILED 是**设计内的**
+        终局，不是缺陷（§11.6d）。拿概率性结果做断言只会得到一个偶发红灯的测试。
+        """
         from cowork import demo
         from cowork.types import TaskStatus
 
@@ -178,10 +235,17 @@ class TestLiveProvider(unittest.TestCase):
             result = orch.run(max_cycles=4)
             self.assertIn(
                 result.state.status,
-                (TaskStatus.COMPLETED, TaskStatus.AWAITING_HUMAN),
-                f"不该崩也不该无限中断；决策记录：{[d.action.value for d in result.decisions]}",
+                (TaskStatus.COMPLETED, TaskStatus.AWAITING_HUMAN,
+                 TaskStatus.FAILED, TaskStatus.ABANDONED),
+                "终局状态必须是状态机里定义过的那几个",
             )
             self.assertGreater(result.state.tokens_used, 0)
+            if result.state.status is not TaskStatus.COMPLETED:
+                # 没成不要紧，但必须留下为什么没成的记录 —— 这是 §7.3 可见性的底线
+                self.assertTrue(
+                    result.decisions,
+                    "非 COMPLETED 的终局必须有 DecisionRecord 解释原因",
+                )
         finally:
             shutil.rmtree(ws, ignore_errors=True)
 

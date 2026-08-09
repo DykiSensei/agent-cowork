@@ -96,7 +96,7 @@ def build_spec(workspace: Path) -> TaskSpec:
         output_schema=OUTPUT_SCHEMA,
         sandbox=SandboxProfile(workspace=str(workspace), allowed_binaries=("python",)),
         scope=["solution.py"],
-        tools=["write_file", "read_file", "run"],
+        tools=["write_file", "read_file", "list_files", "run"],
         max_steps=6,
         deadline_s=120.0,
         token_budget=50_000,

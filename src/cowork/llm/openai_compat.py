@@ -31,11 +31,14 @@ from ..types import AgentContext, Signal, TaskSpec
 from .anthropic_backend import (
     ACTION_SCHEMA,
     ARCHITECT_SYSTEM,
+    PROBE_SCHEMA,
+    PROBE_SYSTEM,
     SUBAGENT_SYSTEM,
     TRIAGE_SCHEMA,
     TRIAGE_SYSTEM,
     VERDICT_SCHEMA,
     _parse_action,
+    _render_probe_context,
     _render_subagent_context,
 )
 
@@ -256,6 +259,18 @@ class OpenAICompatBackend:
             },
         )
         return data["passed"], data["reason"], tokens
+
+    def probe(
+        self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]
+    ) -> tuple[bool, str, int]:
+        # 用 triage_model：探查只判方向，不做完整推理，成本必须压住（§3.2.1）
+        data, tokens = self._call(
+            model=self.triage_model,
+            system=PROBE_SYSTEM,
+            user=_render_probe_context(spec, ctx, excerpts),
+            schema=PROBE_SCHEMA,
+        )
+        return data["on_track"], data["reason"], tokens
 
 
 # --------------------------------------------------------------------------- #

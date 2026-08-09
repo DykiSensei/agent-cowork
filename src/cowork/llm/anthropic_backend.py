@@ -19,6 +19,7 @@ from typing import Any
 from ..actions import AgentAction, Finish, SoftSignalAction, ToolCall
 from ..llm import ArchitectVerdict, Triage
 from ..llm.errors import ModelCallFailed, from_provider_error
+from ..signals import SOFT_SIGNALS, SignalType
 from ..types import AgentContext, Signal, TaskSpec
 
 
@@ -43,7 +44,10 @@ ACTION_SCHEMA: dict[str, Any] = {
     "properties": {
         "kind": {"type": "string", "enum": ["tool_call", "finish", "soft_signal"]},
         "thought": {"type": "string"},
-        "tool": {"type": "string", "enum": ["write_file", "read_file", "run", ""]},
+        "tool": {
+            "type": "string",
+            "enum": ["write_file", "read_file", "list_files", "run", ""],
+        },
         "path": {"type": "string"},
         "content": {"type": "string"},
         "command": {"type": "array", "items": {"type": "string"}},
@@ -123,6 +127,9 @@ SUBAGENT_SYSTEM = """你是一个 Subagent，只与架构师通信，不与其�
 可用动作：
 - tool_call + tool=write_file，需要 path / content
 - tool_call + tool=read_file，需要 path
+- tool_call + tool=list_files，需要 path（目录，用 "." 表示工作区根）。
+  **想看工作区里有什么就用它，不要去 run 一个 ls** —— ls 不在 allowed_binaries 里，
+  调它只会触发 SCOPE_VIOLATION。
 - tool_call + tool=run，需要 command（argv 数组）
 - finish，需要 summary 和 output_json（符合 output_schema 的 JSON 字符串）
 - soft_signal，需要 signal_type 和 detail —— 用于歧义、前提失效、需要额外资源等。
@@ -148,6 +155,43 @@ added_criteria 是要补充的验收标准。"""
 
 TRIAGE_SYSTEM = """你在做廉价批量分诊。对每条软信号只输出 ignore 或 escalate。
 escalate 只给「架构师必须介入才能推进」的信号。不要做完整推理。"""
+
+PROBE_SYSTEM = """你在做中途探查（PROBE），不是验收。
+
+这个任务没有客观判据可以让 Runtime 自动检查，所以只能靠你定期看一眼。
+你看到的产出**本来就是不完整的**——它还在写。
+
+只回答一个问题：**它在正确的方向上吗？**
+
+判 off_track 的情形：跑题、违反明确写死的约束、产出结构明显不对、
+内容与 goal 无关。**不要**因为「还没写完」「篇幅不够」「不够完善」判 off_track，
+那是验收的事，不是探查的事。拿不准就判在轨——误报的代价是白打断一次。"""
+
+PROBE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "on_track": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["on_track", "reason"],
+    "additionalProperties": False,
+}
+
+
+def _render_probe_context(spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]) -> str:
+    parts = [
+        f"# 目标\n{spec.goal}",
+        "# 约束（验收标准，供判断方向用，不要拿来判完成度）\n"
+        + "\n".join(f"- {c.id}: {c.description}" for c in spec.acceptance),
+    ]
+    if excerpts:
+        parts.append(
+            "# 当前产出\n"
+            + "\n\n".join(f"## {path}\n{text}" for path, text in excerpts.items())
+        )
+    else:
+        parts.append("# 当前产出\n（还没有任何产出）")
+    return "\n\n".join(parts)
 
 
 class AnthropicBackend:
@@ -327,11 +371,33 @@ class AnthropicBackend:
         )
         return data["passed"], data["reason"], tokens
 
+    def probe(
+        self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]
+    ) -> tuple[bool, str, int]:
+        # 探查用便宜的模型：它只判方向，不做完整推理（同 §3.4 分诊的理由）。
+        # PROBE 本来就是拿 token 换观测能力，单次成本必须压住。
+        data, tokens = self._call(
+            model=self.triage_model,
+            system=PROBE_SYSTEM,
+            user=_render_probe_context(spec, ctx, excerpts),
+            schema=PROBE_SCHEMA,
+            thinking=False,
+        )
+        return data["on_track"], data["reason"], tokens
+
 
 # --------------------------------------------------------------------------- #
 
 
 def _parse_action(d: dict[str, Any]) -> AgentAction:
+    """把模型返回的动作 JSON 变成 AgentAction。
+
+    失败时抛 **ModelCallFailed 而不是 ValueError**，理由同 §11.3c：
+    schema 校验通过不等于语义有效 —— ACTION_SCHEMA 允许 tool / signal_type 取空串
+    （「不适用」的表示法），模型却会在 kind=tool_call 时把 tool 留空。M2 跑批里
+    75 次运行有 3 次因此崩掉整个 run（§11.6b）。解析失败必须变成硬信号交给架构师，
+    和模型调用失败走同一条路。
+    """
     kind = d["kind"]
     if kind == "tool_call":
         tool = d["tool"]
@@ -339,10 +405,12 @@ def _parse_action(d: dict[str, Any]) -> AgentAction:
             args = {"path": d["path"], "content": d["content"]}
         elif tool == "read_file":
             args = {"path": d["path"]}
+        elif tool == "list_files":
+            args = {"path": d["path"] or "."}
         elif tool == "run":
             args = {"command": list(d["command"])}
         else:
-            raise ValueError(f"未知工具: {tool!r}")
+            raise ModelCallFailed(f"kind=tool_call 但 tool 无效: {tool!r}")
         return ToolCall(name=tool, args=args, thought=d.get("thought", ""))
     if kind == "finish":
         try:
@@ -351,8 +419,15 @@ def _parse_action(d: dict[str, Any]) -> AgentAction:
             output = {}
         return Finish(output=output, summary=d.get("summary", ""), thought=d.get("thought", ""))
     if kind == "soft_signal":
-        return SoftSignalAction(signal_type=d["signal_type"], detail=d.get("detail", ""))
-    raise ValueError(f"未知动作 kind: {kind!r}")
+        raw = d["signal_type"]
+        try:
+            signal_type = SignalType(raw)
+        except ValueError:
+            raise ModelCallFailed(f"kind=soft_signal 但 signal_type 无效: {raw!r}") from None
+        if signal_type not in SOFT_SIGNALS:
+            raise ModelCallFailed(f"soft_signal 不能用硬信号类型: {raw!r}")
+        return SoftSignalAction(signal_type=signal_type.value, detail=d.get("detail", ""))
+    raise ModelCallFailed(f"未知动作 kind: {kind!r}")
 
 
 def _render_subagent_context(ctx: AgentContext) -> str:

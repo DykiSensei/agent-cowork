@@ -59,6 +59,20 @@ class Backend(Protocol):
         """架构师验收非机器可检的验收标准。"""
         ...
 
+    def probe(
+        self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]
+    ) -> tuple[bool, str, int]:
+        """PROBE 中间探查（§3.2.1）：现在这个产出还在轨道上吗。
+
+        和 verify 是两个问题，不能合并：verify 问「完成了吗」，probe 问
+        「方向对吗」。中途产出**本来就不完整**，拿完成度去判它必然误报。
+
+        excerpts 是 {产出路径: 内容片段}。**由 Runtime 的 sandbox 读出来再传进来**——
+        架构师没有也不该有文件系统访问权，读文件是确定性操作，归 Runtime。
+        返回 (是否在轨, 理由, token)。
+        """
+        ...
+
 
 from .scripted import ScriptedBackend  # noqa: E402
 

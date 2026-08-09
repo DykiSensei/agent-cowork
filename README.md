@@ -5,7 +5,10 @@
 ```
 M0 ✅ 核心链路验证    L0 硬信号 → 中断 → REBASE → 恢复
 M1 ✅ 真实环境收口    Postgres / Docker 沙箱 / 真实模型 / virtual key 预算强制
-M2 ◻ 参数实测        ← 下一步
+M2 ✅ 参数实测        15 个任务 × 5 次 = 75 次真实运行，policy.py 六个值有了依据
+M3 ✅ PROBE 模式      成本 1.45x 已量化；收益（27 次探查 0 次命中）未标定
+M4 ✅ 并行与冲突检测  4 子任务 / 2 种 task_class / 并行度 2，真实模型跑通
+M5 ◻ 架构师验证      ← 下一步。已拆成 M5a（停止判断）/ M5b（拆解复核）
 ```
 
 ---
@@ -17,13 +20,18 @@ docker compose up -d postgres litellm
 python -m unittest discover -s tests -t .
 ```
 
-82 个测试。不起 Docker 的话，依赖真实服务的 14 个会 skip，其余照常跑；
+147 个测试。不起 Docker 的话，依赖真实服务的 14 个会 skip，其余照常跑；
 另有 2 个真实供应商测试需要 `DEEPSEEK_API_KEY` 或 `MOONSHOT_API_KEY`（`.env` 里配好即可，测试会自动读）。
 
 ```bash
 python -m cowork.cli demo                      # SQLite + 本地沙箱 + 脚本后端
 python -m cowork.cli demo --store pg --docker  # Postgres + Docker 沙箱
 python -m cowork.cli demo --backend deepseek   # 真实模型（需要 key，见下）
+
+python -m cowork.cli composite --backend deepseek          # M4 复合任务：并行 + 冲突检测
+
+python -m cowork.cli bench --backend deepseek --repeat 5   # M2 参数实测跑批
+python -m cowork.cli bench-report bench_runs.jsonl         # 出参数结论
 ```
 
 （未安装时先 `pip install -e .`，或 `set PYTHONPATH=src`。）
@@ -52,7 +60,7 @@ python -m cowork.cli demo --backend deepseek   # 真实模型（需要 key，见
 
 | 不变量 | 落地位置 | 测试 |
 |---|---|---|
-| 执行层中心化，Subagent 只与架构师通信 | 没有 Subagent 间通信的 API 面 | 结构性保证 |
+| 执行层中心化，Subagent 只与架构师通信 | 没有 Subagent 间通信的 API 面；并行度加在 `scheduler.py`，上游产出经调度器注入 | `test_scheduler` |
 | Runtime 不含 LLM，硬信号全部确定性产生 | `runtime/` 整个包无模型调用 | `test_chain` |
 | step 循环自己持有，抢占 = 不派发下一个 step | `runtime/loop.py` 循环开头一次状态检查 | `test_preemption` |
 | checkpoint 里 produced / reasoning_trace 是两个顶层键 | `types.AgentContext` + DB CHECK | `test_chain` + `test_postgres_store` |
@@ -147,6 +155,153 @@ Kimi（`kimi-k3`）都跑通了完整链路，产出的 `solution.py` 经独立�
 
 ---
 
+## M2 实测结论
+
+15 个任务 × 5 次 = 75 次 DeepSeek 真实运行，1.62M token。工具在 `src/cowork/bench/`，
+原始记录 `bench_runs.jsonl`，完整分析见开发文档 §11.6。
+
+### 改了四个参数
+
+| 参数 | 原值 | 现值 | 依据 |
+|---|---|---|---|
+| `complexity_threshold` | 0.6 | 0.4 | ROC 最佳 Youden 点（TPR 0.66 / FPR 0.35）；原值只有 TPR 0.38 |
+| `max_rebase` | 3 | 2 | 完成率 REBASE 2 次 41%、3 次 33%、**4 次 0%** |
+| `budget_escalation_ratio` | 0.8 | 0.6 | 0.8 越线后中位只剩 0 token 就到终局，等于事后通知 |
+| `step_soft_deadline_s` | 60 | 30 | step 耗时 p99 5.9s / max 10.8s（n=651） |
+
+`max_interrupts=3` 是唯一被数据支持保留的：条件成功率 ≥3 次 18%、≥4 次 7%、≥5 次 0%。
+
+### 三条比参数更重要的结论
+
+**1. LLM 自评复杂度判别力很弱（AUC 0.672）。**
+90 条「该升级给人」的决策里，**63 条是被 §7.2 的确定性规则拦下的，不是被自评分数**。
+最说明问题的是 `e1_silent_failure` —— 验收脚本静默失败、架构师手上零证据，
+它的自评分数中位只有 0.3。§7.2 那句「模型给低分的场合恰恰可能是它没意识到问题
+严重性的场合」被数据支持了。
+
+**2. 架构师占掉总 token 的 51.3%。**
+`decide_interrupt` 176 次调用、中位 3536 token。每次中断周期的边际成本约 7k token
+（0 次中断 3.1k → 1 次 10.5k → 2 次 16.8k → 3 次 27.1k）。系统里最贵、最有权、
+且唯一无人复核的组件是同一个 —— 这让 M5 更紧迫。
+
+**3. 实测的一半价值是告诉你哪些参数不该存在。**
+`soft_queue_threshold` / `soft_interval_s` 在当前调用路径上是死的：
+`Architect.should_consume_soft()` 没有任何调用方，而且软信号极稀疏
+（75 次运行 20 条，队列深度最大 2，阈值 5 永远达不到）。`step_soft_deadline_s`
+同样没有代码读它。结论是「接上或删掉」，不是编一个数。
+
+顺带证伪了风险 #1 的前提：checkpoint 写入耗时中位 **0.2ms**，占 step 总耗时的
+**0.009%** —— step 粒度完全不需要为 checkpoint 开销让步。
+
+### 跑批期间修掉的两个缺陷
+
+- **探测性 `read_file` 被当成硬信号**。Subagent 第一步几乎总是探一下产出文件在不在，
+  「不存在」返回 `ok=False` 就被判成 `TOOL_FAILURE` 抢占，每个任务白烧一轮架构师决策。
+  修完 `PASS` 类任务从「2 次中断 / 12.2k token / 78s」降到「0 次中断 / 2.5k token / 10s」。
+- **动作解析失败抛异常穿透整个 run**。`ACTION_SCHEMA` 用空串表示「不适用」，于是
+  `kind=tool_call` + `tool=""` 能过校验再往下炸，75 次运行死了 3 次。现在改抛
+  `ModelCallFailed`，走硬信号通道 —— 和模型调用失败同一条路。
+
+### 任务集设计上的教训
+
+隐藏约定全部选**与通行理解相反**的项目约定（保留最后一次出现、不足一块就丢弃、
+`n<=0` 返回原串…），推理再强也推不出来。验收脚本的用例表存成压缩 blob ——
+`read_file` 不受 scope 限制，明文写用例等于把答案发给 Subagent。
+
+但仍然漏了一条：**验收命令一旦对 Subagent 可执行，失败信息本身就把答案说出来了**。
+追踪显示 Subagent 自己跑 `python verify.py`，看到
+`FAIL: is_palindrome(*['']) -> True, expected False` 就直接改对了，
+架构师被叫来只说了句「继续」。所以任务集验证的是「失败信号驱动收敛」，
+不是「架构师改规格驱动收敛」——这是 M1.3 那条教训的新形态。
+
+### 给 M4 加的两项
+
+- **`list_files` 工具**：缺它导致约三成运行触发假阳性 `SCOPE_VIOLATION`
+  （模型想探查工作区只能去调 `ls`，撞 `allowed_binaries`）。75 次运行 23 次。
+- **区分「Subagent 主动跑验收命令失败」与「工具坏了」**：当前 `run` 非零即抢占，
+  占全部硬信号的 50%，把正常的自测-修复循环切成反复打断架构师。
+
+---
+
+## M3 实测结论（PROBE）
+
+同一个写作任务三个 arm，只差 `silence_policy` 与探查间隔，各跑 5 次
+（`probe_runs.jsonl`，完整分析见开发文档 §11.7）。
+
+### 表面数字是错的
+
+| arm | 探查次数(中位) | token 中位 | 表面溢价 |
+|---|---|---|---|
+| `g0_trust` | 0 | 8024 | 1.0x |
+| `g1_probe_20s` | 1 | 27259 | 3.40x |
+| `g2_probe_5s` | 4 | 29080 | 3.62x |
+
+单次探查中位只有 **1176 token**。1 次探查换 +19k token 的差额，算术上就说不通 ——
+差额几乎全部来自 `decide_interrupt`：三个 arm 抽到的中断次数不同（中位 1/3/4），
+而每次中断约 7k token。
+
+**控制住中断次数后（只看零中断的运行），净溢价是 1.45x（20s）/ 1.64x（5s）。**
+开发文档 §12 M3 那条「溢价 >3x 就回头重新考虑 §3.2.1」的判断点因此**不该触发** ——
+它差点被一个没控变量的中位数比较误触发。这是「单次运行是噪声」的推广形态：
+**跨组比中位数时，高方差项没控住的话，中位数比较本身就是噪声**。
+
+### 比成本更值得记的：PROBE 一次都没抓到东西
+
+**27 次探查，0 次判跑偏。** 花掉 12–16% 的 token，收益在这批数据上是零。
+两种可能还没被区分开：任务本身没漂移，或者探查提示词太宽松
+（`PROBE_SYSTEM` 明确写了「拿不准就判在轨」，因为误报的代价是白打断一次）。
+
+**PROBE 的成本已知、收益未知。** `default_probe_interval_s=20.0` 只有成本侧依据，
+保守取长不取短。
+
+### 实现期踩的坑
+
+**探查分段会把资源上限清零。** 每次探查后重新进 `loop.run`，`max_steps` 和
+`deadline_s` 的计数跟着清零 —— PROBE 任务因此变成没有步数上限也没有超时。
+而 §3.2.1 说 GENERATIVE 只剩 `TIMEOUT` / `STEP_LIMIT` / `BUDGET_EXCEEDED` 三条硬信号，
+这个 bug 一次干掉两条。**给循环加「让出控制权」的能力时，所有以循环为计量单位的
+东西都要跟着走。**
+
+---
+
+## M4 实测结论（并行与冲突检测）
+
+4 个子任务、2 种 `task_class`、并行度 2 的复合任务在 DeepSeek 上跑通：
+全部 `COMPLETED`，25.9s / 25.7k token / 零中断。
+
+```
+层1  t1_parse (CODE)  ‖  t2_format (CODE)     scope 不相交，真并行
+层2  t3_report (CODE)                          depends_on 两者，拿到只读上下文
+层3  t4_check (TOOL_CALL)                      跑全量校验
+```
+
+**并行度加在调度层，不是通信层。** 没有新增任何「任务 ↔ 任务」的 API 面 ——
+下游拿到上游成果的唯一途径是调度器把 artifact 作为只读上下文注入。
+
+**可分解性是算出来的，不是模型说了算**（`plan.py`，全确定性无 LLM）：
+
+- **同层 scope 有交集 → 整层串行化。** 不做「求最大独立集」的部分并行优化：
+  收益不确定，而错了的代价是**静默覆盖** —— 并行写同一个文件不会报错，
+  先写的那份产出就那么没了。
+- **没有任何一层能并行 → 标记 `fan_out`。** 顺序依赖强的任务多 agent 最差 −70%，
+  这种拆解应该退化为单 agent。
+
+**新增一条 L0 硬信号 `CONFLICT_DETECTED`**，与 L1 的 `CONFLICT_SUSPECTED` 是两回事：
+后者是 Subagent「怀疑」，前者是调度器确定性观测到两个任务写了同一份产出。
+
+「同层」这个限定是本质的：**跨层写同一个文件是有序交接**，判成冲突会让正常拆解
+跑不动。于是运行期还能撞上的冲突只剩一种 —— 架构师在运行中用 `MODIFY_TASK`
+改宽了 scope，把两个并行任务撞到一起，正是静态检查看不到的那种。
+
+**仲裁不新开决策通道**：冲突归属给后写的那个任务，走既有的 `Architect.decide()`。
+为冲突单开一套裁决逻辑，等于承认「架构师是唯一写入决策点」不成立。
+
+**并行暴露的存储层缺陷**：`sqlite3` 连接不是线程安全的，已改为
+`check_same_thread=False` + 方法级 `RLock`。锁必须覆盖到 `fetch` ——
+只锁 `execute` 的话游标会在锁外回头碰连接。
+
+---
+
 ## 目录
 
 ```
@@ -176,6 +331,13 @@ src/cowork/
   store/
     sqlite.py           零依赖，默认
     postgres.py         §10.2 正式选型
+  plan.py               §12 M4 拓扑分层 / 可分解性 / 静态冲突（全确定性）
+  scheduler.py          §12 M4 并行调度 + 产出层冲突检测 + 仲裁
+  demo_composite.py     M4 出口场景：4 子任务 / 2 种 task_class / 并行度 2
+  bench/                §12 M2 参数实测（不参与生产链路）
+    tasks.py            M2 的 15 个任务 + M3 的 PROBE 对照 arm
+    runner.py           跑批 + 仪表化，只包装不改被测对象
+    analyze.py          从记录推参数：ROC / 分布 / 条件成功率 / PROBE 溢价
 ```
 
 ---
@@ -259,8 +421,9 @@ Subagent 的动作解析会崩在一个看似正常的响应上。
 
 | 项 | 状态 |
 |---|---|
-| M2 参数实测 | `policy.py` 六个值仍是猜测。需先建 10–20 个任务的固定任务集，每个跑 ≥5 次取分布 |
-| M3 `PROBE` 模式 | `Orchestrator` 显式抛 `NotImplementedError`，不半做 |
-| M4 并行与冲突检测 | 未做（风险 #7） |
-| M5 架构师自身验证 | 未做（风险 #3，文档自评最大缺口） |
+| M5a 架构师的停止判断 | 下一步。M2 归因：改规格没改坏过（0/25），但「该停时不停」——主动 `ABANDON` 仅 12%，80% 靠确定性上限兜住 |
+| M5b 拆解复核 | M2 数据测不到（bench 任务没有分解环节）。M4 的复合场景才是它的最小验证场景 |
 | M6 群聊界面层 | 未做。当前是 CLI + `--json` 结构化日志 |
+| M2 的两个遗留 | `soft_queue_threshold` / `soft_interval_s` 与 `step_soft_deadline_s` 都无代码读取，需决定接上还是删掉 |
+| PROBE 的收益 | 27 次探查 0 次命中。要标定收益，需要一个会可靠漂移的 `GENERATIVE` 任务 |
+| `e3_scope_bait` 任务 | 没按设计触发 `SCOPE_VIOLATION`，需重新设计（开发文档 §11.6g） |

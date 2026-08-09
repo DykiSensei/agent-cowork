@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import sqlite3
+import threading
 from typing import Any
 
 from ..types import (
@@ -94,15 +96,35 @@ def _dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
+def _synchronized(fn):
+    """把整个方法体（含 fetch）放进同一把锁。
+
+    M4 的并行调度让多个 Orchestrator 同时写同一个 store，而 sqlite3 连接不是
+    线程安全的。串行化访问的代价可以接受（写入量很小），静默的数据竞争不可以。
+    锁必须覆盖到 fetch —— 只锁 execute 的话，游标会在锁外回头碰连接。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+
+    return wrapper
+
+
 class SqliteStore:
     def __init__(self, path: str = ":memory:") -> None:
-        self.conn = sqlite3.connect(path)
+        # check_same_thread=False + 自己的锁：并行调度下连接必然跨线程使用，
+        # 线程亲和性检查挡不住真正的问题，只会把它变成 ProgrammingError。
+        self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
         self.conn.executescript(DDL)
         self.conn.commit()
 
     # -- tasks ------------------------------------------------------------- #
 
+    @_synchronized
     def save_task(self, state: TaskState) -> None:
         self.conn.execute(
             """INSERT INTO tasks (id, parent_id, revision, spec_json, status, agent_id,
@@ -148,16 +170,19 @@ class SqliteStore:
             started_at=r["started_at"],
         )
 
+    @_synchronized
     def load_task(self, task_id: str) -> TaskState | None:
         r = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return self._row_to_task(r) if r else None
 
+    @_synchronized
     def list_tasks(self) -> list[TaskState]:
         rows = self.conn.execute("SELECT * FROM tasks").fetchall()
         return [self._row_to_task(r) for r in rows]
 
     # -- checkpoints ------------------------------------------------------- #
 
+    @_synchronized
     def save_checkpoint(self, cp: Checkpoint) -> str:
         self.conn.execute(
             "INSERT INTO checkpoints (id, task_id, step, context_json, created_at) VALUES (?,?,?,?,?)",
@@ -166,6 +191,7 @@ class SqliteStore:
         self.conn.commit()
         return cp.id
 
+    @_synchronized
     def load_checkpoint(self, checkpoint_id: str) -> Checkpoint | None:
         r = self.conn.execute(
             "SELECT * FROM checkpoints WHERE id=?", (checkpoint_id,)
@@ -184,6 +210,7 @@ class SqliteStore:
 
     # -- signals ----------------------------------------------------------- #
 
+    @_synchronized
     def save_signal(self, sig: Signal) -> None:
         self.conn.execute(
             """INSERT INTO signals (id, task_id, level, type, source, payload_json,
@@ -206,6 +233,7 @@ class SqliteStore:
         )
         self.conn.commit()
 
+    @_synchronized
     def signals_for(self, task_id: str) -> list[Signal]:
         rows = self.conn.execute(
             "SELECT * FROM signals WHERE task_id=? ORDER BY created_at", (task_id,)
@@ -230,6 +258,7 @@ class SqliteStore:
 
     # -- decisions --------------------------------------------------------- #
 
+    @_synchronized
     def save_decision(self, dec: DecisionRecord) -> None:
         self.conn.execute(
             """INSERT INTO decisions (id, task_id, trigger_signal_ids, decider,
@@ -252,6 +281,7 @@ class SqliteStore:
         )
         self.conn.commit()
 
+    @_synchronized
     def decisions_for(self, task_id: str) -> list[DecisionRecord]:
         rows = self.conn.execute(
             "SELECT * FROM decisions WHERE task_id=? ORDER BY created_at", (task_id,)
@@ -281,6 +311,7 @@ class SqliteStore:
 
     # -- artifacts --------------------------------------------------------- #
 
+    @_synchronized
     def save_artifact(self, art: Artifact) -> None:
         self.conn.execute(
             """INSERT INTO artifacts (id, task_id, kind, content_ref, summary, created_at)
@@ -290,11 +321,13 @@ class SqliteStore:
         )
         self.conn.commit()
 
+    @_synchronized
     def load_artifact(self, artifact_id: str) -> Artifact | None:
         r = self.conn.execute(
             "SELECT * FROM artifacts WHERE id=?", (artifact_id,)
         ).fetchone()
         return Artifact.from_dict(dict(r)) if r else None
 
+    @_synchronized
     def close(self) -> None:
         self.conn.close()

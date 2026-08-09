@@ -35,6 +35,11 @@ class ToolResult:
     stderr: str = ""
     exit_code: int = 0
     detail: str = ""
+    # 失败了，但不是**任务级**失败。
+    # M2 实测发现的噪声源：Subagent 的第一个动作几乎总是 read_file 探一下产出文件在不在，
+    # 而「不在」被当成 TOOL_FAILURE 抢占，于是每个任务白烧一轮架构师决策（§11.6a）。
+    # 探测性查询返回否定答案是有效结果，不是故障 —— 结果照样回给模型，只是不产生硬信号。
+    hard_failure: bool = True
 
 
 class Sandbox:
@@ -65,10 +70,39 @@ class Sandbox:
         target.write_text(content, encoding="utf-8")
         return ToolResult(ok=True, detail=f"wrote {len(content)} chars to {path}")
 
+    def list_files(self, path: str = ".") -> ToolResult:
+        """列目录。
+
+        存在的理由是实测出来的：没有它，真实 agent 想探查工作区只能去调 `ls`，
+        然后撞 `allowed_binaries` 触发 `SCOPE_VIOLATION` —— M2 的 75 次运行里
+        这样假阳性了 23 次，占三成运行（§11.6f）。**工具面的缺口会变成
+        安全信号的噪声**，而噪声会淹没真正的越界。
+
+        只读操作，因此不受 scope 限制（scope 限制的是写），但仍受 workspace
+        边界限制。目录不存在按探测语义处理，不产生硬信号。
+        """
+        target = self._resolve_in_scope(path, write=False)
+        if not target.exists():
+            return ToolResult(
+                ok=False, exit_code=1, stderr=f"no such directory: {path}",
+                hard_failure=False,
+            )
+        if not target.is_dir():
+            return ToolResult(
+                ok=False, exit_code=1, stderr=f"not a directory: {path}",
+                hard_failure=False,
+            )
+        entries = sorted(
+            (p.name + "/" if p.is_dir() else p.name) for p in target.iterdir()
+        )
+        return ToolResult(ok=True, stdout="\n".join(entries), detail=f"{len(entries)} entries")
+
     def read_file(self, path: str) -> ToolResult:
         target = self._resolve_in_scope(path, write=False)
         if not target.exists():
-            return ToolResult(ok=False, exit_code=1, stderr=f"no such file: {path}")
+            return ToolResult(
+                ok=False, exit_code=1, stderr=f"no such file: {path}", hard_failure=False
+            )
         return ToolResult(ok=True, stdout=target.read_text(encoding="utf-8"))
 
     def run(self, command: list[str], timeout: float = 60.0) -> ToolResult:

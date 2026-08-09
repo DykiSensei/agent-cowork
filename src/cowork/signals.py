@@ -30,6 +30,10 @@ class SignalType(str, enum.Enum):
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     SCOPE_VIOLATION = "SCOPE_VIOLATION"
     HUMAN_INTERVENTION = "HUMAN_INTERVENTION"
+    # 与 L1 的 CONFLICT_SUSPECTED 是两回事：那条是 Subagent「怀疑」，
+    # 这条是调度器**确定性观测到**两个任务写了同一份产出（§12 M4 的 4.3）。
+    # §3.1 已确立软信号靠不住，冲突检测不能只依赖自报。
+    CONFLICT_DETECTED = "CONFLICT_DETECTED"
 
     # —— L1 软信号（§3.3）——
     AMBIGUITY = "AMBIGUITY"
@@ -49,6 +53,7 @@ HARD_SIGNALS: frozenset[SignalType] = frozenset(
         SignalType.BUDGET_EXCEEDED,
         SignalType.SCOPE_VIOLATION,
         SignalType.HUMAN_INTERVENTION,
+        SignalType.CONFLICT_DETECTED,
     }
 )
 
@@ -67,8 +72,10 @@ _RESOURCE_SIGNALS = frozenset(
     {SignalType.TIMEOUT, SignalType.STEP_LIMIT, SignalType.BUDGET_EXCEEDED}
 )
 
-# 人的介入视同硬信号（§2.4），任何 task_class 都必须能被抢占
-_ALWAYS = frozenset({SignalType.HUMAN_INTERVENTION})
+# 人的介入视同硬信号（§2.4），任何 task_class 都必须能被抢占。
+# 冲突同理：它由调度器在产出层确定性检出，与任务本身产不产生内容层判据无关 ——
+# GENERATIVE 类正因为没有内容层判据，才更需要这条兜底。
+_ALWAYS = frozenset({SignalType.HUMAN_INTERVENTION, SignalType.CONFLICT_DETECTED})
 
 
 def level_of(t: SignalType) -> SignalLevel:

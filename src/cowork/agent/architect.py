@@ -265,3 +265,18 @@ class Architect:
         passed, reason, tokens = self.backend.verify(spec, ctx)
         self.tokens_used += tokens
         return passed, reason
+
+    # -- PROBE 中间探查（§3.2.1）------------------------------------------- #
+
+    def probe(
+        self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]
+    ) -> tuple[bool, str, int]:
+        """主动看一眼中间产出。返回 (是否在轨, 理由, 本次 token)。
+
+        这是 `silence_policy=PROBE` 的全部内容：**没有信号不等于没有问题**，
+        对 GENERATIVE 类任务「无信号」是常态而非好消息（§3.2.1 的隐蔽失败模式）。
+        探查发起方是架构师，不等 Subagent 上报 —— Subagent 压根没有判据可报。
+        """
+        on_track, reason, tokens = self.backend.probe(spec, ctx, excerpts)
+        self.tokens_used += tokens
+        return on_track, reason, tokens
