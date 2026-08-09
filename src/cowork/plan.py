@@ -112,6 +112,43 @@ def _patterns_overlap(p: str, q: str) -> bool:
     return p == q or fnmatch.fnmatch(p, q) or fnmatch.fnmatch(q, p)
 
 
+def deterministic_review(root_goal: str, specs: list[TaskSpec]) -> list[PlanIssue]:
+    """拆解复核的免费那一半（§12 M5b）。
+
+    这些检查不需要模型，也因此**不会漏判自己**——它们查的是结构性缺陷：
+    子任务写不了任何东西、依赖悬空、有环、拆了等于没拆。
+    模型那一半（`Backend.review_decomposition`）查的是语义缺陷：
+    「满足这些验收标准是不是就等于完成了原始目标」，那个必须问模型。
+
+    先跑这一半：结构坏了就没必要花 token 问语义。
+    """
+    issues: list[PlanIssue] = []
+    if not specs:
+        return [PlanIssue("empty", "拆解产出为空", ())]
+
+    for s in specs:
+        if not s.scope:
+            issues.append(
+                PlanIssue("no_scope", f"子任务 {s.id} 没有 scope，它写不了任何东西", (s.id,))
+            )
+        if not s.acceptance:
+            # TaskSpec.__post_init__ 本来就拦，这里是双保险：拆解产出若绕过构造
+            issues.append(
+                PlanIssue("no_acceptance", f"子任务 {s.id} 没有验收标准（§4.1 硬约束）", (s.id,))
+            )
+        if not s.goal.strip():
+            issues.append(PlanIssue("empty_goal", f"子任务 {s.id} 的 goal 为空", (s.id,)))
+
+    try:
+        plan = build_plan(specs)
+    except PlanError as exc:
+        issues.append(PlanIssue("invalid_graph", str(exc), tuple(s.id for s in specs)))
+        return issues
+
+    issues.extend(plan.issues)
+    return issues
+
+
 def build_plan(specs: list[TaskSpec]) -> Plan:
     """拓扑分层 + 把有 scope 交集的并行任务串行化。
 

@@ -150,10 +150,15 @@ class ScriptedComposite:
 
     name = "scripted-composite"
 
-    def __init__(self, *, collide: bool = False, token_cost: int = 400) -> None:
+    def __init__(self, *, collide: bool = False, token_cost: int = 400,
+                 review_for=None) -> None:
         # collide=True 时 t2 会去写 t1 的文件，用来演示同层并行冲突
         self.collide = collide
         self.token_cost = token_cost
+        # review_for(root_goal, specs) -> (sufficient, missing)。默认「看不出问题」——
+        # 脚本后端不假装有语义判断力，语义复核的真实表现只能用真实模型测。
+        self.review_for = review_for
+        self.review_calls = 0
         self._cursor: dict[tuple[str, int], int] = {}
 
     def next_step(self, ctx: AgentContext) -> tuple[AgentAction, int]:
@@ -181,7 +186,7 @@ class ScriptedComposite:
     def triage(self, signals: list[Signal]) -> tuple[list[Triage], int]:
         return [Triage(s.id, "ignore", "scripted") for s in signals], 10
 
-    def decide_interrupt(self, spec, signals, ctx) -> tuple[ArchitectVerdict, int]:
+    def decide_interrupt(self, spec, signals, ctx, *, history=None) -> tuple[ArchitectVerdict, int]:
         return (
             ArchitectVerdict(
                 action="MODIFY_TASK",
@@ -201,14 +206,46 @@ class ScriptedComposite:
     def probe(self, spec, ctx, excerpts) -> tuple[bool, str, int]:
         return True, "脚本后端：中间产出默认在轨", 10
 
+    def review_decomposition(self, root_goal, specs) -> tuple[bool, list[str], int]:
+        self.review_calls += 1
+        if self.review_for is None:
+            return True, [], 20
+        sufficient, missing = self.review_for(root_goal, specs)
+        return sufficient, list(missing), 20
 
-def build(workspace: str | None = None, *, store=None, backend=None, log=print):
+
+ROOT_GOAL = (
+    "做一个把 'name,42' 这样的文本行渲染成 'name = 42' 报告的小工具："
+    "解析、格式化、组装成 render(lines) 接口，最后整体校验一遍。"
+)
+
+
+def build(
+    workspace: str | None = None,
+    *,
+    store=None,
+    backend=None,
+    log=print,
+    drop: str | None = None,
+):
+    """drop 传一个子任务 id 就把它从拆解里去掉 —— 用来验证拆解复核能不能发现遗漏。
+
+    这不是「模拟一个错误」，而是**制造一个真实的拆解缺陷**：少掉 t2_format 之后，
+    没有任何子任务的验收标准还覆盖「格式化」这一环，而原始目标里它是明写的。
+    """
     ws = build_workspace(workspace)
+    specs = [s for s in build_specs(ws) if s.id != drop]
+    if drop:
+        # 依赖也要跟着摘掉，否则拓扑排序会直接报「依赖不存在」，
+        # 那样测的就是图检查而不是语义复核了
+        specs = [s.bump(revision=1, depends_on=[d for d in s.depends_on if d != drop])
+                 for s in specs]
     sched = Scheduler(
-        build_specs(ws),
+        specs,
         backend=backend or ScriptedComposite(),
         store=store or SqliteStore(),
         human_gate=AutoApproveGate(),
+        root_goal=ROOT_GOAL,
         log=log,
     )
     return sched, ws

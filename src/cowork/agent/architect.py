@@ -12,9 +12,10 @@ from typing import Protocol
 
 from ..escalation import should_escalate
 from ..llm import ArchitectVerdict, Backend
+from ..plan import deterministic_review
 from ..policy import Policy
 from ..resume import choose_resume_mode
-from ..signals import SignalType
+from ..signals import SignalType, fingerprint
 from ..types import (
     Action,
     AgentContext,
@@ -34,6 +35,35 @@ class HumanRuling:
     action: Action
     rationale: str
     spec_changes: dict | None = None
+
+
+@dataclass
+class DecompositionReview:
+    """拆解复核的结果（§12 M5b）。
+
+    两半分开放是刻意的：`structural` 免费且不会漏判自己，`missing` 来自模型、
+    可能有假阳性也可能有假阴性。**混成一个布尔值会把两种可信度不同的证据抹平。**
+    """
+
+    structural: list
+    sufficient: bool
+    missing: list[str]
+    tokens: int = 0
+
+    @property
+    def clean(self) -> bool:
+        return not self.structural and self.sufficient
+
+    def to_dict(self) -> dict:
+        return {
+            "structural": [
+                {"kind": i.kind, "detail": i.detail, "tasks": list(i.tasks)}
+                for i in self.structural
+            ],
+            "sufficient": self.sufficient,
+            "missing": list(self.missing),
+            "tokens": self.tokens,
+        }
 
 
 class HumanGate(Protocol):
@@ -102,6 +132,11 @@ class Architect:
         self.human_gate = human_gate
         self.tokens_used = 0
         self._last_soft_consume = time.monotonic()
+        # 每个任务试过什么。M2 归因发现架构师**每次都在「第一次见到这个问题」的
+        # 状态下决策** —— decide_interrupt 的输入里既没有前几轮的裁决，也没有
+        # interrupt_count。这直接解释了实测里的 CONTINUE → CONTINUE → CONTINUE
+        # （§11.9b）。这份记录同时喂两个地方：确定性的「决策无效」判据，和模型提示词。
+        self._history: dict[str, list[dict]] = {}
 
     # -- 软信号消费（§3.4）-------------------------------------------------- #
 
@@ -171,11 +206,21 @@ class Architect:
                 resume_mode=ResumeMode.REBASE,
             )
 
-        verdict, tokens = self.backend.decide_interrupt(spec, signals, ctx)
+        history = self._history.setdefault(spec.id, [])
+        fp = fingerprint(signals)
+        streak = 1
+        for past in reversed(history):
+            if past["fingerprint"] != fp:
+                break
+            streak += 1
+
+        verdict, tokens = self.backend.decide_interrupt(spec, signals, ctx, history=history)
         self.tokens_used += tokens
         state.tokens_used += tokens
 
-        reason = should_escalate(self.policy, spec, state, signals, verdict)
+        reason = should_escalate(
+            self.policy, spec, state, signals, verdict, identical_streak=streak
+        )
         decider = Decider.LLM
         escalation_reason = None
         rationale = verdict.rationale
@@ -224,6 +269,14 @@ class Architect:
             new_spec = spec
             resume_mode = ResumeMode.RESUME if action is Action.CONTINUE else ResumeMode.RESTART
 
+        history.append(
+            {
+                "fingerprint": fp,
+                "signals": sorted({s.type.value for s in signals}),
+                "action": action.value,
+                "rationale": rationale[:300],
+            }
+        )
         return DecisionRecord(
             task_id=spec.id,
             trigger=[s.id for s in signals],
@@ -265,6 +318,29 @@ class Architect:
         passed, reason, tokens = self.backend.verify(spec, ctx)
         self.tokens_used += tokens
         return passed, reason
+
+    # -- 拆解复核（§12 M5b）------------------------------------------------- #
+
+    def review_decomposition(self, root_goal: str, specs: list[TaskSpec]) -> DecompositionReview:
+        """复核一个拆解：先确定性检查，结构没坏再花 token 问语义。
+
+        风险 #3 的第一个防护。它防的是「架构师是唯一没被验证的环节」里
+        **拆解**那一半 —— 中断决策那一半由 §7.2 的确定性下限和 M5a 的停滞判据管。
+
+        必须说清楚的局限：**复核者和拆解者是同一个模型**。这只是「同一个脑子换个
+        问法再想一遍」，不是独立复核。真正的独立需要另一个供应商或人（§11.10）。
+        """
+        issues = deterministic_review(root_goal, specs)
+        if any(i.kind in ("empty", "invalid_graph", "no_scope", "no_acceptance") for i in issues):
+            # 结构就是坏的，语义复核没有意义，也不该为它花 token
+            return DecompositionReview(structural=issues, sufficient=False,
+                                       missing=["结构性缺陷未修复，跳过语义复核"], tokens=0)
+
+        sufficient, missing, tokens = self.backend.review_decomposition(root_goal, specs)
+        self.tokens_used += tokens
+        return DecompositionReview(
+            structural=issues, sufficient=sufficient, missing=missing, tokens=tokens
+        )
 
     # -- PROBE 中间探查（§3.2.1）------------------------------------------- #
 

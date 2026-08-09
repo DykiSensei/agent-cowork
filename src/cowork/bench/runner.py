@@ -79,9 +79,9 @@ class _TimedBackend:
         )
         return out, tokens
 
-    def decide_interrupt(self, spec, signals, ctx):
+    def decide_interrupt(self, spec, signals, ctx, *, history=None):
         t0 = time.monotonic()
-        verdict, tokens = self._inner.decide_interrupt(spec, signals, ctx)
+        verdict, tokens = self._inner.decide_interrupt(spec, signals, ctx, history=history)
         self._record("decide_interrupt", t0, tokens)
         return verdict, tokens
 

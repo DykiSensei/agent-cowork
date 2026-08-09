@@ -82,6 +82,27 @@ def level_of(t: SignalType) -> SignalLevel:
     return SignalLevel.L0 if t in HARD_SIGNALS else SignalLevel.L1
 
 
+def fingerprint(signals) -> str:
+    """一组中断信号的指纹：类型 + 证据内容的哈希。
+
+    用途见 §7.2 的「决策无效」判据：如果连续两次中断的指纹完全相同，
+    说明架构师上一次的决策**没有改变现实** —— 它做了动作，世界没变。
+    这是把「架构师无效」从主观判断变成确定性观测的唯一办法（§11.9a）。
+
+    对证据取哈希而不是留原文，是因为它要进 DecisionRecord 和日志：
+    raw_evidence 可能很长，也可能含第三方错误体。哈希短、可比、不泄露。
+    类型排序后拼接，保证同一组信号不因顺序不同而指纹不同。
+    """
+    import hashlib
+
+    parts = []
+    for s in sorted(signals, key=lambda x: (x.type.value, x.id)):
+        ev = (s.raw_evidence or "").strip()
+        digest = hashlib.sha256(ev.encode("utf-8")).hexdigest()[:12]
+        parts.append(f"{s.type.value}:{digest}")
+    return "|".join(parts)
+
+
 def default_hard_signals(task_class: str) -> frozenset[SignalType]:
     """§3.2.1：不同 task_class 能产生的硬信号差别极大。
 

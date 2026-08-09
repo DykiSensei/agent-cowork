@@ -27,15 +27,19 @@ class ScriptedBackend:
         verdict_for: Callable[[TaskSpec, list[Signal]], ArchitectVerdict] | None = None,
         triage_for: Callable[[Signal], str] | None = None,
         probe_for: Callable[[TaskSpec, AgentContext], tuple[bool, str]] | None = None,
+        review_for: Callable[[str, list], tuple[bool, list[str]]] | None = None,
         token_cost: int = 500,
     ) -> None:
         self.steps = steps
         self.verdict_for = verdict_for
         self.triage_for = triage_for or (lambda s: "escalate")
         self.probe_for = probe_for
+        self.review_for = review_for
         self.token_cost = token_cost
         self._cursor: dict[int, int] = {}
         self.probe_calls = 0
+        self.review_calls = 0
+        self.decide_history: list[dict] = []
 
     # -- Subagent ---------------------------------------------------------- #
 
@@ -57,8 +61,14 @@ class ScriptedBackend:
         return out, self.token_cost // 10 * max(1, len(signals))
 
     def decide_interrupt(
-        self, spec: TaskSpec, signals: list[Signal], ctx: AgentContext
+        self,
+        spec: TaskSpec,
+        signals: list[Signal],
+        ctx: AgentContext,
+        *,
+        history: list[dict] | None = None,
     ) -> tuple[ArchitectVerdict, int]:
+        self.decide_history = list(history or [])  # 测试用：确认历史真的传进来了
         if self.verdict_for is None:
             return (
                 ArchitectVerdict(
@@ -76,6 +86,15 @@ class ScriptedBackend:
 
     def verify(self, spec: TaskSpec, ctx: AgentContext) -> tuple[bool, str, int]:
         return True, "脚本后端：非机器可检项默认通过", self.token_cost // 10
+
+    def review_decomposition(
+        self, root_goal: str, specs: list[TaskSpec]
+    ) -> tuple[bool, list[str], int]:
+        self.review_calls += 1
+        if self.review_for is None:
+            return True, [], self.token_cost // 5
+        sufficient, missing = self.review_for(root_goal, specs)
+        return sufficient, list(missing), self.token_cost // 5
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]

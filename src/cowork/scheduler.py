@@ -44,6 +44,7 @@ class CompositeResult:
     results: dict[str, RunResult] = field(default_factory=dict)
     conflicts: list[Signal] = field(default_factory=list)
     arbitrations: list[dict] = field(default_factory=list)
+    review: Any = None
     wall_seconds: float = 0.0
 
     @property
@@ -70,6 +71,7 @@ class CompositeResult:
             },
             "conflicts": [s.to_dict() for s in self.conflicts],
             "arbitrations": self.arbitrations,
+            "review": self.review.to_dict() if self.review else None,
         }
 
 
@@ -83,9 +85,14 @@ class Scheduler:
         policy: Policy = DEFAULT_POLICY,
         human_gate: HumanGate | None = None,
         max_parallel: int = 4,
+        root_goal: str | None = None,
         log: Callable[[str], None] = print,
     ) -> None:
         self.specs = list(specs)
+        # 有原始目标才谈得上「拆解复核」—— 复核问的是「这些子任务合起来
+        # 等不等于它」。没给就跳过语义复核，只做结构检查（§12 M5b）。
+        self.root_goal = root_goal
+        self.review: "DecompositionReview | None" = None
         self.backend = backend
         self.store = store
         self.policy = policy
@@ -107,6 +114,18 @@ class Scheduler:
 
         for issue in self.plan.issues:
             self.log(f"[PLAN] {issue.kind}: {issue.detail} {list(issue.tasks)}")
+
+        # 拆解复核放在**派发之前**：拆错了就不该开跑，跑完再发现就白烧了。
+        if self.root_goal:
+            self.review = self.architect.review_decomposition(self.root_goal, self.specs)
+            result.review = self.review
+            for i in self.review.structural:
+                self.log(f"[REVIEW] 结构 {i.kind}: {i.detail} {list(i.tasks)}")
+            if self.review.sufficient:
+                self.log("[REVIEW] 验收标准反推：覆盖完整")
+            else:
+                for m in self.review.missing:
+                    self.log(f"[REVIEW] 可能遗漏: {m}")
 
         for i, layer in enumerate(self.plan.layers, start=1):
             self.log(

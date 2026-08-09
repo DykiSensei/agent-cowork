@@ -5,15 +5,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 多 Agent 协作系统原型。**设计文档是主线，代码是它的实现** —— 动代码前先看
 `多Agent协作系统-开发文档.md`，动完之后回去更新它。
 
-当前：M2 / M3 / M4 已完成，下一步 M5a（架构师的停止判断）。路线图见文档 §12。
-`policy.py` 的参数已有实测依据（§11.6 / §11.7），改它们之前先跑 `bench`，别凭感觉调。
+当前：M2–M5 已完成，**下一步 M7（拆解三角色：生成者 / 复核者 / 人）**，方案已定稿在文档 §12 M7。
+`policy.py` 的参数已有实测依据（§11.6 / §11.7 / §11.9），改它们之前先跑 `bench`，别凭感觉调。
+
+M7 的三条要点，动手前先看 §12 M7 全文：
+
+- **只有生成者有写权**。复核者是顾问、人是仲裁者 —— §2.3 的「唯一写入决策点」不变。
+  给复核者驳回或改写 spec 的能力 = 两个写入点 = 不变量破了。
+- **拆解层和执行层的循环同构**（生成→复核→重生成≤N→升级给人 ≙ 派发→验收→REBASE→超上限→升级给人）。
+  复用 `escalation.py` / `policy.py`，**发现自己在写平行逻辑就是方向错了**。
+- **先做 7.1+7.2（跨模型复核对照）再建生成侧**：它验证整个阶段的前提「独立复核有没有用」。
+  前提不成立的话生成侧要换设计。
 
 ## 命令
 
 ```bash
 docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 14 个测试会 skip（不是失败）
-python -m unittest discover -s tests -t . # 147 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 174 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -82,8 +91,11 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
 - **硬信号只在 `interrupted()` 里产生**，所以 `loop.py` 里 `return interrupted(...)`
   的每一处就是硬信号的完整清单，加信号类型从这里入手。
 - **决策权分两段**：`escalation.should_escalate()` 先做不经 LLM 的确定性判断
-  （超中断上限、scope 越界、顶层 MODIFY_TASK、不可逆命令…），命中就交 `HumanGate`；
-  没命中才看 LLM 自评的 `complexity_score` 是否低于 `policy.complexity_threshold`。
+  （超中断上限、**信号指纹重复**、scope 越界、**任何 ABANDON**、顶层 MODIFY_TASK、
+  不可逆命令…），命中就交 `HumanGate`；没命中才看 LLM 自评的 `complexity_score`。
+- **架构师记得自己试过什么**（M5a）。`Architect._history` 按任务存 (指纹, 动作, 理由)，
+  同时喂两处：确定性的「决策无效」判据，和 `decide_interrupt(history=...)` 的提示词。
+  没有它的话架构师每次都在「第一次见到这个问题」的状态下决策。
 - **恢复模式不是模型选的**，`resume.choose_resume_mode()` 按新旧 spec 的差异算：
   goal 没变 → RESUME / REBASE，goal 实质变了且 produced 无用 → RESTART。
 - **三种收尾都不是异常**：`ABANDON` → ABANDONED；架构师调不动模型、缺 `resume_mode`、
@@ -147,6 +159,14 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
 - **并行要求存储层可并发**。`sqlite3` 连接不是线程安全的，现在是
   `check_same_thread=False` + 方法级 `RLock`，锁必须覆盖到 `fetch`
   （只锁 `execute` 的话游标会在锁外回头碰连接）。
+- **改提示词必须两侧都测**。M5a 第一版把 `ABANDON` 的判据写宽了，不可解任务上
+  主动放弃 12%→96% 看着是大胜，可解任务完成率同时从 81% 塌到 56%、
+  `MULTI_REBASE` 归零 —— 它不是判别力变强，是**无差别放弃**。
+  **提示词只能调偏置；要判别力得让它先分辨证据的性质**（重写后 Youden J 0.12→0.60）。
+  改任何影响「继续还是停」的东西，正例反例都要跑。
+- **确定性护栏是兜底不是主力**。停滞判据在「无差别放弃」那版只命中 1 次，
+  在平衡版命中 17 次 —— 提示词走极端时护栏根本没机会触发。别拿护栏的命中数
+  当改动生效的证据。
 
 ## 密钥
 

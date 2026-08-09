@@ -144,11 +144,34 @@ ARCHITECT_SYSTEM = """你是架构师，是系统里唯一的写入决策点。
 - CONTINUE     瞬时故障，原样重试
 - MODIFY_TASK  规格不清或前提变化，需要改 TaskSpec
 - REASSIGN     换个 Subagent 重做
-- ABANDON      方向错误，放弃
+- ABANDON      继续下去不可能成功，停下来等人
+
+**先判断证据的性质，再选动作。这一步不能跳过：**
+
+**证据具体、指向一个可修补的规格缺口 → MODIFY_TASK。**
+「某个用例期望 X 实际得到 Y」这类信息本身就说明了缺什么。这是最常见的情形，
+也是这个系统存在的意义：把失败信号变成更清楚的规格。**不要因为失败了就放弃。**
+
+**证据具体，但问题在实现而不在规格 → CONTINUE 或 REASSIGN。**
+规格没毛病，Subagent 没做对，再来一次即可。
+
+**只有同时满足下面两条才选 ABANDON：**
+
+1. 继续下去不可能成功 —— 证据为空（失败了却没留下任何可依据的信息）、
+   验收标准自相矛盾、或者缺的东西在任务范围内根本拿不到（依赖不存在、权限不够）；
+2. **且**改 TaskSpec 也解决不了 —— 你能想出的任何规格修改都只是猜测。
+
+第 2 条是关键：能靠改规格推进就不要放弃。放弃意味着这个任务要占用人的时间，
+而人的时间比 token 贵得多。反过来，**在没有依据的情况下反复改规格更糟** ——
+那是在拿猜测覆盖原本清楚的要求。
+
+如果上面给了你此前的裁决记录：同样的信号在你改过规格之后又原样出现了，
+说明那次修改没有奏效，此时才轮到第 2 条成立。
 
 complexity_score 是你对这次决策复杂度的自评（0.0~1.0）。诚实评估：
 高分会触发升级给人。注意你**不知道自己不知道什么**，涉及不可逆操作、
 反复中断、触及顶层任务意图时，即使你觉得简单也应给高分。
+证据为空却要改规格，是最该给高分的情形。
 
 MODIFY_TASK 时，new_goal 留空表示目标不变（只改验收标准/范围），
 added_criteria 是要补充的验收标准。"""
@@ -167,6 +190,40 @@ PROBE_SYSTEM = """你在做中途探查（PROBE），不是验收。
 内容与 goal 无关。**不要**因为「还没写完」「篇幅不够」「不够完善」判 off_track，
 那是验收的事，不是探查的事。拿不准就判在轨——误报的代价是白打断一次。"""
 
+REVIEW_SYSTEM = """你在复核一个任务拆解，用的方法是**验收标准反推**。
+
+给你：一个原始目标，和拆解出来的若干子任务（每个带自己的验收标准）。
+
+只回答一个问题：**假设所有子任务的验收标准都满足了，原始目标是不是就算完成了？**
+
+不要评价拆解得好不好、粒度合不合适、能不能更优雅 —— 那些都是意见。
+只找**客观的缺口**：原始目标里有、而所有子任务的验收标准合起来仍然覆盖不到的东西。
+
+典型缺口：目标要求的某个产物没有任何子任务负责；子任务之间的衔接没有人验收；
+目标里的某个限定词（性能、格式、兼容性）在所有验收标准里都找不到对应。
+
+没有缺口就回答 sufficient=true、missing 留空数组。**不要为了显得有用而编缺口。**"""
+
+REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "sufficient": {"type": "boolean"},
+        "missing": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["sufficient", "missing"],
+    "additionalProperties": False,
+}
+
+
+def _render_review_context(root_goal: str, specs: list[TaskSpec]) -> str:
+    parts = [f"# 原始目标\n{root_goal}", "# 拆解出的子任务"]
+    for s in specs:
+        deps = f"（依赖 {', '.join(s.depends_on)}）" if s.depends_on else ""
+        criteria = "\n".join(f"    - {c.id}: {c.description}" for c in s.acceptance)
+        parts.append(f"## {s.id} {deps}\n  目标：{s.goal}\n  验收标准：\n{criteria}")
+    return "\n\n".join(parts)
+
+
 PROBE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -176,6 +233,45 @@ PROBE_SCHEMA: dict[str, Any] = {
     "required": ["on_track", "reason"],
     "additionalProperties": False,
 }
+
+
+def _render_architect_context(
+    spec: TaskSpec,
+    signals: list[Signal],
+    ctx: AgentContext,
+    history: list[dict] | None = None,
+) -> str:
+    """架构师的中断决策上下文。
+
+    `# 你此前对这个任务的裁决` 这一段是 M5a 加的。没有它，架构师每次都在
+    「第一次见到这个问题」的状态下决策 —— M2 实测里 `e1_silent_failure` 五次运行
+    全是 CONTINUE / REASSIGN 轮流试、一次 ABANDON 都没有（§11.9b）。
+    它不保证架构师会做对，只是让它**有机会**发现自己在原地打转。
+    """
+    evidence = "\n\n".join(
+        f"[{s.type.value}] payload={json.dumps(s.payload, ensure_ascii=False)}\n"
+        f"证据:\n{(s.raw_evidence or '') [:4000] or '（空 —— 这次失败没有留下任何证据）'}"
+        for s in signals
+    )
+    parts = [
+        f"TaskSpec:\n{json.dumps(spec.to_dict(), ensure_ascii=False, indent=2)}",
+        f"触发信号:\n{evidence}",
+    ]
+    if history:
+        lines = []
+        for i, h in enumerate(history, start=1):
+            lines.append(
+                f"{i}. 信号 {'/'.join(h['signals'])} -> 你选了 {h['action']}：{h['rationale']}"
+            )
+        parts.append(
+            "你此前对这个任务的裁决（第 "
+            + str(len(history) + 1)
+            + " 次中断）:\n"
+            + "\n".join(lines)
+            + "\n\n如果同样的信号又出现了，说明上一次的裁决没有奏效。**不要重复它**。"
+        )
+    parts.append("已产出:\n" + ("\n".join(f"- {a.content_ref}" for a in ctx.produced) or "（无）"))
+    return "\n\n".join(parts)
 
 
 def _render_probe_context(spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]) -> str:
@@ -297,18 +393,14 @@ class AnthropicBackend:
         )
 
     def decide_interrupt(
-        self, spec: TaskSpec, signals: list[Signal], ctx: AgentContext
+        self,
+        spec: TaskSpec,
+        signals: list[Signal],
+        ctx: AgentContext,
+        *,
+        history: list[dict] | None = None,
     ) -> tuple[ArchitectVerdict, int]:
-        evidence = "\n\n".join(
-            f"[{s.type.value}] payload={json.dumps(s.payload, ensure_ascii=False)}\n"
-            f"证据:\n{(s.raw_evidence or '')[:4000]}"
-            for s in signals
-        )
-        user = (
-            f"TaskSpec:\n{json.dumps(spec.to_dict(), ensure_ascii=False, indent=2)}\n\n"
-            f"触发信号:\n{evidence}\n\n"
-            f"已产出:\n" + "\n".join(f"- {a.content_ref}" for a in ctx.produced)
-        )
+        user = _render_architect_context(spec, signals, ctx, history)
         data, tokens = self._call(
             model=self.architect_model,
             system=ARCHITECT_SYSTEM,
@@ -370,6 +462,19 @@ class AnthropicBackend:
             },
         )
         return data["passed"], data["reason"], tokens
+
+    def review_decomposition(
+        self, root_goal: str, specs: list[TaskSpec]
+    ) -> tuple[bool, list[str], int]:
+        # 用架构师主模型：这是「找出自己可能漏掉的东西」，属于需要推理的判断，
+        # 不是分诊那种廉价过滤。它只在拆解时跑一次，成本可接受（§12 M5 的候选方案表）。
+        data, tokens = self._call(
+            model=self.architect_model,
+            system=REVIEW_SYSTEM,
+            user=_render_review_context(root_goal, specs),
+            schema=REVIEW_SCHEMA,
+        )
+        return data["sufficient"], list(data["missing"]), tokens
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]

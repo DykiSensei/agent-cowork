@@ -33,6 +33,13 @@ class Policy:
     # 这是六个参数里唯一实测支持保留原值的（§11.6c）。
     max_interrupts: int = 3
 
+    # §7.2 决策无效：连续几次「同样的信号 + 同样的证据」就强制升级。
+    # 依据：M2 归因（§12 M5）显示架构师的失效形态是「该停时不停」——
+    # ESCALATE 类 25 次运行里主动 ABANDON 只有 3 次，80% 靠上限兜住，
+    # 而 e1_silent_failure（架构师手上零证据）5 次运行全程没 ABANDON 过。
+    # 取 2 而不是 3：同一个办法试第二次就该停了，第三次是纯浪费。
+    max_identical_interrupts: int = 2
+
     # 依据：0.8 几乎买不到提前量 —— 越线后中位只剩 0 token 就到终局了，等于事后
     # 通知。0.6 能提前约 4.8k token 发现，而误升级（最终本来会成功的运行）
     # 从 75 次里只增加 1 次。注意这是**应用层软限制**，实测中一次都没真正触发过
@@ -41,6 +48,9 @@ class Policy:
 
     escalate_on_scope_violation: bool = True
     escalate_on_toplevel_modify: bool = True
+    # 放弃对该任务不可逆，按 §7.2 第 1 条同理该由人拍板。M5a 之后架构师更愿意
+    # 放弃了（误放弃率 20%），这条把误放弃的后果从「任务没了」降级成「打扰人一次」。
+    escalate_on_abandon: bool = True
     irreversible_markers: tuple[str, ...] = (
         "rm", "del", "rmdir", "deploy", "push", "publish",
         "curl", "wget", "ssh", "kubectl", "terraform", "pay",

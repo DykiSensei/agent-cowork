@@ -19,13 +19,29 @@ def deterministic_escalation(
     state: TaskState,
     signals: list[Signal],
     verdict: ArchitectVerdict | None = None,
+    *,
+    identical_streak: int = 1,
 ) -> str | None:
-    """命中任一条则返回升级理由；否则返回 None。"""
+    """命中任一条则返回升级理由；否则返回 None。
+
+    identical_streak：本次中断的信号指纹已经连续出现第几次（含本次）。
+    由架构师算好传进来 —— 这个模块不持有状态。
+    """
 
     # 1. 决策涉及不可逆操作：影响面不可回滚，与 LLM 的自信程度无关
     marker = _irreversible_marker(policy, spec, verdict)
     if marker:
         return f"决策涉及不可逆操作（命中标记 {marker!r}）"
+
+    # 1b. 决策无效：同样的信号、同样的证据又来了一遍，说明上一次决策没有改变现实。
+    # 这条比下面的 interrupt_count 更早也更准 —— 它区分「试了三次不同的办法」
+    # 和「同一个办法试了三次」。M2 实测显示后者是架构师的主要失效形态（§11.9a）：
+    # 没有证据可依时它不会停，只会在 CONTINUE / REASSIGN / MODIFY_TASK 之间轮流试。
+    if identical_streak >= policy.max_identical_interrupts:
+        return (
+            f"连续 {identical_streak} 次中断的信号指纹完全相同"
+            f"（阈值 {policy.max_identical_interrupts}），上一次决策没有改变现实"
+        )
 
     # 2. 反复中断说明 LLM 没找到根因，再让它试是浪费
     if state.interrupt_count >= policy.max_interrupts:
@@ -33,6 +49,18 @@ def deterministic_escalation(
             f"同一 task 的 interrupt_count 已达 {state.interrupt_count}"
             f"（阈值 {policy.max_interrupts}）"
         )
+
+    # 2b. 放弃对这个任务而言是不可逆的 —— 按第 1 条同样的道理，它该由人拍板。
+    # M5a 实测的代价面：让架构师更愿意放弃之后，可解任务上出现 20% 的误放弃
+    # （§11.9c）。这条把「误放弃」的后果从「任务没了」降级成「打扰人一次」。
+    # 注意在 AutoApproveGate 下这条**看不出效果**（网关直接采纳 LLM 裁决），
+    # 它改变的是真实介入配置下的行为，因此实测数据无法验证它 —— 依据是结构性的。
+    if (
+        policy.escalate_on_abandon
+        and verdict is not None
+        and verdict.action == "ABANDON"
+    ):
+        return "决策是 ABANDON —— 放弃对该任务不可逆，需人确认"
 
     # 3. 触及用户原始意图
     if (
@@ -80,9 +108,13 @@ def should_escalate(
     state: TaskState,
     signals: list[Signal],
     verdict: ArchitectVerdict,
+    *,
+    identical_streak: int = 1,
 ) -> str | None:
     """确定性下限 OR LLM 自评超阈值。"""
-    hard = deterministic_escalation(policy, spec, state, signals, verdict)
+    hard = deterministic_escalation(
+        policy, spec, state, signals, verdict, identical_streak=identical_streak
+    )
     if hard:
         return hard
     if verdict.complexity_score >= policy.complexity_threshold:

@@ -350,6 +350,76 @@ def budget_ratio(recs: list[dict]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# M5a：架构师的停止判断
+# --------------------------------------------------------------------------- #
+
+
+def stopping_behavior(recs: list[dict]) -> dict[str, Any]:
+    """在「本来就不该做完」的任务上，是谁把它停下来的（§11.9）。
+
+    这是 M5a 的核心度量。区分两种停止：
+
+      **架构师自己判断该停**（ABANDON）—— 决策能力起作用了
+      **被 policy 的计数器兜住**（FAILED / AWAITING_HUMAN）—— 决策能力没起作用
+
+    M2 的基线是 3/25 主动 ABANDON、20/25 靠上限兜住。这个函数就是拿来跟它比的。
+    """
+    esc = [r for r in recs if r.get("category") == "ESCALATE" and not r["error"]]
+    if not esc:
+        return {"runs": 0}
+
+    decisions = [d for r in esc for d in r["decisions"]]
+    stall = [
+        d for d in decisions
+        if (d.get("escalation_reason") or "").startswith("连续")
+    ]
+    return {
+        "runs": len(esc),
+        "status": dict(Counter(r["status"] for r in esc)),
+        "self_abandon": sum(1 for r in esc if r["status"] == "ABANDONED"),
+        "capped": sum(1 for r in esc if r["status"] in ("FAILED", "AWAITING_HUMAN")),
+        "completed": sum(1 for r in esc if r["completed"]),
+        "interrupts": _dist([r["interrupts"] for r in esc]),
+        "tokens": _dist([r["tokens"] for r in esc]),
+        "decisions_total": len(decisions),
+        "actions": dict(Counter(d["action"] for d in decisions)),
+        # M5a 新增的确定性判据命中了几次
+        "stall_rule_hits": len(stall),
+        "escalation_kinds": dict(Counter(d["escalation_kind"] for d in decisions)),
+    }
+
+
+def compare_stopping(before: list[dict], after: list[dict]) -> str:
+    """M5a 的前后对比报告。样本都是 25 次，差异要按这个量级读。"""
+    b, a = stopping_behavior(before), stopping_behavior(after)
+    if not b.get("runs") or not a.get("runs"):
+        return "两侧都需要 ESCALATE 类的运行记录"
+
+    def pct(x, n):
+        return f"{x}/{n} = {x / n:.0%}" if n else "-"
+
+    lines = [
+        f"ESCALATE 类运行：before {b['runs']} / after {a['runs']}",
+        "",
+        f"  架构师主动 ABANDON   {pct(b['self_abandon'], b['runs'])}"
+        f"   ->   {pct(a['self_abandon'], a['runs'])}",
+        f"  被确定性上限兜住     {pct(b['capped'], b['runs'])}"
+        f"   ->   {pct(a['capped'], a['runs'])}",
+        f"  误完成（本不该做完） {pct(b['completed'], b['runs'])}"
+        f"   ->   {pct(a['completed'], a['runs'])}",
+        "",
+        f"  中断次数中位         {b['interrupts'].get('p50')} -> {a['interrupts'].get('p50')}",
+        f"  token 中位           {b['tokens'].get('p50'):.0f} -> {a['tokens'].get('p50'):.0f}",
+        f"  决策总数             {b['decisions_total']} -> {a['decisions_total']}",
+        "",
+        f"  动作分布 before      {b['actions']}",
+        f"  动作分布 after       {a['actions']}",
+        f"  「决策无效」判据命中  {b['stall_rule_hits']} -> {a['stall_rule_hits']}",
+    ]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
 # M3：PROBE 的成本溢价
 # --------------------------------------------------------------------------- #
 

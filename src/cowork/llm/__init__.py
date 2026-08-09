@@ -46,9 +46,19 @@ class Backend(Protocol):
         ...
 
     def decide_interrupt(
-        self, spec: TaskSpec, signals: list[Signal], ctx: AgentContext
+        self,
+        spec: TaskSpec,
+        signals: list[Signal],
+        ctx: AgentContext,
+        *,
+        history: list[dict] | None = None,
     ) -> tuple[ArchitectVerdict, int]:
-        """架构师主模型：完整中断决策。"""
+        """架构师主模型：完整中断决策。
+
+        history 是**本任务此前的裁决记录**（每条含信号类型、动作、理由）。
+        没有它的话架构师每次都在「第一次见到这个问题」的状态下决策 ——
+        M2 实测里 CONTINUE → CONTINUE → CONTINUE 的循环就是这么来的（§11.9b）。
+        """
         ...
 
     def summarize(self, ctx: AgentContext) -> tuple[str, int]:
@@ -57,6 +67,20 @@ class Backend(Protocol):
 
     def verify(self, spec: TaskSpec, ctx: AgentContext) -> tuple[bool, str, int]:
         """架构师验收非机器可检的验收标准。"""
+        ...
+
+    def review_decomposition(
+        self, root_goal: str, specs: list[TaskSpec]
+    ) -> tuple[bool, list[str], int]:
+        """拆解复核（§12 M5b）：**验收标准反推**。
+
+        问一个问题：满足这些子任务的全部验收标准，是不是就等于完成了原始目标？
+        这个方向是刻意的 —— 正向问「这个拆解好不好」得到的是复述，
+        反推问「按这些标准验收完，还缺什么」才逼出遗漏。
+
+        返回 (是否充分, 缺失项列表, token)。**复核者不能是拆解者本身**的问题
+        在这里没有解决：当前实现用同一个 backend 的另一次调用（§11.10 的局限）。
+        """
         ...
 
     def probe(

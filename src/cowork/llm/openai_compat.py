@@ -33,12 +33,16 @@ from .anthropic_backend import (
     ARCHITECT_SYSTEM,
     PROBE_SCHEMA,
     PROBE_SYSTEM,
+    REVIEW_SCHEMA,
+    REVIEW_SYSTEM,
     SUBAGENT_SYSTEM,
     TRIAGE_SCHEMA,
     TRIAGE_SYSTEM,
     VERDICT_SCHEMA,
     _parse_action,
+    _render_architect_context,
     _render_probe_context,
+    _render_review_context,
     _render_subagent_context,
 )
 
@@ -187,18 +191,14 @@ class OpenAICompatBackend:
         )
 
     def decide_interrupt(
-        self, spec: TaskSpec, signals: list[Signal], ctx: AgentContext
+        self,
+        spec: TaskSpec,
+        signals: list[Signal],
+        ctx: AgentContext,
+        *,
+        history: list[dict] | None = None,
     ) -> tuple[ArchitectVerdict, int]:
-        evidence = "\n\n".join(
-            f"[{s.type.value}] payload={json.dumps(s.payload, ensure_ascii=False)}\n"
-            f"证据:\n{(s.raw_evidence or '')[:4000]}"
-            for s in signals
-        )
-        user = (
-            f"TaskSpec:\n{json.dumps(spec.to_dict(), ensure_ascii=False, indent=2)}\n\n"
-            f"触发信号:\n{evidence}\n\n"
-            "已产出:\n" + "\n".join(f"- {a.content_ref}" for a in ctx.produced)
-        )
+        user = _render_architect_context(spec, signals, ctx, history)
         data, tokens = self._call(
             model=self.architect_model,
             system=ARCHITECT_SYSTEM,
@@ -259,6 +259,17 @@ class OpenAICompatBackend:
             },
         )
         return data["passed"], data["reason"], tokens
+
+    def review_decomposition(
+        self, root_goal: str, specs: list[TaskSpec]
+    ) -> tuple[bool, list[str], int]:
+        data, tokens = self._call(
+            model=self.architect_model,
+            system=REVIEW_SYSTEM,
+            user=_render_review_context(root_goal, specs),
+            schema=REVIEW_SCHEMA,
+        )
+        return data["sufficient"], list(data["missing"]), tokens
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]
