@@ -29,9 +29,10 @@ model_list:
       model: deepseek/deepseek-reasoner
       api_key: os.environ/DEEPSEEK_API_KEY
 
-  - model_name: kimi-k2
+  # Moonshot 的 model id 改得比较勤，先用 /v1/models 查当前账号可用的
+  - model_name: kimi-k3
     litellm_params:
-      model: moonshot/kimi-k2-0711-preview
+      model: moonshot/kimi-k3
       api_key: os.environ/MOONSHOT_API_KEY
 
 general_settings:

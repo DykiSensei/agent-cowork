@@ -1,7 +1,15 @@
-"""v0.1 演示场景：一个 CODE 类任务走完 TEST_FAILED -> 中断 -> REBASE -> 恢复。
+"""演示场景：一个 CODE 类任务走完 TEST_FAILED -> 中断 -> REBASE -> 恢复。
 
-故事线（对应 MAST 里「规格不清 42%」那一类失败）：
-  rev1  Subagent 写了朴素实现，没意识到需要归一化 -> verify.py 失败 -> TEST_FAILED
+**场景设计的要害**：验收标准里藏着一条 goal 没写的项目约定——「空串不算回文」。
+这条任何模型都推断不出来，只能靠失败信号发现。这不是刁难，正是 MAST 里
+「规格不清 42%」的典型形态：规格的缺失部分只在验收时才暴露。
+
+早期版本把「需要归一化大小写与标点」当作隐藏项，M1.3 实测发现真实模型
+（DeepSeek）会直接写对，三次运行零中断——场景对真实模型失去了区分度。
+换成不可推断的约定后，脚本后端和真实模型走的是同一条链路。
+
+故事线：
+  rev1  Subagent 写出合理但不符合项目约定的实现 -> verify.py 失败 -> TEST_FAILED
   中断  架构师读到具体证据，判断是规格没说清 -> MODIFY_TASK，补一条验收标准
         （顶层任务 + MODIFY_TASK 命中 §7.2 确定性下限 -> 升级给人）
   REBASE goal 未变、只改 acceptance -> 走 §6.2 的第二条规则
@@ -31,6 +39,9 @@ CASES = [
     ("hello", False),
     ("A man, a plan, a canal: Panama", True),
     ("No 'x' in Nixon", True),
+    # 本项目约定：空串不算回文。这条**故意不写在 goal 里** ——
+    # 它是「规格不清」的载体，任何模型都推断不出来，只能靠失败信号发现。
+    ("", False),
 ]
 
 failures = [(s, e) for s, e in CASES if is_palindrome(s) is not e]
@@ -50,6 +61,8 @@ def is_palindrome(s: str) -> bool:
 CORRECT_SOLUTION = '''\
 def is_palindrome(s: str) -> bool:
     normalized = [c.lower() for c in s if c.isalnum()]
+    if not normalized:
+        return False
     return normalized == normalized[::-1]
 '''
 
@@ -118,15 +131,15 @@ def build_backend() -> ScriptedBackend:
         return ArchitectVerdict(
             action="MODIFY_TASK",
             rationale=(
-                "verify.py 的失败用例集中在含大小写与标点的输入上，"
-                "说明原 TaskSpec 没有把归一化要求写进验收标准。补一条，goal 不变。"
+                "verify.py 在空串用例上失败，说明本项目有一条 goal 没写明的约定。"
+                "这是规格问题不是实现问题：补一条验收标准，goal 不变。"
             ),
             complexity_score=0.25,
             spec_changes={
                 "added_criteria": [
                     {
                         "id": "c2",
-                        "description": "判断前必须忽略大小写，并剔除所有非字母数字字符",
+                        "description": "空串不算回文，必须返回 False",
                     }
                 ]
             },

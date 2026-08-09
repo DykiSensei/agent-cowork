@@ -64,6 +64,61 @@ class TestJsonSalvage(unittest.TestCase):
         self.assertIn("顶层必须是对象", errs[0])
 
 
+class TestProviderResolution(unittest.TestCase):
+    """回归：两家 key 同时存在时，各家必须拿到自己的 base_url 和 key。
+
+    实测踩过——`--backend kimi` 曾把 DeepSeek 的 key 发到 LiteLLM 代理上，
+    因为 base_url 的预设查表漏了 kimi，而 key 走的是后端内部的固定顺序回退链。
+    单独设一家 key 时这个 bug 不会显形。
+    """
+
+    def setUp(self):
+        self._saved = {
+            k: os.environ.get(k)
+            for k in ("DEEPSEEK_API_KEY", "MOONSHOT_API_KEY",
+                      "COWORK_LLM_BASE_URL", "COWORK_LLM_API_KEY")
+        }
+        os.environ["DEEPSEEK_API_KEY"] = "sk-deepseek-fake"
+        os.environ["MOONSHOT_API_KEY"] = "sk-moonshot-fake"
+        os.environ.pop("COWORK_LLM_BASE_URL", None)
+        os.environ.pop("COWORK_LLM_API_KEY", None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_each_provider_gets_its_own_endpoint_and_key(self):
+        from cowork.cli import _make_backend
+
+        ds = _make_backend("deepseek")
+        self.assertIn("deepseek.com", str(ds.client.base_url))
+        self.assertEqual(ds.client.api_key, "sk-deepseek-fake")
+
+        km = _make_backend("kimi")
+        self.assertIn("moonshot.cn", str(km.client.base_url))
+        self.assertEqual(km.client.api_key, "sk-moonshot-fake")
+
+    def test_env_override_wins(self):
+        from cowork.cli import _make_backend
+
+        os.environ["COWORK_LLM_BASE_URL"] = "http://localhost:4000/v1"
+        os.environ["COWORK_LLM_API_KEY"] = "sk-virtual-key"
+        b = _make_backend("deepseek")
+        self.assertIn("localhost:4000", str(b.client.base_url))
+        self.assertEqual(b.client.api_key, "sk-virtual-key")
+
+    def test_architect_uses_reasoning_model(self):
+        """§4.1「不同模型干擅长的事」：架构师和 Subagent 不该是同一档。"""
+        from cowork.cli import _make_backend
+
+        ds = _make_backend("deepseek")
+        self.assertEqual(ds.architect_model, "deepseek-reasoner")
+        self.assertEqual(ds.subagent_model, "deepseek-chat")
+
+
 class TestBackendWiring(unittest.TestCase):
     def test_reasoner_skips_json_mode(self):
         """deepseek-reasoner 不支持 response_format，只能靠提示词约束。"""
@@ -83,7 +138,7 @@ def _live_provider() -> tuple[str, str, str] | None:
     if os.environ.get("DEEPSEEK_API_KEY"):
         return ("https://api.deepseek.com/v1", os.environ["DEEPSEEK_API_KEY"], "deepseek-chat")
     if os.environ.get("MOONSHOT_API_KEY"):
-        return ("https://api.moonshot.cn/v1", os.environ["MOONSHOT_API_KEY"], "kimi-k2-0711-preview")
+        return ("https://api.moonshot.cn/v1", os.environ["MOONSHOT_API_KEY"], "kimi-k3")
     return None
 
 

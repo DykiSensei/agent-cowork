@@ -12,6 +12,29 @@ import json
 import sys
 
 
+# 每个供应商的端点、key 来源、默认模型分工。
+# models = (subagent, architect, triage)；架构师用推理型，其余用便宜的对话型。
+PROVIDERS: dict[str, dict] = {
+    "deepseek": {
+        "base": "https://api.deepseek.com/v1",
+        "key_env": "DEEPSEEK_API_KEY",
+        "models": ("deepseek-chat", "deepseek-reasoner", "deepseek-chat"),
+    },
+    "kimi": {
+        # Moonshot 的 model id 改得比较勤，用 GET /v1/models 查当前账号可用的
+        "base": "https://api.moonshot.cn/v1",
+        "key_env": "MOONSHOT_API_KEY",
+        "models": ("kimi-k3",) * 3,
+    },
+    "openai": {
+        # 走 LiteLLM 或任意 OpenAI 兼容端点，全靠环境变量指定
+        "base": "http://localhost:4000/v1",
+        "key_env": "COWORK_LLM_API_KEY",
+        "models": (None, "deepseek-chat", None),
+    },
+}
+
+
 def _make_store(kind: str):
     if kind == "sqlite":
         from .store import SqliteStore
@@ -33,23 +56,19 @@ def _make_backend(kind: str):
         from .llm.anthropic_backend import AnthropicBackend
 
         return AnthropicBackend()
-    if kind in ("deepseek", "kimi", "openai"):
-        from .llm.openai_compat import PRESETS, OpenAICompatBackend
+    if kind in PROVIDERS:
+        from .llm.openai_compat import OpenAICompatBackend
 
-        defaults = {
-            # 架构师用推理型，Subagent / 分诊用便宜的对话型
-            "deepseek": ("deepseek-chat", "deepseek-reasoner", "deepseek-chat"),
-            "kimi": ("kimi-k2-0711-preview",) * 3,
-            "openai": (None, "deepseek-chat", None),
-        }[kind]
-        base = os.environ.get("COWORK_LLM_BASE_URL")
-        if not base and kind in PRESETS:
-            base = PRESETS[kind if kind != "kimi" else "moonshot"]
+        p = PROVIDERS[kind]
+        sub, arch, triage = p["models"]
+        # base_url / api_key 都显式解析：两家 key 同时存在时，
+        # 靠后端内部的回退链会拿错 key（实测踩过）
         return OpenAICompatBackend(
-            base_url=base,
-            subagent_model=os.environ.get("COWORK_SUBAGENT_MODEL", defaults[0]),
-            architect_model=os.environ.get("COWORK_ARCHITECT_MODEL", defaults[1]),
-            triage_model=os.environ.get("COWORK_TRIAGE_MODEL", defaults[2]),
+            base_url=os.environ.get("COWORK_LLM_BASE_URL") or p["base"],
+            api_key=os.environ.get("COWORK_LLM_API_KEY") or os.environ.get(p["key_env"]),
+            subagent_model=os.environ.get("COWORK_SUBAGENT_MODEL", sub),
+            architect_model=os.environ.get("COWORK_ARCHITECT_MODEL", arch),
+            triage_model=os.environ.get("COWORK_TRIAGE_MODEL", triage),
         )
     raise ValueError(kind)
 
