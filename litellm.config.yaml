@@ -1,0 +1,45 @@
+# LiteLLM 自托管代理（开发文档 §10.3）
+#
+# 选它而不是 OpenRouter 的理由不是「支持多厂商」，而是 TaskSpec.token_budget 和
+# §7.2 的成本兜底需要**按任务归集用量并强制上限** —— 这是 virtual key 的核心能力。
+#
+# 代理暴露 Anthropic 原生的 /v1/messages，所以应用侧用官方 SDK + base_url 即可，
+# 不需要任何第三方 shim。
+
+model_list:
+  - model_name: claude-opus-5
+    litellm_params:
+      model: anthropic/claude-opus-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: anthropic/claude-haiku-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # 国内可用的替代供应商。两者都是 OpenAI 兼容接口，
+  # 由代理翻译，应用侧只认 model_name。
+  - model_name: deepseek-chat
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  - model_name: deepseek-reasoner
+    litellm_params:
+      model: deepseek/deepseek-reasoner
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+  - model_name: kimi-k2
+    litellm_params:
+      model: moonshot/kimi-k2-0711-preview
+      api_key: os.environ/MOONSHOT_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+litellm_settings:
+  # 预算耗尽时不要静默降级，必须让调用方拿到错误 —— 应用侧靠这个错误
+  # 产生 BUDGET_EXCEEDED 硬信号。
+  drop_params: false
+  set_verbose: false

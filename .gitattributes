@@ -1,0 +1,5 @@
+# 仓库内统一 LF，避免 Windows 上每次 checkout 都产生全文件 diff
+* text=auto eol=lf
+*.sql text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf

@@ -1,0 +1,24 @@
+[project]
+name = "agent-cowork"
+version = "0.1.0"
+description = "多 Agent 协作系统 v0.1 原型：L0 信号 -> 中断 -> REBASE -> 恢复"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+# 真实模型后端。LiteLLM 自托管代理暴露 Anthropic 兼容的 /v1/messages，
+# 因此用官方 SDK + base_url 指向代理即可拿到 §10.3 要的 virtual key 预算强制。
+anthropic = ["anthropic>=0.40"]
+# DeepSeek / Kimi(Moonshot) / 任何 OpenAI 兼容端点
+openai = ["openai>=1.40"]
+postgres = ["psycopg[binary]>=3.1"]
+
+[project.scripts]
+cowork = "cowork.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

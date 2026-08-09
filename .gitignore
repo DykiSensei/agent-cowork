@@ -1,0 +1,18 @@
+# 真实密钥。只提交 .env.example，绝不提交 .env
+.env
+.env.*
+!.env.example
+
+# 本机权限配置，不共享
+.claude/settings.local.json
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.db
+*.sqlite3

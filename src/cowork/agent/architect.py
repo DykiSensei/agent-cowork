@@ -1,0 +1,267 @@
+"""架构师（§2.3）。
+
+单一实例，持有连续上下文，是唯一的写入决策点。
+所有跨任务信息只经它流转；Subagent 之间不通信。
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Protocol
+
+from ..escalation import should_escalate
+from ..llm import ArchitectVerdict, Backend
+from ..policy import Policy
+from ..resume import choose_resume_mode
+from ..signals import SignalType
+from ..types import (
+    Action,
+    AgentContext,
+    Criterion,
+    Decider,
+    DecisionRecord,
+    Disposition,
+    ResumeMode,
+    Signal,
+    TaskSpec,
+    TaskState,
+)
+
+
+@dataclass
+class HumanRuling:
+    action: Action
+    rationale: str
+    spec_changes: dict | None = None
+
+
+class HumanGate(Protocol):
+    """人的介入入口。返回 None 表示人还没答复 -> 任务停在 AWAITING_HUMAN。"""
+
+    def review(
+        self,
+        spec: TaskSpec,
+        signals: list[Signal],
+        verdict: ArchitectVerdict,
+        reason: str,
+    ) -> HumanRuling | None: ...
+
+
+class AutoApproveGate:
+    """非交互场景用：直接采纳 LLM 的裁决。
+
+    命名是刻意直白的——它并没有引入人的判断，只是把「有人配置了自动放行」
+    这件事显式化。生产环境不要用。
+    """
+
+    def review(self, spec, signals, verdict, reason) -> HumanRuling:
+        return HumanRuling(
+            action=Action(verdict.action),
+            rationale=f"[AutoApproveGate] 升级原因：{reason}；采纳 LLM 裁决：{verdict.rationale}",
+            spec_changes=verdict.spec_changes,
+        )
+
+
+class CliGate:
+    """CLI 介入（v0.1 的界面层，§10.2「暂不做，CLI + 结构化日志」）。"""
+
+    def review(self, spec, signals, verdict, reason) -> HumanRuling | None:
+        print("\n" + "=" * 68)
+        print(f"需要人决策  task={spec.id} rev={spec.revision}")
+        print(f"升级原因    {reason}")
+        print(f"触发信号    {', '.join(s.type.value for s in signals)}")
+        for s in signals:
+            if s.raw_evidence:
+                print(f"--- 证据 ({s.type.value}) ---\n{s.raw_evidence[:1500]}")
+        print(f"LLM 建议    {verdict.action} (complexity={verdict.complexity_score:.2f})")
+        print(f"            {verdict.rationale}")
+        print("=" * 68)
+        choice = input("采纳(y) / 放弃任务(a) / 继续原样(c) / 挂起(其它): ").strip().lower()
+        if choice == "y":
+            return HumanRuling(Action(verdict.action), "人采纳 LLM 裁决", verdict.spec_changes)
+        if choice == "a":
+            return HumanRuling(Action.ABANDON, "人判断该放弃")
+        if choice == "c":
+            return HumanRuling(Action.CONTINUE, "人判断可原样重试")
+        return None
+
+
+class Architect:
+    def __init__(
+        self,
+        backend: Backend,
+        store,
+        *,
+        policy: Policy,
+        human_gate: HumanGate | None = None,
+    ) -> None:
+        self.backend = backend
+        self.store = store
+        self.policy = policy
+        self.human_gate = human_gate
+        self.tokens_used = 0
+        self._last_soft_consume = time.monotonic()
+
+    # -- 软信号消费（§3.4）-------------------------------------------------- #
+
+    def should_consume_soft(self, queue_depth: int, step_boundary: bool) -> bool:
+        if queue_depth == 0:
+            return False
+        return (
+            step_boundary
+            or queue_depth >= self.policy.soft_queue_threshold
+            or time.monotonic() - self._last_soft_consume > self.policy.soft_interval_s
+        )
+
+    def consume_soft(self, signals: list[Signal]) -> list[Signal]:
+        """批量廉价评估，返回需要升级到主模型的那些。"""
+        self._last_soft_consume = time.monotonic()
+        if not signals:
+            return []
+
+        # CONFLICT_SUSPECTED 例外：跨任务冲突是架构师的独有视野，直接升级，
+        # 不走廉价评估（§3.4）。
+        direct = [s for s in signals if s.type is SignalType.CONFLICT_SUSPECTED]
+        rest = [s for s in signals if s.type is not SignalType.CONFLICT_SUSPECTED]
+
+        escalated = list(direct)
+        for s in direct:
+            s.disposition = Disposition.ESCALATED
+            s.consumed_at = time.time()
+            self.store.save_signal(s)
+
+        if rest:
+            verdicts, tokens = self.backend.triage(rest)
+            self.tokens_used += tokens
+            by_id = {s.id: s for s in rest}
+            for v in verdicts:
+                sig = by_id.get(v.signal_id)
+                if sig is None:
+                    continue
+                sig.consumed_at = time.time()
+                if v.verdict == "escalate":
+                    sig.disposition = Disposition.ESCALATED
+                    escalated.append(sig)
+                else:
+                    sig.disposition = Disposition.IGNORED
+                self.store.save_signal(sig)
+        return escalated
+
+    # -- 中断决策（§5 / §7）------------------------------------------------- #
+
+    def decide(
+        self, state: TaskState, signals: list[Signal], ctx: AgentContext
+    ) -> DecisionRecord:
+        spec = state.spec
+
+        # HUMAN_INTERVENTION 不走 LLM：人的指令直接成为裁决输入
+        human_sig = next(
+            (s for s in signals if s.type is SignalType.HUMAN_INTERVENTION), None
+        )
+        if human_sig is not None:
+            instruction = human_sig.payload.get("instruction", "")
+            return DecisionRecord(
+                task_id=spec.id,
+                trigger=[s.id for s in signals],
+                decider=Decider.HUMAN,
+                action=Action.MODIFY_TASK,
+                rationale=f"人在群聊中介入：{instruction}",
+                new_spec=spec.bump(goal=instruction or spec.goal),
+                resume_mode=ResumeMode.REBASE,
+            )
+
+        verdict, tokens = self.backend.decide_interrupt(spec, signals, ctx)
+        self.tokens_used += tokens
+        state.tokens_used += tokens
+
+        reason = should_escalate(self.policy, spec, state, signals, verdict)
+        decider = Decider.LLM
+        escalation_reason = None
+        rationale = verdict.rationale
+        action = Action(verdict.action)
+        spec_changes = dict(verdict.spec_changes)
+
+        if reason:
+            escalation_reason = reason
+            if self.human_gate is None:
+                # 没有介入入口 -> 挂起，不猜。这是 §7.2「LLM 无权覆盖」的落地。
+                return DecisionRecord(
+                    task_id=spec.id,
+                    trigger=[s.id for s in signals],
+                    decider=Decider.LLM,
+                    complexity_score=verdict.complexity_score,
+                    escalation_reason=reason,
+                    action=Action.CONTINUE,
+                    rationale=f"需要人决策但无介入入口，任务挂起。{reason}",
+                    new_spec=None,
+                    resume_mode=None,
+                )
+            ruling = self.human_gate.review(spec, signals, verdict, reason)
+            if ruling is None:
+                return DecisionRecord(
+                    task_id=spec.id,
+                    trigger=[s.id for s in signals],
+                    decider=Decider.HUMAN,
+                    complexity_score=verdict.complexity_score,
+                    escalation_reason=reason,
+                    action=Action.CONTINUE,
+                    rationale="人未答复，任务挂起等待。",
+                    new_spec=None,
+                    resume_mode=None,
+                )
+            decider = Decider.HUMAN
+            action = ruling.action
+            rationale = ruling.rationale
+            spec_changes = ruling.spec_changes or {}
+
+        new_spec = None
+        resume_mode = None
+        if action is Action.MODIFY_TASK:
+            new_spec = self._apply_changes(spec, spec_changes)
+            resume_mode = choose_resume_mode(spec, new_spec)
+        elif action in (Action.CONTINUE, Action.REASSIGN):
+            new_spec = spec
+            resume_mode = ResumeMode.RESUME if action is Action.CONTINUE else ResumeMode.RESTART
+
+        return DecisionRecord(
+            task_id=spec.id,
+            trigger=[s.id for s in signals],
+            decider=decider,
+            complexity_score=verdict.complexity_score,
+            escalation_reason=escalation_reason,
+            action=action,
+            new_spec=new_spec,
+            resume_mode=resume_mode,
+            rationale=rationale,
+        )
+
+    def _apply_changes(self, spec: TaskSpec, changes: dict) -> TaskSpec:
+        kwargs: dict = {}
+        if changes.get("goal"):
+            kwargs["goal"] = changes["goal"]
+        added = changes.get("added_criteria") or []
+        if added:
+            kwargs["acceptance"] = [
+                *spec.acceptance,
+                *(
+                    Criterion(
+                        id=c["id"],
+                        description=c["description"],
+                        command=c.get("command"),
+                    )
+                    for c in added
+                ),
+            ]
+        for field_name in ("scope", "token_budget", "max_steps", "deadline_s", "model"):
+            if field_name in changes:
+                kwargs[field_name] = changes[field_name]
+        return spec.bump(**kwargs)
+
+    # -- 验收（§5）---------------------------------------------------------- #
+
+    def verify(self, spec: TaskSpec, ctx: AgentContext) -> tuple[bool, str]:
+        """Runtime 已跑完可机器检查的项；这里只判非机器可检的部分。"""
+        passed, reason, tokens = self.backend.verify(spec, ctx)
+        self.tokens_used += tokens
+        return passed, reason

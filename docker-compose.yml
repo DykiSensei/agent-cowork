@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cowork
+      POSTGRES_PASSWORD: cowork
+      POSTGRES_DB: cowork
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./initdb/00-litellm-db.sql:/docker-entrypoint-initdb.d/00-litellm-db.sql:ro
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cowork"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # §10.3：virtual key 承担 token_budget 的强制执行，这是 §7.2 成本兜底的落地点。
+  # 需要 ANTHROPIC_API_KEY 才能真正转发上游；不设时预算拒绝的链路仍可验证，
+  # 因为 LiteLLM 的预算检查发生在转发之前。
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-cowork-master}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-cowork-salt-000}
+      DATABASE_URL: postgresql://cowork:cowork@postgres:5432/litellm
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-sk-ant-placeholder}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-sk-deepseek-placeholder}
+      MOONSHOT_API_KEY: ${MOONSHOT_API_KEY:-sk-moonshot-placeholder}
+      STORE_MODEL_IN_DB: "True"
+    volumes:
+      - ./litellm.config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+
+volumes:
+  pgdata:
