@@ -24,7 +24,7 @@ docker compose up -d postgres litellm
 python -m unittest discover -s tests -t .
 ```
 
-287 个测试。三样基础设施都不起时，依赖它们的 14 个会 skip（3 个 Postgres +
+335 个测试。三样基础设施都不起时，依赖它们的 14 个会 skip（3 个 Postgres +
 5 个 LiteLLM + 6 个 Docker 沙箱），其余照常跑；打真实供应商的用例需要
 `DEEPSEEK_API_KEY` 或 `MOONSHOT_API_KEY`（`.env` 里配好即可，测试会自动读）。
 

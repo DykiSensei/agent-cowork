@@ -7,14 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 另有 `M6-界面层接口.md`：给界面层那一侧的接口约定。**改动 `to_dict()` 的形状、
 `HumanGate` 的签名、或信号类型时，那份文档也要跟着改** —— 它是对外承诺。
 
-当前：M2–M5 完成，**M7（拆解三角色）收口**，四条出口标准全部达成
-（§11.11 / §11.12 / §11.13）。**M6 界面层前端已完成**（`ui/`：React + TS +
-Vite 双模式界面，mock API 驱动，细节见 `ui/README.md`）；**前端发现的四条后端缺口
-已补**（`M6-界面层接口.md` §10）：裁决里的 `suggestion` / `spec_changes`、
-`events` 表、以及 `views.py` 的列表与详情投影。
-**下一步是 M6 服务层**：FastAPI 路由（只剩「调 `cowork.views` + 序列化」）
-+ `AWAITING_HUMAN` 的 restore 路径 —— 后者仍未实现，但现场已经落库
-（`views.pending_ruling()` 一次取出 checkpoint / 建议 / 升级原因）。
+当前：M0–M7 全部完成。**M6 群聊界面层已落地**：前端 `ui/`（React + TS + Vite
+双模式界面 + 设置页，细节见 `ui/README.md`）；服务层 `src/cowork/server/`
+（FastAPI，`python -m cowork.cli serve`，只绑 loopback）—— 含 restore 路径
+（`Orchestrator.restore()` + `resume_with_ruling()`，人的裁决经
+`Architect.apply_human_ruling()` 落地，不绕过架构师）、`TapStore` 写入处发
+事件 + SSE、设置页写 .env（key 只写不读）。
 
 `policy.py` 的参数全部有实测依据（§11.6 / §11.7 / §11.9 / §11.13），
 改它们之前先跑 `bench` 或 `bench-plan`，别凭感觉调。
@@ -48,7 +46,7 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 287 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 335 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -288,6 +286,9 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
 - **`PROVIDERS` 表会无声地过期**：模型下线时端点还在、key 还有效，只有那个 id 没了。
   别读文档判断，跑 `python -m cowork.cli models`。表里 `verified` 记的是
   「本机用真 key 打通过」—— 没打通过不等于错，等于没验证，两者不能混。
+- **把用户输入拼进结构化文本的地方都要校验**。设置页写 `.env` 时，值里一个换行
+  就等于多写一行 —— 一次「设置 API key」的请求能顺手写 `COWORK_LLM_BASE_URL`，
+  之后所有请求连同 key 一起送到别处。`serve` 只绑 loopback 是同一条防线的另一半。
 - **事件表是到达序的索引，不是内容的第二份拷贝**。信号和裁决的正文只在各自的
   表里，`events` 只记「第几条、什么类型、指向谁」。内联正文 = 同一件事两个真相来源。
   排序靠 `seq`（Store 写入时分配）不靠 `created_at` —— 并行任务的时间戳会撞在
