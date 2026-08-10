@@ -43,6 +43,9 @@ from .anthropic_backend import (
     REVIEW_MAX_TOKENS,
     REVIEW_SCHEMA,
     REVIEW_SYSTEM,
+    SPEC_REVIEW_MAX_TOKENS,
+    SPEC_REVIEW_SCHEMA,
+    SPEC_REVIEW_SYSTEM,
     SUBAGENT_SYSTEM,
     TRIAGE_SCHEMA,
     TRIAGE_SYSTEM,
@@ -55,6 +58,7 @@ from .anthropic_backend import (
     _render_probe_context,
     _render_profile_context,
     _render_review_context,
+    _render_spec_review_context,
     _render_subagent_context,
 )
 
@@ -286,8 +290,9 @@ class OpenAICompatBackend:
         ctx: AgentContext,
         *,
         history: list[dict] | None = None,
+        review_feedback: list[str] | None = None,
     ) -> tuple[ArchitectVerdict, int]:
-        user = _render_architect_context(spec, signals, ctx, history)
+        user = _render_architect_context(spec, signals, ctx, history, review_feedback)
         data, tokens = self._call(
             model=self.architect_model,
             system=ARCHITECT_SYSTEM,
@@ -364,6 +369,19 @@ class OpenAICompatBackend:
             effort=self.architect_effort,
         )
         return data["sufficient"], list(data["missing"]), tokens
+
+    def review_spec_change(
+        self, spec: TaskSpec, signals: list[Signal], verdict: ArchitectVerdict
+    ) -> tuple[bool, list[str], int]:
+        data, tokens = self._call(
+            model=self.architect_model,
+            system=SPEC_REVIEW_SYSTEM,
+            user=_render_spec_review_context(spec, signals, verdict),
+            schema=SPEC_REVIEW_SCHEMA,
+            max_tokens=SPEC_REVIEW_MAX_TOKENS,
+            effort=self.architect_effort,
+        )
+        return data["ok"], list(data["findings"]), tokens
 
     def decompose(
         self, root_goal: str, *, feedback: list[str] | None = None

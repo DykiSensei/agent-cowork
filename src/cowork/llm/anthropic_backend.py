@@ -263,6 +263,42 @@ REVIEW_SCHEMA: dict[str, Any] = {
 }
 
 
+SPEC_REVIEW_SYSTEM = """你在复核架构师**对任务规格的一次修改**。
+
+给你：任务的当前规格、触发这次修改的失败证据、以及架构师打算做的改动。
+
+按顺序回答两个问题，**第二个比第一个重要**：
+
+1. 改完之后，失败证据指的那个问题会被挡住吗？
+   —— 新加的验收标准要能**具体到可判定**。「应正确处理边界情况」挡不住任何东西，
+   下一轮执行者还是得猜；「输入为空串时返回 False」才算。
+
+2. 这次改动有没有把原始目标改松？
+   —— 这是最要紧的一条。规格只能往「更明确」改，不能往「更容易」改。
+   典型手法：把 goal 改写成一个更弱的说法、把失败的那种输入从目标里摘出去、
+   调大步数/预算/超时来绕过一个本该修的死循环、悄悄扩大 scope 去动不该动的文件。
+   **这类改动会让任务「成功」，因此没有任何后续信号会暴露它** —— 你是唯一的关口。
+
+只找客观问题，不评价措辞、风格、粒度 —— 那些是意见。
+证据支持的改动就放行：**不要为了显得有用而挑毛病**，误报的代价是白打扰人一次。
+
+没有问题就回答 ok=true、findings 留空数组。"""
+
+# 与 REVIEW 同理：要读完整份规格 + 证据再推理。这里输入比拆解复核短
+# （一个任务而不是一组），但推理型模型的 thinking 同样计在这个额度里。
+SPEC_REVIEW_MAX_TOKENS = 8_000
+
+SPEC_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean"},
+        "findings": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["ok", "findings"],
+    "additionalProperties": False,
+}
+
+
 # 拆解的输出比其它调用长一个量级（子任务 × 带命令的验收标准），而**推理型模型的
 # thinking 也计在这个额度里**：deepseek-v4-flash 实测同一个目标 completion
 # 2544（reasoning 2093）~ 9643（reasoning 8840），kimi-k3 6823（reasoning 5854）。
@@ -429,6 +465,55 @@ def _render_review_context(root_goal: str, specs: list[TaskSpec]) -> str:
     return "\n\n".join(parts)
 
 
+def _render_spec_review_context(
+    spec: TaskSpec, signals: list[Signal], verdict: Any
+) -> str:
+    """写入侧复核的上下文（§12 M8）。
+
+    刻意把**当前规格**和**打算做的改动**分开渲染，而不是渲染一份改完的新 spec：
+    复核者要判断的是「这一次动了什么」，给它一份合成后的规格，它就得先自己
+    做 diff —— 而那正是最容易出错、也最没必要让模型做的一步。
+    """
+    changes = verdict.spec_changes or {}
+    parts = [
+        f"# 当前规格\n  目标：{spec.goal}\n  scope：{list(spec.scope)}\n"
+        f"  上限：max_steps={spec.max_steps} token_budget={spec.token_budget}"
+        f" deadline_s={spec.deadline_s}",
+        "  验收标准：\n"
+        + "\n".join(f"    - {c.id}: {c.description}" for c in spec.acceptance),
+    ]
+
+    if signals:
+        ev = []
+        for s in signals:
+            body = (s.raw_evidence or "").strip()
+            ev.append(
+                f"  - {s.type.value}"
+                + (f"\n    证据：{body[:1200]}" if body else "")
+            )
+        parts.append("# 触发这次修改的失败证据\n" + "\n".join(ev))
+
+    lines = [f"  理由：{verdict.rationale}"]
+    if changes.get("goal"):
+        # goal 是**整体替换**，所以新旧都要摆出来 —— 目标被改松是这一层要抓的头号问题
+        lines.append(f"  【改写目标】原：{spec.goal}\n              新：{changes['goal']}")
+    for c in changes.get("added_criteria") or []:
+        cmd = f"（命令 {c.get('command')}）" if c.get("command") else ""
+        lines.append(f"  【新增验收标准】{c.get('id')}: {c.get('description')}{cmd}")
+    for field_name, label in (
+        ("scope", "scope"),
+        ("max_steps", "步数上限"),
+        ("token_budget", "token 预算"),
+        ("deadline_s", "超时"),
+        ("model", "模型"),
+    ):
+        if field_name in changes:
+            old = getattr(spec, field_name, None)
+            lines.append(f"  【改 {label}】{old!r} → {changes[field_name]!r}")
+    parts.append("# 打算做的改动\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
 PROBE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -445,6 +530,7 @@ def _render_architect_context(
     signals: list[Signal],
     ctx: AgentContext,
     history: list[dict] | None = None,
+    review_feedback: list[str] | None = None,
 ) -> str:
     """架构师的中断决策上下文。
 
@@ -474,6 +560,15 @@ def _render_architect_context(
             + " 次中断）:\n"
             + "\n".join(lines)
             + "\n\n如果同样的信号又出现了，说明上一次的裁决没有奏效。**不要重复它**。"
+        )
+    if review_feedback:
+        # 写入侧复核驳回后的重做（§12 M8）。放在「已产出」之前、history 之后：
+        # 它是关于**这一次**决策的最新信息，离结论越近越好。
+        parts.append(
+            "复核者驳回了你刚才那版规格修改，理由如下：\n"
+            + "\n".join(f"- {f}" for f in review_feedback)
+            + "\n\n请针对这些问题重做。**不要靠放宽目标或调大上限来绕过它们** —— "
+            "规格只能往更明确改，不能往更容易改。"
         )
     parts.append("已产出:\n" + ("\n".join(f"- {a.content_ref}" for a in ctx.produced) or "（无）"))
     return "\n\n".join(parts)
@@ -640,8 +735,9 @@ class AnthropicBackend:
         ctx: AgentContext,
         *,
         history: list[dict] | None = None,
+        review_feedback: list[str] | None = None,
     ) -> tuple[ArchitectVerdict, int]:
-        user = _render_architect_context(spec, signals, ctx, history)
+        user = _render_architect_context(spec, signals, ctx, history, review_feedback)
         data, tokens = self._call(
             model=self.architect_model,
             system=ARCHITECT_SYSTEM,
@@ -716,6 +812,19 @@ class AnthropicBackend:
             schema=REVIEW_SCHEMA,
         )
         return data["sufficient"], list(data["missing"]), tokens
+
+    def review_spec_change(
+        self, spec: TaskSpec, signals: list[Signal], verdict: ArchitectVerdict
+    ) -> tuple[bool, list[str], int]:
+        # 同 review_decomposition 用主模型：判断「这个改动是不是把目标改松了」
+        # 需要读懂原始目标和失败证据的关系，不是廉价过滤能做的。
+        data, tokens = self._call(
+            model=self.architect_model,
+            system=SPEC_REVIEW_SYSTEM,
+            user=_render_spec_review_context(spec, signals, verdict),
+            schema=SPEC_REVIEW_SCHEMA,
+        )
+        return data["ok"], list(data["findings"]), tokens
 
     def decompose(
         self, root_goal: str, *, feedback: list[str] | None = None

@@ -143,12 +143,19 @@ class Backend(Protocol):
         ctx: AgentContext,
         *,
         history: list[dict] | None = None,
+        review_feedback: list[str] | None = None,
     ) -> tuple[ArchitectVerdict, int]:
         """架构师主模型：完整中断决策。
 
         history 是**本任务此前的裁决记录**（每条含信号类型、动作、理由）。
         没有它的话架构师每次都在「第一次见到这个问题」的状态下决策 ——
         M2 实测里 CONTINUE → CONTINUE → CONTINUE 的循环就是这么来的（§11.9b）。
+
+        review_feedback 是**写入侧复核报出的问题**，重做这一轮时喂回去（§12 M8）。
+        和 `decompose(feedback=...)` 是同一个设计、同一个理由：不喂回去的话
+        架构师会在「第一次看到这个中断」的状态下重做，复核意见等于没提。
+        **它与 history 分开传**：history 参与「同一指纹连续出现」的计数，
+        而被驳回的草稿不是一次真的裁决，混进去会把那个计数搞脏。
         """
         ...
 
@@ -171,6 +178,30 @@ class Backend(Protocol):
 
         返回 (是否充分, 缺失项列表, token)。复核者可以换独立供应商
         （M7 7.1 的 `Architect(reviewer_backend=...)`），实测见 §11.11。
+        """
+        ...
+
+    def review_spec_change(
+        self,
+        spec: TaskSpec,
+        signals: list[Signal],
+        verdict: ArchitectVerdict,
+    ) -> tuple[bool, list[str], int]:
+        """**写入侧复核**（§12 M8）：这次改 TaskSpec 改得对不对。
+
+        和 `review_decomposition` 是同一个角色在另一层：复核者**没有写权**，
+        只产出 findings，改不了 spec —— 写权仍然只在 `decide()/_apply_changes()`
+        那一条路上（§2.3）。给它写权 = 两个写入点 = 不变量破了。
+
+        与确定性升级判据**分工明确、不重叠**：`escalation.py` 判的是**上下文**
+        （谁改的、改过几次、烧了多少钱、有没有越界信号），它从不看改动的内容；
+        这里判的正是**内容本身**。所以这不是把确定性规则再实现一遍。
+
+        问的问题按 M5b 那条经验反着来 —— 不问「这个改动好不好」（会得到复述），
+        而问「按改完之后的规格验收，失败证据指的那个问题会被挡住吗；
+        以及这次改动有没有把原始目标改松」。
+
+        返回 (是否通过, 缺口列表, token)。
         """
         ...
 

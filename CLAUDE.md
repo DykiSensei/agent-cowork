@@ -9,7 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `AGENTS.md` 是同一批事实的精简版（给别家编码代理）：本文件里的命令、代码地图、
 四条不变量改了，那边也要跟着改，否则两份指南会慢慢分叉。
 
-当前：M0–M7 全部完成。**M6 群聊界面层已落地**：前端 `ui/`（React + TS + Vite
+当前：M0–M7 全部完成；**M8 写入侧复核代码完成但默认关闭** ——
+`Architect(review_writes=True)` 才启用，因为它的判别力还没实测（见下）。**M6 群聊界面层已落地**：前端 `ui/`（React + TS + Vite
 双模式界面 + 设置页，细节见 `ui/README.md`）；服务层 `src/cowork/server/`
 （FastAPI，`python -m cowork.cli serve`，只绑 loopback）—— 含 restore 路径
 （`Orchestrator.restore()` + `resume_with_ruling()`，人的裁决经
@@ -41,6 +42,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 复核者默认 `kimi`（`cli.DEFAULT_REVIEWER`）：§11.11 实测 J 0.98 vs deepseek 0.66，
   且后者在同一份输入上会翻面。`--reviewer none` 退回同模型复核。
 
+写入侧复核（M8，§12 M8）—— 代码在，默认关闭：
+
+- **只复核写入，而且只复核没在升级的那些**。先量的暴露面：M2 的 176 条裁决里
+  61% 已被确定性下限送到人面前，真实缺口是**改了 spec 且无人过目的 34 条（19%）**。
+  `CONTINUE` / `REASSIGN` 不改 spec，不构成风险 #3，不该为它们花调用。
+- **`escalation.py` 判上下文，复核者判内容**，两者不重叠 —— 确定性规则看的是谁改的、
+  改过几次、烧了多少钱，从来不看改动本身。发现自己在复核里重写这些规则就是错了。
+- **循环还是那一个**：决策 → 复核 → 重做 ≤ `max_regenerate` → 升级给人。
+  意见走 `decide_interrupt(review_feedback=...)` 喂回去，**和 `history` 分开传** ——
+  history 参与「同一指纹连续出现」的计数，被驳回的草稿混进去会把计数搞脏。
+- **默认关闭是刻意的**。M7 的 J 0.98 是在**拆解**上测的，输入形状和判断类型都不一样。
+  §11.13 已有先例：判据移植到新一层之后没有可判之物。跑 `bench-decide` 出
+  TPR/FPR/J 之前不要默认开。
+- **缺陷形态要按 `_apply_changes` 真正允许的来写**：acceptance 只能追加不能删改，
+  所以「偷偷删掉一条标准」根本发生不了。可达的放松手法只有四种（改 goal /
+  加一条挡不住任何东西的标准 / 调大上限 / 扩 scope），其中 **`goal_loosened` 最危险 ——
+  它让任务「成功」，没有任何后续信号会暴露它**。
+
 ## 命令
 
 ```bash
@@ -48,7 +67,7 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 348 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 377 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -81,6 +100,10 @@ python -m cowork.cli bench-plan --repeat 3                # M7 7.4 拆解提示�
 python -m cowork.cli bench-plan --goals wc --repeat 1     # 冒烟（--arms full,naive 可选一个）
 python -m cowork.cli bench-plan-report plan_ab.jsonl      # 只出报告，不重跑
 
+python -m cowork.cli bench-decide --repeat 5              # M8 8.4 写入侧复核对照 —— 还没跑过
+python -m cowork.cli bench-decide --cases unsound         # 只跑正例（也收 id / 家族 / 缺陷形态）
+python -m cowork.cli bench-decide-report decide_ab.jsonl  # 只出报告，不重跑
+
 pip install -e .[server]                        # M6 服务层依赖：fastapi / uvicorn / httpx
 python -m cowork.cli serve                      # HTTP + SSE + ui/dist 静态页，只绑 loopback
                                                 # --backend / --db / --workspace / --max-cycles
@@ -106,6 +129,7 @@ PYTHONPATH=src python ui/mock/make_fixtures.py  # 重生成 ui/fixtures（在仓
 | `review_ab_positives_v2.jsonl` / `review_ab_negatives_v2.jsonl` | 返工后的正例 90 次 / 负例 30 次 |
 | `review_ab_v1.jsonl` | 用例表返工**前**的 120 次。别删 —— 它是「负例必须真的完整」那条坑的证据 |
 | `plan_ab.jsonl` | M7 7.4 的 37 次拆解（§11.13）：提示词两臂 × 6 目标，`max_regenerate` 的依据 |
+| `decide_ab.jsonl` | **还不存在** —— M8 8.4 的写入侧复核对照没跑过。跑 `bench-decide` 才有 |
 
 M5a 那四个文件是「改提示词必须两侧都测」的现成对照组，改停止判据时拿它做基线。
 `review_ab*` 同理，改复核提示词或换复核模型时拿它做基线；
@@ -383,4 +407,7 @@ store/          sqlite（默认）/ postgres（正式）。两边都在连接时
 bench/          §12 M2/M3/M5 实测 —— 只包装不改被测对象，不参与生产链路
                 review_ab.py 是 M7 7.2：12 个带标准答案的拆解 + TPR/FPR/J
                 plan_ab.py  是 M7 7.4：提示词两臂 + 生成-复核循环的指标
+                decide_ab.py 是 M8 8.4：11 个带标准答案的 spec 改动 + TPR/FPR/J，
+                **还没跑过**；用例全部取自 bench/tasks.py 的真实任务（隐藏要求
+                在那边逐条写明，所以「改对了」有客观答案）
 ```

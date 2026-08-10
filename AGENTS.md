@@ -13,7 +13,8 @@ Subagent 是薄执行层，Runtime 是完全确定性的（不含任何 LLM 调�
 另有 `M6-界面层接口.md`：给界面层的对外接口约定 —— 改动 `to_dict()` 的形状、
 `HumanGate` 的签名或信号类型时，那份文档必须同步改。
 
-当前进度：M0–M7 全部完成。**M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
+当前进度：M0–M7 全部完成；M8（写入侧复核，改 TaskSpec 前让复核者看一眼）代码完成
+但**默认关闭** —— 判别力还没实测，跑 `cli bench-decide` 出 TPR/FPR/J 之前不要默认开。**M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
 Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAPI，
 `python -m cowork.cli serve` 起服务，含 AWAITING_HUMAN 的 restore 路径）。
 `CLAUDE.md` 是给 Claude Code 的同类指南，内容更细，两者应保持一致。
@@ -42,7 +43,7 @@ Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAP
 pip install -e .                                  # 或 set PYTHONPATH=src（仅 CLI 需要）
 
 docker compose up -d postgres litellm             # postgres:5433 / litellm:4000
-python -m unittest discover -s tests -t .         # 348 个测试。用 unittest，没引 pytest
+python -m unittest discover -s tests -t .         # 377 个测试。用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -133,7 +134,7 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
 
 ## 测试策略
 
-- 348 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
+- 377 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
 - **同一场景跨运行方差很大**（中断 0–5 次，token 0–50k）：单次运行不能作为
   参数或结论的依据，**也不能拿它写断言**。
 - **改提示词必须两侧都测**（正例 + 反例）：M5a 第一版只看不可解侧是「大胜」，

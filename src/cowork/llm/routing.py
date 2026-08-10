@@ -97,8 +97,13 @@ class RoutingBackend:
     def triage(self, signals):
         return self.default.triage(signals)
 
-    def decide_interrupt(self, spec, signals, ctx, *, history=None):
-        return self.default.decide_interrupt(spec, signals, ctx, history=history)
+    def decide_interrupt(self, spec, signals, ctx, *, history=None, review_feedback=None):
+        return self.default.decide_interrupt(
+            spec, signals, ctx, history=history, review_feedback=review_feedback
+        )
+
+    def review_spec_change(self, spec, signals, verdict):
+        return self.default.review_spec_change(spec, signals, verdict)
 
     def summarize(self, ctx):
         return self.default.summarize(ctx)

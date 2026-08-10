@@ -775,6 +775,65 @@ def _bench_review_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bench_decide(args: argparse.Namespace) -> int:
+    """写入侧复核对照（§12 M8）。判别力不能从 7.2 外推，所以必须单独测。"""
+    import time
+    from pathlib import Path
+
+    from .bench.decide_ab import run_batch, select_cases
+
+    if args.backend == "scripted":
+        print("写入侧复核对照需要真实模型：脚本后端没有语义判断力，测出来的是自证的假数据",
+              file=sys.stderr)
+        return 2
+
+    cases = select_cases(args.cases)
+    arms = {
+        name: (lambda n=name: _make_backend(n))
+        for name in [x.strip() for x in args.arms.split(",") if x.strip()]
+    }
+    if not arms:
+        print("--arms 不能为空", file=sys.stderr)
+        return 2
+
+    total = len(cases) * len(arms) * args.repeat
+    n_unsound = sum(1 for c in cases if not c.sound)
+    print(f"用例 {len(cases)} 个（正例 {n_unsound} / 负例 {len(cases) - n_unsound}）"
+          f" × arm {len(arms)} × {args.repeat} 次 = {total} 次复核调用，arm={list(arms)}",
+          file=sys.stderr)
+
+    started = time.monotonic()
+
+    def progress(rec, done: int, total_: int) -> None:
+        elapsed = time.monotonic() - started
+        eta = elapsed / done * (total_ - done)
+        got = "ERROR" if rec.error else ("报问题" if rec.flagged else "放行")
+        want = "该放行" if rec.sound else f"该报（{rec.defect}）"
+        hit = "" if rec.error else ("✓" if rec.flagged != rec.sound else "✗")
+        print(f"[{done}/{total_}] {rec.case_id}({want}) arm={rec.arm} -> {got} {hit} "
+              f"token={rec.tokens} {rec.wall_seconds:.1f}s ETA {eta / 60:.1f}min",
+              file=sys.stderr)
+
+    out = Path(args.out)
+    run_batch(cases, arms=arms, repeat=args.repeat, out_path=out,
+              workers=args.workers, progress=progress)
+    print(f"\n记录写入 {out}", file=sys.stderr)
+    return _bench_decide_report(argparse.Namespace(records=str(out), json=False))
+
+
+def _bench_decide_report(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .bench.decide_ab import load, render, summarize
+
+    summary = summarize(load(Path(args.records)))
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        print(render(summary))
+    return 0
+
+
 def _bench_report(args: argparse.Namespace) -> int:
     from pathlib import Path
 
@@ -912,6 +971,24 @@ def main(argv: list[str] | None = None) -> int:
     rvr.add_argument("records")
     rvr.add_argument("--json", action="store_true")
     rvr.set_defaults(func=_bench_review_report)
+
+    bd = sub.add_parser("bench-decide", help="写入侧复核对照实测（§12 M8）")
+    bd.add_argument("--backend", choices=PROVIDER_NAMES, default="deepseek",
+                    help="只用来挡住 scripted；复核者由 --arms 决定")
+    bd.add_argument("--arms", default="deepseek,kimi",
+                    help="逗号分隔的复核者供应商")
+    bd.add_argument("--repeat", type=int, default=5,
+                    help="每个用例每个 arm 跑几次。低于 5 的结果是噪声（§11.5d）")
+    bd.add_argument("--workers", type=int, default=4)
+    bd.add_argument("--cases", default=None,
+                    help="逗号分隔的用例 id / 家族名 / 缺陷形态 / sound / unsound")
+    bd.add_argument("--out", default="decide_ab.jsonl")
+    bd.set_defaults(func=_bench_decide)
+
+    bdr = sub.add_parser("bench-decide-report", help="只出写入侧复核报告，不重跑")
+    bdr.add_argument("records")
+    bdr.add_argument("--json", action="store_true")
+    bdr.set_defaults(func=_bench_decide_report)
 
     bp = sub.add_parser("bench-plan",
                         help="拆解提示词对照 + 生成-复核循环实测（§12 M7 7.4 / 风险 #17）")

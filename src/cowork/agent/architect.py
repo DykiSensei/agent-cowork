@@ -295,6 +295,7 @@ class Architect:
         policy: Policy,
         human_gate: HumanGate | None = None,
         reviewer_backend: Backend | None = None,
+        review_writes: bool = False,
     ) -> None:
         self.backend = backend
         self.store = store
@@ -304,6 +305,13 @@ class Architect:
         # 产出 findings，改不了任何 spec。写权仍然只在 decide()/_apply_changes() 这条路上，
         # §2.3 的「唯一写入决策点」因此不变。给它写权 = 两个写入点 = 不变量破了。
         self.reviewer_backend = reviewer_backend
+        # 写入侧复核（§12 M8）：改 TaskSpec 前先让复核者看一眼。
+        # **默认关闭，这是刻意的。** 它的判别力还没有实测数据 —— M7 那个
+        # J 0.98 是在**拆解**上测的，不能假设迁移到「一次 spec 改动」上
+        # （§11.13 已经有过一次判据移植到新层后无可判之物的先例）。
+        # 按这个项目的规矩：没有对照实验的东西不进控制流的默认路径。
+        # 打开它跑 `bench/decide_ab.py` 出 TPR/FPR/J，够了再谈默认开。
+        self.review_writes = review_writes
         self.tokens_used = 0
         # 每个任务试过什么。M2 归因发现架构师**每次都在「第一次见到这个问题」的
         # 状态下决策** —— decide_interrupt 的输入里既没有前几轮的裁决，也没有
@@ -391,6 +399,16 @@ class Architect:
         reason = should_escalate(
             self.policy, spec, state, signals, verdict, identical_streak=streak
         )
+
+        # 写入侧复核（§12 M8）。只在**确定性/自评都没要求升级、而模型又要改 spec**
+        # 时进行 —— 那是风险 #3 剩下的真实暴露面（M2 实测 34/176 = 19% 的裁决
+        # 改了 spec 且无人过目）。已经要升级的不必复核：人马上就会看到它。
+        review_findings: list[str] = []
+        if reason is None and verdict.action == "MODIFY_TASK" and self.review_writes:
+            verdict, reason, review_findings = self._review_write(
+                spec, signals, ctx, verdict, history
+            )
+
         decider = Decider.LLM
         escalation_reason = None
         rationale = verdict.rationale
@@ -476,6 +494,63 @@ class Architect:
             suggestion=suggestion if escalation_reason else None,
             resume_mode=resume_mode,
             rationale=rationale,
+        )
+
+    def _review_write(
+        self,
+        spec: TaskSpec,
+        signals: list[Signal],
+        ctx: AgentContext,
+        verdict: ArchitectVerdict,
+        history: list[dict],
+    ) -> tuple[ArchitectVerdict, str | None, list[str]]:
+        """决策 → 复核 → 重做 ≤N → 升级给人。返回 (最终裁决, 升级理由, 最后一轮意见)。
+
+        **和拆解层的 `plan()` 是同一个循环**，判据同样来自 `escalation` / `policy`，
+        不新建平行逻辑（§12 M7 那条「发现自己在写平行逻辑就是方向错了」）：
+
+            拆解层：生成 → 复核 → 重生成 ≤ max_regenerate → 升级给人
+            写入侧：决策 → 复核 → 重做   ≤ max_regenerate → 升级给人
+
+        复核者**没有写权**：它只回 findings，改不了 spec。重做的仍然是架构师本人，
+        写权因此还在 `decide()/_apply_changes()` 这一条路上（§2.3 不变）。
+
+        两侧失败走同一条路（§11.13 的教训）：复核者调不动模型时不抛出去，
+        当作「没人复核得了」交给人 —— 手上明明有一版改动，不该因此崩掉。
+        """
+        reviewer = self.reviewer_backend or self.backend
+        findings: list[str] = []
+
+        for attempt in range(1, self.policy.max_regenerate + 2):
+            try:
+                ok, findings, tokens = reviewer.review_spec_change(spec, signals, verdict)
+            except ModelError as exc:
+                return verdict, f"复核者无法给出结论：{exc}", []
+            self.tokens_used += tokens
+
+            if ok:
+                return verdict, None, []
+            if attempt > self.policy.max_regenerate:
+                break
+
+            try:
+                verdict, tokens = self.backend.decide_interrupt(
+                    spec, signals, ctx, history=history, review_feedback=findings
+                )
+            except ModelError as exc:
+                return verdict, f"复核驳回后架构师无法重做：{exc}", findings
+            self.tokens_used += tokens
+
+            if verdict.action != "MODIFY_TASK":
+                # 重做之后不再改 spec 了（改成 CONTINUE / ABANDON 之类）——
+                # 那就不是写入，没有复核对象。让它回到主路径上按常规判。
+                return verdict, None, findings
+
+        return (
+            verdict,
+            f"复核者连续 {self.policy.max_regenerate + 1} 轮报出规格问题："
+            + "；".join(findings[:3]),
+            findings,
         )
 
     def _apply_changes(self, spec: TaskSpec, changes: dict) -> TaskSpec:

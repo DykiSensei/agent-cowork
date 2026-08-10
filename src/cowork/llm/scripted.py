@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from ..actions import AgentAction, Finish
 from ..llm import ArchitectVerdict, Triage
@@ -28,6 +28,8 @@ class ScriptedBackend:
         triage_for: Callable[[Signal], str] | None = None,
         probe_for: Callable[[TaskSpec, AgentContext], tuple[bool, str]] | None = None,
         review_for: Callable[[str, list], tuple[bool, list[str]]] | None = None,
+        spec_review_for: Callable[[TaskSpec, list[Signal], Any], tuple[bool, list[str]]]
+        | None = None,
         decompose_for: Callable[[str, list[str] | None], list] | None = None,
         token_cost: int = 500,
     ) -> None:
@@ -36,14 +38,17 @@ class ScriptedBackend:
         self.triage_for = triage_for or (lambda s: "escalate")
         self.probe_for = probe_for
         self.review_for = review_for
+        self.spec_review_for = spec_review_for
         self.decompose_for = decompose_for
         self.token_cost = token_cost
         self._cursor: dict[int, int] = {}
         self.probe_calls = 0
         self.profile_calls = 0
         self.review_calls = 0
+        self.spec_review_calls = 0
         self.decompose_calls = 0
         self.decompose_feedback: list[list[str] | None] = []
+        self.decide_feedback: list[list[str] | None] = []
         self.decide_history: list[dict] = []
 
     # -- Subagent ---------------------------------------------------------- #
@@ -72,8 +77,12 @@ class ScriptedBackend:
         ctx: AgentContext,
         *,
         history: list[dict] | None = None,
+        review_feedback: list[str] | None = None,
     ) -> tuple[ArchitectVerdict, int]:
         self.decide_history = list(history or [])  # 测试用：确认历史真的传进来了
+        # 每一轮拿到的复核意见：写入侧的生成-复核循环要断言「意见真的喂回去了」，
+        # 那是它和「每轮从零重做」的唯一区别（同 decompose_feedback）
+        self.decide_feedback.append(list(review_feedback) if review_feedback else None)
         if self.verdict_for is None:
             return (
                 ArchitectVerdict(
@@ -100,6 +109,15 @@ class ScriptedBackend:
             return True, [], self.token_cost // 5
         sufficient, missing = self.review_for(root_goal, specs)
         return sufficient, list(missing), self.token_cost // 5
+
+    def review_spec_change(
+        self, spec: TaskSpec, signals: list[Signal], verdict
+    ) -> tuple[bool, list[str], int]:
+        self.spec_review_calls += 1
+        if self.spec_review_for is None:
+            return True, [], self.token_cost // 5
+        ok, findings = self.spec_review_for(spec, signals, verdict)
+        return ok, list(findings), self.token_cost // 5
 
     def decompose(
         self, root_goal: str, *, feedback: list[str] | None = None
