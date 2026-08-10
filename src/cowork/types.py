@@ -376,6 +376,31 @@ class TaskState:
     tokens_used: int = 0
     started_at: float | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """给界面层用（M6）。存储层不走这里 —— 它按列写，见 store/sqlite.py。
+
+        这是「一个任务此刻怎么样了」的完整快照：状态机位置、进度、成本、
+        以及指回信号与 checkpoint 的 id。信号和决策的正文要另外从 Store 取
+        （`signals_for` / `decisions_for`），**不塞进这里** —— 它们会一直长，
+        而这个对象要能被高频轮询。
+        """
+        return {
+            "task_id": self.spec.id,
+            "parent_id": self.spec.parent_id,
+            "revision": self.spec.revision,
+            "goal": self.spec.goal,
+            "status": self.status.value,
+            "agent_id": self.agent_id,
+            "current_step": self.current_step,
+            "checkpoint_id": self.checkpoint_id,
+            "interrupt_count": self.interrupt_count,
+            "artifacts": list(self.artifacts),
+            "signal_log": list(self.signal_log),
+            "tokens_used": self.tokens_used,
+            "started_at": self.started_at,
+            "spec": self.spec.to_dict(),
+        }
+
 
 @dataclass
 class DecisionRecord:

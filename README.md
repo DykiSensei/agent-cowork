@@ -10,8 +10,9 @@ M3 ✅ PROBE 模式      成本 1.45x 已量化；收益（27 次探查 0 次命
 M4 ✅ 并行与冲突检测  4 子任务 / 2 种 task_class / 并行度 2，真实模型跑通
 M5a ✅ 停止判断       判别力 Youden J 0.12 → 0.60（第一版是回归，见下）
 M5b ✅ 拆解复核       验收标准反推 10/10 命中。**但拆解生成侧从未实现**
-M7 ◻ 拆解三角色      ← 下一步。生成者 / 复核者 / 人，关掉风险 #3 + #14
-M6 ◻ 群聊界面层      （与 M7 无耦合，可并行或后做）
+M7 ✅ 拆解三角色      生成者 / 复核者 / 人。跨模型复核 J 0.66 → 0.98；
+                     5 个自然语言目标全部拆出可执行子任务集并跑到产出
+M6 ◻ 群聊界面层      ← 下一步。接口文档见 `M6-界面层接口.md`
 ```
 
 ---
@@ -23,8 +24,9 @@ docker compose up -d postgres litellm
 python -m unittest discover -s tests -t .
 ```
 
-174 个测试。不起 Docker 的话，依赖真实服务的 14 个会 skip，其余照常跑；
-另有 2 个真实供应商测试需要 `DEEPSEEK_API_KEY` 或 `MOONSHOT_API_KEY`（`.env` 里配好即可，测试会自动读）。
+264 个测试。三样基础设施都不起时，依赖它们的 14 个会 skip（3 个 Postgres +
+5 个 LiteLLM + 6 个 Docker 沙箱），其余照常跑；打真实供应商的用例需要
+`DEEPSEEK_API_KEY` 或 `MOONSHOT_API_KEY`（`.env` 里配好即可，测试会自动读）。
 
 ```bash
 python -m cowork.cli demo                      # SQLite + 本地沙箱 + 脚本后端
@@ -135,7 +137,7 @@ HTTP 429
 
 ### 1.3 真实模型 ✅
 
-DeepSeek（架构师 `deepseek-reasoner` / Subagent 与分诊 `deepseek-chat`）和
+DeepSeek（v4 起三个角色统一 `deepseek-v4-flash`）和
 Kimi（`kimi-k3`）都跑通了完整链路，产出的 `solution.py` 经独立复核正确。
 
 **最有价值的发现：demo 场景对真实模型失去了区分度。**
@@ -414,8 +416,10 @@ src/cowork/
     subagent.py         薄绑定层：智能在 backend，权限在 runtime
     architect.py        决策 / 软信号分诊 / 验收 / 人的介入口
   llm/
+    __init__.py         Backend 协议 + ArchitectVerdict / SubtaskDraft / CacheStats
     scripted.py         确定性后端
-    anthropic_backend.py 真实后端
+    anthropic_backend.py 真实后端（提示词与 schema 都在这里，openai_compat 复用）
+    openai_compat.py    OpenAI 方言：其余 8 家都走它
     errors.py           provider 错误 → L0 硬信号
   store/
     sqlite.py           零依赖，默认
@@ -423,11 +427,16 @@ src/cowork/
   plan.py               §12 M4 拓扑分层 / 可分解性 / 静态冲突（全确定性）
   scheduler.py          §12 M4 并行调度 + 产出层冲突检测 + 仲裁
   demo_composite.py     M4 出口场景：4 子任务 / 2 种 task_class / 并行度 2
-  bench/                §12 M2 参数实测（不参与生产链路）
+  bench/                实测工具（不参与生产链路）
     tasks.py            M2 的 15 个任务 + M3 的 PROBE 对照 arm
     runner.py           跑批 + 仪表化，只包装不改被测对象
     analyze.py          从记录推参数：ROC / 分布 / 条件成功率 / PROBE 溢价
+    review_ab.py        M7 7.2 跨模型复核对照：12 个带标准答案的拆解 + TPR/FPR/J
+    plan_ab.py          M7 7.4 拆解提示词对照 + 生成-复核循环指标
 ```
+
+根目录还有两份文档：`多Agent协作系统-开发文档.md`（主线，设计与全部实测记录）、
+`M6-界面层接口.md`（给界面层那一侧看的接口约定）。
 
 ---
 
@@ -488,7 +497,7 @@ DEEPSEEK_API_KEY=sk-... docker compose up -d litellm
 
 curl -X POST http://localhost:4000/key/generate \
   -H "Authorization: Bearer sk-cowork-master" -H "Content-Type: application/json" \
-  -d '{"models":["deepseek-chat","deepseek-reasoner"],"max_budget":5.0,"key_alias":"task-xxx"}'
+  -d '{"models":["deepseek-v4-flash","deepseek-v4-pro"],"max_budget":5.0,"key_alias":"task-xxx"}'
 
 COWORK_LLM_BASE_URL=http://localhost:4000/v1 \
 COWORK_LLM_API_KEY=sk-<上面返回的 virtual key> \
@@ -523,8 +532,10 @@ Subagent 的动作解析会崩在一个看似正常的响应上。
 
 | 项 | 状态 |
 |---|---|
-| M7 拆解三角色 | 下一步。**架构师不会拆解**（§2.3 写了、代码里没有），且复核者与拆解者是同一个模型。方案见开发文档 §12 M7 |
-| M6 群聊界面层 | 当前是 CLI + `--json` 结构化日志。与 M7 无耦合 |
+| M6 群聊界面层 | **下一步**。当前是 CLI + `--json` 结构化日志。接口、约束、以及后端还欠什么，都在 `M6-界面层接口.md` |
+| 「拆出来的东西合起来能不能跑」 | 风险 #16：结构层查交集与环、语义层查覆盖，都不问这个。`isolated_dependency` 只堵了一种形态（§11.12） |
+| 拆解质量没有无偏度量 | 风险 #18：「复核一轮放行率」会被拆解粒度带偏，要真比质量得看派发执行后的产出（§11.13） |
+| 7 家供应商未验证 | `openai` / `gemini` / `qwen` / `zhipu` / `xai` / `doubao` / `anthropic` 的预设是照文档抄的，本机没有 key。有 key 就跑 `cowork.cli models` 对一遍（§11.14） |
 | M2 的两个遗留 | `soft_queue_threshold` / `soft_interval_s` 与 `step_soft_deadline_s` 都无代码读取，需决定接上还是删掉 |
 | PROBE 的收益 | 27 次探查 0 次命中。要标定收益，需要一个会可靠漂移的 `GENERATIVE` 任务 |
 | `e3_scope_bait` 任务 | 没按设计触发 `SCOPE_VIOLATION`，需重新设计（开发文档 §11.6g） |

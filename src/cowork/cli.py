@@ -237,15 +237,13 @@ def _run_demo(args: argparse.Namespace) -> int:
     if args.json:
         for ln in lines:
             print(json.dumps({"log": ln}, ensure_ascii=False))
+        # 顶层直接摊开 TaskState.to_dict()，**不另起一套字段名**：
+        # 界面层会照着这里的键写死解析，同一个东西在 CLI 叫 steps、在轮询接口叫
+        # current_step，是白白浪费对面一天的那种不一致（见 M6-界面层接口.md）。
         print(
             json.dumps(
                 {
-                    "task_id": result.state.spec.id,
-                    "status": result.state.status.value,
-                    "revision": result.state.spec.revision,
-                    "steps": result.state.current_step,
-                    "interrupts": result.state.interrupt_count,
-                    "tokens": result.state.tokens_used,
+                    **result.state.to_dict(),
                     "output": result.output,
                     "decisions": [d.to_dict() for d in result.decisions],
                     "signals": [

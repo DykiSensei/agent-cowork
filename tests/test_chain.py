@@ -5,6 +5,7 @@ L0 信号(TEST_FAILED) -> 中断 -> 架构师决策 -> REBASE -> 恢复 -> COMPL
 
 import json
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -96,6 +97,37 @@ class TestChain(unittest.TestCase):
         # 摘要作为只读上下文被注入
         kinds = [a["kind"] for a in first_rev2["injected"]]
         self.assertIn("summary", kinds)
+
+
+class TestTaskStateSerialization(unittest.TestCase):
+    """给界面层的快照（M6）。存储层不走它，所以只有这里盯着。"""
+
+    def _state(self):
+        from cowork.types import Criterion, SandboxProfile, TaskClass, TaskSpec, TaskState
+
+        spec = TaskSpec(
+            id="t1", goal="做点什么", acceptance=[Criterion("c1", "做完")],
+            task_class=TaskClass.CODE,
+            sandbox=SandboxProfile(workspace=tempfile.mkdtemp()),
+        )
+        return TaskState(spec=spec, current_step=3, interrupt_count=1, tokens_used=999)
+
+    def test_snapshot_is_json_serializable(self):
+        json.dumps(self._state().to_dict(), ensure_ascii=False)
+
+    def test_carries_the_fields_the_ui_polls_on(self):
+        d = self._state().to_dict()
+        for key in ("task_id", "status", "current_step", "interrupt_count",
+                    "tokens_used", "revision", "goal"):
+            self.assertIn(key, d)
+        self.assertEqual(d["status"], "PENDING")
+
+    def test_does_not_inline_signal_or_decision_bodies(self):
+        """正文会一直变长，而这个对象要能被高频轮询 —— 只放 id。"""
+        d = self._state().to_dict()
+        self.assertEqual(d["signal_log"], [])
+        self.assertNotIn("signals", d)
+        self.assertNotIn("decisions", d)
 
 
 if __name__ == "__main__":

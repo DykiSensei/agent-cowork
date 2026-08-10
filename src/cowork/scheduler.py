@@ -58,14 +58,14 @@ class CompositeResult:
             "plan": self.plan.to_dict(),
             "completed": self.completed,
             "wall_seconds": round(self.wall_seconds, 2),
+            # 每个任务摊开 TaskState.to_dict()，与单任务的 --json 用同一套字段名 ——
+            # 同一个东西两处叫法不同，界面层就要写两套解析（M6-界面层接口.md）。
+            # `produced` 单独一个键：state 里的 `artifacts` 是 id，这里要的是路径，
+            # 两者不是一回事，不能覆盖掉。
             "tasks": {
                 tid: {
-                    "status": r.state.status.value,
-                    "revision": r.state.spec.revision,
-                    "steps": r.state.current_step,
-                    "interrupts": r.state.interrupt_count,
-                    "tokens": r.state.tokens_used,
-                    "artifacts": [a.content_ref for a in r.context.produced],
+                    **r.state.to_dict(),
+                    "produced": [a.content_ref for a in r.context.produced],
                 }
                 for tid, r in self.results.items()
             },

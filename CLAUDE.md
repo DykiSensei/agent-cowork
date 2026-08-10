@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 多 Agent 协作系统原型。**设计文档是主线，代码是它的实现** —— 动代码前先看
 `多Agent协作系统-开发文档.md`，动完之后回去更新它。
+另有 `M6-界面层接口.md`：给界面层那一侧的接口约定。**改动 `to_dict()` 的形状、
+`HumanGate` 的签名、或信号类型时，那份文档也要跟着改** —— 它是对外承诺。
 
 当前：M2–M5 完成，**M7（拆解三角色）收口**，四条出口标准全部达成
 （§11.11 / §11.12 / §11.13）。**下一步 M6（群聊界面层）**。
@@ -40,7 +42,7 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 261 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 264 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
