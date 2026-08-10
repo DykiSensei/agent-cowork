@@ -52,9 +52,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **循环还是那一个**：决策 → 复核 → 重做 ≤ `max_regenerate` → 升级给人。
   意见走 `decide_interrupt(review_feedback=...)` 喂回去，**和 `history` 分开传** ——
   history 参与「同一指纹连续出现」的计数，被驳回的草稿混进去会把计数搞脏。
-- **默认仍关着，但数据已经不错**（§11.19，单臂 deepseek × 2 轮）：
-  **J 0.829 / FPR 0.000**。**别看聚合 TPR，看用例级** —— 五种形态里四种满分
-  （含最危险的改松目标 10/10），`limit_raised` / `scope_widened` 只有 2/5 且在抖。
+- **默认仍关着，但数据已经够了**（§11.19，三轮 165 次调用）：
+  **kimi J 0.886 / deepseek 0.829，FPR 两边都是 0/20**。**别看聚合 J，看用例级。**
+- **两个复核者的盲区是互补的，不是包含关系**：kimi 补上了 deepseek 那一族
+  「需要推断」的（`limit_raised` 2/5→4/5、`scope_widened` 2/5→5/5），
+  自己却在 deepseek 满分的 `non_responsive` 上掉到 2/5。J 只差 0.057，
+  底下结构完全不同 —— **同一个实验里第二次撞上「聚合指标把不同性质的东西平均掉」**。
+- **选型依据是漏报的代价，不是 J**（这条是方法，别只当结论看）：
+  把每种漏报接到既有兜底机制上问一遍「漏了会怎样」。`non_responsive` 漏了，
+  下一轮同样的信号原样重现 → `identical_streak` 到 2 → §7.2 确定性升级**接得住**；
+  `limit_raised` / `scope_widened` 漏了**没有兜底**，后者还会让任务「成功」。
+  **所以这一层选 kimi**，尽管它的 J 只高一点点。
 - **曾经的盲区与它的机制值得记**：v1 时「证据为空 + 编个因果 + 据此改松目标」
   是 0/5。原因不是模型笨 —— 提示词问的是「改完之后**失败证据**指的问题会被挡住吗」，
   而证据为空时这个判据**没有可判之物**。这是第三次遇到同一形状
@@ -114,7 +122,8 @@ python -m cowork.cli bench-plan --repeat 3                # M7 7.4 拆解提示�
 python -m cowork.cli bench-plan --goals wc --repeat 1     # 冒烟（--arms full,naive 可选一个）
 python -m cowork.cli bench-plan-report plan_ab.jsonl      # 只出报告，不重跑
 
-python -m cowork.cli bench-decide --repeat 5              # M8 8.4 写入侧复核对照 —— 还没跑过
+python -m cowork.cli bench-decide --repeat 5              # M8 8.4 写入侧复核，约 9 分钟 / 0.07M token/arm
+python -m cowork.cli bench-decide --arms kimi --repeat 5  # 单臂（默认 deepseek,kimi 两臂）
 python -m cowork.cli bench-decide --cases unsound         # 只跑正例（也收 id / 家族 / 缺陷形态）
 python -m cowork.cli bench-decide-report decide_ab.jsonl  # 只出报告，不重跑
 
@@ -143,8 +152,9 @@ PYTHONPATH=src python ui/mock/make_fixtures.py  # 重生成 ui/fixtures（在仓
 | `review_ab_positives_v2.jsonl` / `review_ab_negatives_v2.jsonl` | 返工后的正例 90 次 / 负例 30 次 |
 | `review_ab_v1.jsonl` | 用例表返工**前**的 120 次。别删 —— 它是「负例必须真的完整」那条坑的证据 |
 | `plan_ab.jsonl` | M7 7.4 的 37 次拆解（§11.13）：提示词两臂 × 6 目标，`max_regenerate` 的依据 |
-| `decide_ab.jsonl` | M8 8.4 的**最终**数据（§11.19）：补完盲区的 v2 提示词，J 0.829 / FPR 0.000 |
-| `decide_ab_v1.jsonl` | 补盲区**之前**的 55 次，J 0.686。别删 —— 再改这个提示词时它是现成对照组 |
+| `decide_ab.jsonl` | M8 8.4 的**最终**数据（§11.19）= 下面两个 arm 文件合并，110 次 |
+| `decide_ab_deepseek.jsonl` / `decide_ab_kimi.jsonl` | v2 提示词下的两个 arm，J 0.829 / 0.886。改提示词时按 arm 各自做基线 |
+| `decide_ab_v1.jsonl` | 补盲区**之前**的 deepseek 55 次，J 0.686。别删 —— 它是「证据为空时判据没有可判之物」那条的证据 |
 
 M5a 那四个文件是「改提示词必须两侧都测」的现成对照组，改停止判据时拿它做基线。
 `review_ab*` 同理，改复核提示词或换复核模型时拿它做基线；

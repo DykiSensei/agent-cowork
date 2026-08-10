@@ -14,9 +14,10 @@ Subagent 是薄执行层，Runtime 是完全确定性的（不含任何 LLM 调�
 `HumanGate` 的签名或信号类型时，那份文档必须同步改。
 
 当前进度：M0–M7 全部完成；M8（写入侧复核，改 TaskSpec 前让复核者看一眼）代码完成、
-判别力已实测（**J 0.829 / FPR 0.000**，§11.19），**默认仍关着**（`review_writes=True` 启用）。
-看那个数时**别看聚合 TPR，看用例级**：五种形态里四种满分，剩下「靠调大上限或扩 scope
-绕过问题」只有 2/5 且在抖 —— 那一族要的是推断，不是文本比对。**M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
+判别力已实测（**kimi J 0.886 / deepseek 0.829，FPR 两边 0/20**，§11.19），
+**默认仍关着**（`review_writes=True` 启用）。两个复核者的盲区**互补**，
+选型按**漏报代价**定而不是按 J：kimi 漏的 `non_responsive` 下一轮会被「指纹重复」
+的确定性判据接住，deepseek 漏的两种没兜底 —— 所以这一层用 kimi。**M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
 Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAPI，
 `python -m cowork.cli serve` 起服务，含 AWAITING_HUMAN 的 restore 路径）。
 `CLAUDE.md` 是给 Claude Code 的同类指南，内容更细，两者应保持一致。
