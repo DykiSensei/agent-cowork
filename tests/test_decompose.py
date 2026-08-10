@@ -200,6 +200,19 @@ class TestPlanLoop(unittest.TestCase):
         self.assertIn("供应商 500", result.escalation_reason)
         self.assertEqual(result.specs, [])
 
+    def test_reviewer_failure_takes_the_same_path_as_generator_failure(self):
+        """手上有拆解、只是没人复核得了 —— 该交给人，不该抛穿（§11.13 实测撞到）。"""
+        def boom(goal, specs):
+            raise ModelCallFailed("复核者被截断")
+
+        arch = self._arch(decompose_for=lambda g, f: GOOD, review_for=boom)
+        result = arch.plan(GOAL, template())
+
+        self.assertEqual(result.status, "AWAITING_HUMAN")
+        self.assertIn("复核者无法给出结论", result.escalation_reason)
+        self.assertEqual([s.id for s in result.specs], [s.id for s in GOOD],
+                         "拆解还在手上，不该丢掉")
+
     def test_history_records_every_round(self):
         n = {"i": 0}
 

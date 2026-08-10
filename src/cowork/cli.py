@@ -337,6 +337,72 @@ def _plan(args: argparse.Namespace) -> int:
     return 0 if outcome.completed else 1
 
 
+def _bench_plan(args: argparse.Namespace) -> int:
+    import tempfile
+    import time
+    from pathlib import Path
+
+    from .bench.plan_ab import NAIVE_DECOMPOSE_SYSTEM, run_batch, select_goals
+
+    goals = select_goals(args.goals)
+    if not goals:
+        print(f"--goals {args.goals!r} 没匹配到任何目标", file=sys.stderr)
+        return 2
+
+    def _with_prompt(system: str | None):
+        def factory():
+            backend = _make_backend(args.backend)
+            if system is not None:
+                backend.decompose_system = system
+            return backend
+        return factory
+
+    arms = {"full": _with_prompt(None), "naive": _with_prompt(NAIVE_DECOMPOSE_SYSTEM)}
+    if args.arms:
+        wanted = {x.strip() for x in args.arms.split(",")}
+        arms = {k: v for k, v in arms.items() if k in wanted}
+
+    reviewer = resolve_reviewer(args.backend, args.reviewer)
+    root = Path(args.workspace or tempfile.mkdtemp(prefix="cowork-planbench-"))
+    total = len(goals) * len(arms) * args.repeat
+    print(f"目标 {len(goals)} × arm {len(arms)} × {args.repeat} 次 = {total} 次拆解，"
+          f"拆解者 {args.backend} / 复核者 {reviewer or '（同拆解者）'}", file=sys.stderr)
+
+    started = time.monotonic()
+
+    def progress(rec, done: int, total_: int) -> None:
+        eta = (time.monotonic() - started) / done * (total_ - done)
+        note = "ERROR" if rec.error else (
+            f"{rec.status} {rec.attempts}轮 "
+            + ("一轮过" if rec.first_round_clean else f"被驳回{'→救回' if rec.recovered else ''}")
+        )
+        print(f"[{done}/{total_}] {rec.goal_id}/{rec.arm} {note} token={rec.tokens} "
+              f"{rec.wall_seconds:.0f}s ETA {eta / 60:.1f}min", file=sys.stderr)
+
+    out = Path(args.out)
+    run_batch(
+        goals, arms=arms,
+        reviewer_factory=(lambda: _make_backend(reviewer)) if reviewer else None,
+        repeat=args.repeat, out_path=out, workspace_root=root,
+        workers=args.workers, progress=progress,
+    )
+    print(f"\n记录写入 {out}", file=sys.stderr)
+    return _bench_plan_report(argparse.Namespace(records=str(out), json=False))
+
+
+def _bench_plan_report(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .bench.plan_ab import load, render, summarize
+
+    summary = summarize(load(Path(args.records)))
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        print(render(summary))
+    return 0
+
+
 def _bench_review(args: argparse.Namespace) -> int:
     import time
     from pathlib import Path
@@ -511,6 +577,26 @@ def main(argv: list[str] | None = None) -> int:
     rvr.add_argument("records")
     rvr.add_argument("--json", action="store_true")
     rvr.set_defaults(func=_bench_review_report)
+
+    bp = sub.add_parser("bench-plan",
+                        help="拆解提示词对照 + 生成-复核循环实测（§12 M7 7.4 / 风险 #17）")
+    bp.add_argument("--backend", choices=["anthropic", "deepseek", "kimi", "openai"],
+                    default="deepseek", help="拆解者")
+    bp.add_argument("--reviewer",
+                    choices=["auto", "none", "anthropic", "deepseek", "kimi", "openai"],
+                    default="auto")
+    bp.add_argument("--arms", default=None, help="full,naive 的子集，默认两个都跑")
+    bp.add_argument("--goals", default=None, help="逗号分隔的目标 id，默认全跑")
+    bp.add_argument("--repeat", type=int, default=2)
+    bp.add_argument("--workers", type=int, default=3)
+    bp.add_argument("--workspace", default=None)
+    bp.add_argument("--out", default="plan_ab.jsonl")
+    bp.set_defaults(func=_bench_plan)
+
+    bpr = sub.add_parser("bench-plan-report", help="只出拆解对照报告，不重跑")
+    bpr.add_argument("records")
+    bpr.add_argument("--json", action="store_true")
+    bpr.set_defaults(func=_bench_plan_report)
 
     args = p.parse_args(argv)
     return args.func(args)

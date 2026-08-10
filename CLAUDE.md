@@ -5,13 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 多 Agent 协作系统原型。**设计文档是主线，代码是它的实现** —— 动代码前先看
 `多Agent协作系统-开发文档.md`，动完之后回去更新它。
 
-当前：M2–M5 完成，**M7（拆解三角色）7.1–7.5 全部实现**（§11.11 / §11.12）。
-**下一步 M6（群聊界面层）**，或先补风险 #17 的样本。
+当前：M2–M5 完成，**M7（拆解三角色）收口**，四条出口标准全部达成
+（§11.11 / §11.12 / §11.13）。**下一步 M6（群聊界面层）**。
 
-`policy.py` 的参数已有实测依据（§11.6 / §11.7 / §11.9），改它们之前先跑 `bench`，别凭感觉调。
-唯一没有实测依据的是 `max_regenerate`（结构性地跟 `max_rebase` 取同值）。
+`policy.py` 的参数全部有实测依据（§11.6 / §11.7 / §11.9 / §11.13），
+改它们之前先跑 `bench` 或 `bench-plan`，别凭感觉调。
 
-拆解这一层的要点，动代码前先看 §12 M7 / §11.11 / §11.12：
+拆解这一层的要点，动代码前先看 §12 M7 / §11.11 / §11.12 / §11.13：
 
 - **只有生成者有写权**。复核者是顾问、人是仲裁者 —— §2.3 的「唯一写入决策点」不变。
   给复核者驳回或改写 spec 的能力 = 两个写入点 = 不变量破了（`test_decompose` 钉着）。
@@ -23,8 +23,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **两层复核都不问「拆出来的东西合起来能不能跑」**（风险 #16）。结构层查交集与环，
   语义层查覆盖。真实生成的拆解已经栽过一次：模型用「一人一个子目录」满足 scope 不相交，
   依赖方 import 不到被依赖方。`isolated_dependency` 只堵了这一种形态。
-- **重生成路径没有真实样本**（风险 #17）：5 个目标全部一轮通过复核。
-  循环、上限、意见回喂只有脚本后端测试覆盖。**「测试全绿」和「这条路径被真实跑过」是两件事。**
+- **「指纹重复」判据在拆解层几乎是死的**（§11.13）：16 次重生成里第二轮缺口
+  16/16 都和第一轮不同，一次没触发，兜底全靠 `max_regenerate`。执行层的指纹看的是
+  「同一个信号原样重现」，而复核者每轮看到的是一份**不同的**拆解 ——
+  **判据移植过来了，但在新的一层上它没有可判之物**。别拿它当主力。
+- **「复核一轮放行率」不是拆解质量的度量**（风险 #18）：更细的拆解给复核者更多
+  可挑之处。限定词纪律那版 50% vs 朴素版 56%，但前者漏的是深层衔接、后者漏的是
+  限定词本身 —— 两臂在不同水位线上被驳回。要真比质量得看派发执行后的产出。
 - 复核者默认 `kimi`（`cli.DEFAULT_REVIEWER`）：§11.11 实测 J 0.98 vs deepseek 0.66，
   且后者在同一份输入上会翻面。`--reviewer none` 退回同模型复核。
 
@@ -35,7 +40,7 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 233 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 248 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -60,6 +65,10 @@ python -m cowork.cli bench-report bench_runs.jsonl        # 只出报告，不�
 python -m cowork.cli bench-review --repeat 5              # M7 7.2 跨模型复核，约 25 分钟 / 0.2M token
 python -m cowork.cli bench-review --cases complete        # 只跑负例（id / 家族名 / 缺陷形态都收）
 python -m cowork.cli bench-review-report review_ab.jsonl  # 只出报告，不重跑
+
+python -m cowork.cli bench-plan --repeat 3                # M7 7.4 拆解提示词对照，约 50 分钟 / 0.8M token
+python -m cowork.cli bench-plan --goals wc --repeat 1     # 冒烟（--arms full,naive 可选一个）
+python -m cowork.cli bench-plan-report plan_ab.jsonl      # 只出报告，不重跑
 ```
 
 `bench` 要花真钱和 25 分钟，跑之前先用 `--tasks p1_word_count --repeat 1` 冒烟。
@@ -78,9 +87,11 @@ python -m cowork.cli bench-review-report review_ab.jsonl  # 只出报告，不�
 | `review_ab.jsonl` | M7 7.2 的**最终**数据（§11.11），= 下面两个 v2 文件合并 |
 | `review_ab_positives_v2.jsonl` / `review_ab_negatives_v2.jsonl` | 返工后的正例 90 次 / 负例 30 次 |
 | `review_ab_v1.jsonl` | 用例表返工**前**的 120 次。别删 —— 它是「负例必须真的完整」那条坑的证据 |
+| `plan_ab.jsonl` | M7 7.4 的 37 次拆解（§11.13）：提示词两臂 × 6 目标，`max_regenerate` 的依据 |
 
 M5a 那四个文件是「改提示词必须两侧都测」的现成对照组，改停止判据时拿它做基线。
-`review_ab*` 同理，改复核提示词或换复核模型时拿它做基线。
+`review_ab*` 同理，改复核提示词或换复核模型时拿它做基线；
+`plan_ab.jsonl` 是改拆解提示词或 `max_regenerate` 时的基线。
 
 测试不需要 `PYTHONPATH` —— `tests/__init__.py` 负责挂 `src/` 并载入 `.env`
 （所以打真实供应商的用例能自己拿到 key）。CLI 未 `pip install -e .` 时才需要
@@ -236,6 +247,11 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   正文 0 字符。三件事都要做：额度给够（拆解 16000）、**把截断单独认出来**
   （截断的 JSON 报出来是「不是合法 JSON」，照着查会查错方向）、
   **截断后原样重掷而不是带残文修复**（残文回灌只会让它接着写半截 JSON）。
+- **改一处 token 额度时，问一句同一条链上还有谁的输入变长了**。M7 把拆解调用提到
+  16000，复核调用留在 4096 —— 而复核要读完整份拆解再推理，实测被吃满、正文 0 字符。
+- **两侧的失败要走同一条路**。`plan()` 第一版只接住生成者的 `ModelError`，
+  复核者失败就抛穿整个循环 —— 手上明明有拆解，却因为「没人复核得了」而崩掉。
+  凡是「A 失败有兜底」的地方，都要问 B 失败走哪儿。
 - **空产出不能被「同意」**。生成者调不动模型时手上是空列表，而 `AutoApproveGate`
   对什么都点头 —— 于是「拆解失败」被记成「ACCEPTED，0 个子任务」。
   **这个洞在脚本后端上永远暴露不了**，因为脚本后端不会调用失败。
@@ -279,4 +295,5 @@ llm/            __init__ 是后端协议本身：Backend Protocol + ArchitectVer
 store/          sqlite（默认）/ postgres（正式）
 bench/          §12 M2/M3/M5 实测 —— 只包装不改被测对象，不参与生产链路
                 review_ab.py 是 M7 7.2：12 个带标准答案的拆解 + TPR/FPR/J
+                plan_ab.py  是 M7 7.4：提示词两臂 + 生成-复核循环的指标
 ```

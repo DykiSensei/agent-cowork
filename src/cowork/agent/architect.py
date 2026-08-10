@@ -572,7 +572,16 @@ class Architect:
                 review = None
                 break
 
-            review = self.review_decomposition(root_goal, specs)
+            try:
+                review = self.review_decomposition(root_goal, specs)
+            except ModelError as exc:
+                # **复核者失败和生成者失败必须走同一条路**。第一版只接住了生成侧，
+                # 于是复核者被截断时整个 plan() 抛穿 —— 手上明明有一份拆解，
+                # 却因为「没人复核得了」而崩掉，而不是交给人看一眼（§11.13 实测撞到）。
+                reason = f"复核者无法给出结论：{exc}"
+                log(f"[PLAN] 第 {attempt} 轮复核失败：{exc}")
+                review = None
+                break
             fp = _findings_fingerprint(review)
             fingerprints.append(fp)
             history.append(

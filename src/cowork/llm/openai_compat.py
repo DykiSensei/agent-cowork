@@ -36,6 +36,7 @@ from .anthropic_backend import (
     DECOMPOSE_SYSTEM,
     PROBE_SCHEMA,
     PROBE_SYSTEM,
+    REVIEW_MAX_TOKENS,
     REVIEW_SCHEMA,
     REVIEW_SYSTEM,
     SUBAGENT_SYSTEM,
@@ -78,6 +79,7 @@ class OpenAICompatBackend:
         max_tokens: int = 4096,
         max_retries: int = 2,
         repair_rounds: int = 1,
+        decompose_system: str | None = None,
     ) -> None:
         import openai  # 延迟导入：跑脚本后端时不需要
 
@@ -99,6 +101,10 @@ class OpenAICompatBackend:
         self.triage_model = triage_model or architect_model
         self.max_tokens = max_tokens
         self.repair_rounds = repair_rounds
+        # 只有拆解提示词开了这个口子：它是 M7 唯一一条「靠提示词而不是靠确定性
+        # 规则」的质量来源，所以必须能被换掉做对照（§11.13）。其余提示词不给
+        # 覆盖入口 —— 能换就会有人换，而没有对照组的提示词改动是没法验证的。
+        self.decompose_system = decompose_system or DECOMPOSE_SYSTEM
         # 实例级覆盖类属性：跨模型对照里两个 arm 都是这个类，只报类名等于没记
         # （§12 M7 7.2 的记录要能区分是谁复核的）。用架构师模型 —— 复核走的就是它。
         self.name = f"openai-compat:{self.architect_model}"
@@ -301,6 +307,7 @@ class OpenAICompatBackend:
             system=REVIEW_SYSTEM,
             user=_render_review_context(root_goal, specs),
             schema=REVIEW_SCHEMA,
+            max_tokens=REVIEW_MAX_TOKENS,
         )
         return data["sufficient"], list(data["missing"]), tokens
 
@@ -309,7 +316,7 @@ class OpenAICompatBackend:
     ) -> tuple[list[SubtaskDraft], int]:
         data, tokens = self._call(
             model=self.architect_model,
-            system=DECOMPOSE_SYSTEM,
+            system=self.decompose_system,
             user=_render_decompose_context(root_goal, feedback),
             schema=DECOMPOSE_SCHEMA,
             # 拆解是这里最长的一次输出：6 个子任务 × 若干条带命令的验收标准，

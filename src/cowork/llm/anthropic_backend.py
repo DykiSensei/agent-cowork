@@ -233,6 +233,10 @@ REVIEW_SYSTEM = """你在复核一个任务拆解，用的方法是**验收标�
 
 没有缺口就回答 sufficient=true、missing 留空数组。**不要为了显得有用而编缺口。**"""
 
+# 复核要读完整份拆解再推理，输入长、thinking 也长。默认的 4096 实测会被吃满：
+# kimi-k3 复核一份 4 子任务的拆解时正文 0 字符、全烧在 reasoning 上（§11.13）。
+REVIEW_MAX_TOKENS = 8_000
+
 REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
