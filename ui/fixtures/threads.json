@@ -1,0 +1,90 @@
+[
+ {
+  "task_id": "task_composite_root",
+  "title": "复合任务（4 个子任务）",
+  "status": "COMPLETED",
+  "composite": true,
+  "tokens_used": 3200,
+  "revision": 1,
+  "current_step": 8,
+  "terminal": true,
+  "updated_at": 1786378078.0144973
+ },
+ {
+  "task_id": "task_b193fcea6652",
+  "title": "生成周报草稿",
+  "status": "INTERRUPTED",
+  "composite": false,
+  "tokens_used": 0,
+  "revision": 1,
+  "current_step": 0,
+  "terminal": false,
+  "updated_at": 1786378077.71881
+ },
+ {
+  "task_id": "task_697b445c5380",
+  "title": "实现 word_count(text) 词频统计",
+  "status": "RUNNING",
+  "composite": false,
+  "tokens_used": 0,
+  "revision": 1,
+  "current_step": 0,
+  "terminal": false,
+  "updated_at": 1786378077.7063673
+ },
+ {
+  "task_id": "task_eaecb366976c",
+  "title": "整理 README 与目录结构",
+  "status": "PENDING",
+  "composite": false,
+  "tokens_used": 0,
+  "revision": 1,
+  "current_step": 0,
+  "terminal": false,
+  "updated_at": 1786378077.7015293
+ },
+ {
+  "task_id": "task_d6fecfb8c0fb",
+  "title": "在 solution.py 里实现 is_palindrome(s) -> bool，判断字符串是否回文。",
+  "status": "ABANDONED",
+  "composite": false,
+  "tokens_used": 1500,
+  "revision": 1,
+  "current_step": 2,
+  "terminal": true,
+  "updated_at": 1786378077.5789914
+ },
+ {
+  "task_id": "task_9c37d5150c56",
+  "title": "在 solution.py 里实现 is_palindrome(s) -> bool，判断字符串是否回文。",
+  "status": "FAILED",
+  "composite": false,
+  "tokens_used": 1600,
+  "revision": 2,
+  "current_step": 2,
+  "terminal": true,
+  "updated_at": 1786378077.429486
+ },
+ {
+  "task_id": "task_df44e8e8bb30",
+  "title": "在 solution.py 里实现 is_palindrome(s) -> bool，判断字符串是否回文。",
+  "status": "AWAITING_HUMAN",
+  "composite": false,
+  "tokens_used": 1500,
+  "revision": 1,
+  "current_step": 2,
+  "terminal": false,
+  "updated_at": 1786378077.3075042
+ },
+ {
+  "task_id": "task_a0338b0d02b8",
+  "title": "在 solution.py 里实现 is_palindrome(s) -> bool，判断字符串是否回文。",
+  "status": "COMPLETED",
+  "composite": false,
+  "tokens_used": 2600,
+  "revision": 2,
+  "current_step": 4,
+  "terminal": true,
+  "updated_at": 1786378077.0581253
+ }
+]

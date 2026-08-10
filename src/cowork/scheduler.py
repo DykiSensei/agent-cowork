@@ -88,6 +88,7 @@ class Scheduler:
         root_goal: str | None = None,
         reviewer_backend: Backend | None = None,
         log: Callable[[str], None] = print,
+        registry: dict | None = None,
     ) -> None:
         self.specs = list(specs)
         # 有原始目标才谈得上「拆解复核」—— 复核问的是「这些子任务合起来
@@ -100,6 +101,9 @@ class Scheduler:
         self.human_gate = human_gate
         self.max_parallel = max_parallel
         self.log = log
+        # 活 Orchestrator 注册表（task_id → Orchestrator）：服务层用它找
+        # 正在跑的任务做人介入。不需要介入入口的调用方不传。
+        self.registry = registry
         self.plan = build_plan(self.specs)
         # 复合任务在界面上是**一条线程**，而它的时间线（分层、复核、冲突）不属于
         # 任何一个子任务。子任务共同的 parent_id 就是那条线程的 id；
@@ -208,6 +212,10 @@ class Scheduler:
             human_gate=self.human_gate,
             log=lambda m, _t=spec.id: self.log(f"  [{_t}] {m}"),
         )
+        # 注册活的 Orchestrator：服务层的人介入（HUMAN_INTERVENTION）要拿到
+        # 它的 bus 才能抢占 —— 注册表归调度层持有，跑完就摘
+        if self.registry is not None:
+            self.registry[spec.id] = orch
         # 上游产出以只读上下文注入 —— 传引用不传全文（§8）。
         # 这是下游任务能看到上游成果的**唯一**途径：经调度层注入，
         # 不是 Subagent 之间直连（§1.4 第一条）。上游任务只可能在更早的层，
@@ -220,7 +228,11 @@ class Scheduler:
         ]
         if upstream:
             orch.inject(upstream)
-        return spec.id, orch.run(max_cycles=max_cycles)
+        try:
+            return spec.id, orch.run(max_cycles=max_cycles)
+        finally:
+            if self.registry is not None:
+                self.registry.pop(spec.id, None)
 
     # ------------------------------------------------------------------ #
     # 4.3 冲突检测：产出层的确定性检查

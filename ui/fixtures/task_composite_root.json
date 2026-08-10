@@ -1,0 +1,461 @@
+{
+ "kind": "composite",
+ "state": null,
+ "plan": {
+  "layers": [
+   [
+    "t1_parse",
+    "t2_format"
+   ],
+   [
+    "t3_report"
+   ],
+   [
+    "t4_check"
+   ]
+  ],
+  "max_parallel": 2,
+  "decomposable": true,
+  "issues": []
+ },
+ "review": {
+  "structural": [],
+  "sufficient": true,
+  "missing": [],
+  "tokens": 20,
+  "reviewer": "scripted-composite",
+  "independent": false
+ },
+ "tasks": {
+  "t2_format": {
+   "task_id": "t2_format",
+   "parent_id": "task_composite_root",
+   "revision": 1,
+   "goal": "在 formatter.py 里实现 format_row(row)，把 ('a', 1) 渲染成 'a = 1'。",
+   "status": "COMPLETED",
+   "agent_id": "agent_db79be3b0b5f",
+   "current_step": 2,
+   "checkpoint_id": "ckpt_e0a4509ba860",
+   "interrupt_count": 0,
+   "artifacts": [
+    "art_f4ca4d29530a"
+   ],
+   "signal_log": [],
+   "tokens_used": 800,
+   "started_at": 1786378077.7691205,
+   "spec": {
+    "id": "t2_format",
+    "parent_id": "task_composite_root",
+    "revision": 1,
+    "goal": "在 formatter.py 里实现 format_row(row)，把 ('a', 1) 渲染成 'a = 1'。",
+    "acceptance": [
+     {
+      "id": "c1",
+      "description": "verify_format.py 通过",
+      "command": [
+       "python",
+       "verify_format.py"
+      ]
+     }
+    ],
+    "output_schema": {
+     "type": "object",
+     "properties": {
+      "file": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "file"
+     ]
+    },
+    "task_class": "CODE",
+    "hard_signals": [
+     "BUDGET_EXCEEDED",
+     "CONFLICT_DETECTED",
+     "HUMAN_INTERVENTION",
+     "SCOPE_VIOLATION",
+     "STEP_LIMIT",
+     "TEST_FAILED",
+     "TIMEOUT",
+     "TOOL_FAILURE",
+     "VALIDATION_FAILED"
+    ],
+    "silence_policy": "TRUST",
+    "probe_interval_s": null,
+    "model": "claude-opus-5",
+    "sandbox": {
+     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-kltrhlt9",
+     "allowed_binaries": [
+      "python"
+     ],
+     "use_docker": false,
+     "image": "python:3.12-slim",
+     "network": "none"
+    },
+    "scope": [
+     "formatter.py"
+    ],
+    "tools": [
+     "write_file",
+     "read_file",
+     "list_files",
+     "run"
+    ],
+    "deadline_s": 300.0,
+    "max_steps": 8,
+    "token_budget": 60000,
+    "context_refs": [],
+    "depends_on": []
+   }
+  },
+  "t1_parse": {
+   "task_id": "t1_parse",
+   "parent_id": "task_composite_root",
+   "revision": 1,
+   "goal": "在 parse.py 里实现 parse_line(s)，把 'name,42' 解析成 ('name', 42)。",
+   "status": "COMPLETED",
+   "agent_id": "agent_f037d15cd11c",
+   "current_step": 2,
+   "checkpoint_id": "ckpt_dee4ace8fc01",
+   "interrupt_count": 0,
+   "artifacts": [
+    "art_ffea68c870d6"
+   ],
+   "signal_log": [],
+   "tokens_used": 800,
+   "started_at": 1786378077.769253,
+   "spec": {
+    "id": "t1_parse",
+    "parent_id": "task_composite_root",
+    "revision": 1,
+    "goal": "在 parse.py 里实现 parse_line(s)，把 'name,42' 解析成 ('name', 42)。",
+    "acceptance": [
+     {
+      "id": "c1",
+      "description": "verify_parse.py 通过",
+      "command": [
+       "python",
+       "verify_parse.py"
+      ]
+     }
+    ],
+    "output_schema": {
+     "type": "object",
+     "properties": {
+      "file": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "file"
+     ]
+    },
+    "task_class": "CODE",
+    "hard_signals": [
+     "BUDGET_EXCEEDED",
+     "CONFLICT_DETECTED",
+     "HUMAN_INTERVENTION",
+     "SCOPE_VIOLATION",
+     "STEP_LIMIT",
+     "TEST_FAILED",
+     "TIMEOUT",
+     "TOOL_FAILURE",
+     "VALIDATION_FAILED"
+    ],
+    "silence_policy": "TRUST",
+    "probe_interval_s": null,
+    "model": "claude-opus-5",
+    "sandbox": {
+     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-kltrhlt9",
+     "allowed_binaries": [
+      "python"
+     ],
+     "use_docker": false,
+     "image": "python:3.12-slim",
+     "network": "none"
+    },
+    "scope": [
+     "parse.py"
+    ],
+    "tools": [
+     "write_file",
+     "read_file",
+     "list_files",
+     "run"
+    ],
+    "deadline_s": 300.0,
+    "max_steps": 8,
+    "token_budget": 60000,
+    "context_refs": [],
+    "depends_on": []
+   }
+  },
+  "t3_report": {
+   "task_id": "t3_report",
+   "parent_id": "task_composite_root",
+   "revision": 1,
+   "goal": "在 report.py 里实现 render(lines)：对每行调用 parse.parse_line，再用 formatter.format_row 渲染，最后用换行连接。",
+   "status": "COMPLETED",
+   "agent_id": "agent_d0730f46be1d",
+   "current_step": 2,
+   "checkpoint_id": "ckpt_fe08ad31d637",
+   "interrupt_count": 0,
+   "artifacts": [
+    "art_9e29ec423a2f"
+   ],
+   "signal_log": [],
+   "tokens_used": 800,
+   "started_at": 1786378077.9079156,
+   "spec": {
+    "id": "t3_report",
+    "parent_id": "task_composite_root",
+    "revision": 1,
+    "goal": "在 report.py 里实现 render(lines)：对每行调用 parse.parse_line，再用 formatter.format_row 渲染，最后用换行连接。",
+    "acceptance": [
+     {
+      "id": "c1",
+      "description": "verify_report.py 通过",
+      "command": [
+       "python",
+       "verify_report.py"
+      ]
+     }
+    ],
+    "output_schema": {
+     "type": "object",
+     "properties": {
+      "file": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "file"
+     ]
+    },
+    "task_class": "CODE",
+    "hard_signals": [
+     "BUDGET_EXCEEDED",
+     "CONFLICT_DETECTED",
+     "HUMAN_INTERVENTION",
+     "SCOPE_VIOLATION",
+     "STEP_LIMIT",
+     "TEST_FAILED",
+     "TIMEOUT",
+     "TOOL_FAILURE",
+     "VALIDATION_FAILED"
+    ],
+    "silence_policy": "TRUST",
+    "probe_interval_s": null,
+    "model": "claude-opus-5",
+    "sandbox": {
+     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-kltrhlt9",
+     "allowed_binaries": [
+      "python"
+     ],
+     "use_docker": false,
+     "image": "python:3.12-slim",
+     "network": "none"
+    },
+    "scope": [
+     "report.py"
+    ],
+    "tools": [
+     "write_file",
+     "read_file",
+     "list_files",
+     "run"
+    ],
+    "deadline_s": 300.0,
+    "max_steps": 8,
+    "token_budget": 60000,
+    "context_refs": [],
+    "depends_on": [
+     "t1_parse",
+     "t2_format"
+    ]
+   }
+  },
+  "t4_check": {
+   "task_id": "t4_check",
+   "parent_id": "task_composite_root",
+   "revision": 1,
+   "goal": "跑一遍 verify_all.py 确认三个模块都好了，然后把 'all green' 写进 checked.txt。",
+   "status": "COMPLETED",
+   "agent_id": "agent_2071c81d4b5a",
+   "current_step": 2,
+   "checkpoint_id": "ckpt_92b58d248a14",
+   "interrupt_count": 0,
+   "artifacts": [
+    "art_b06d63e7e258"
+   ],
+   "signal_log": [],
+   "tokens_used": 800,
+   "started_at": 1786378078.0144973,
+   "spec": {
+    "id": "t4_check",
+    "parent_id": "task_composite_root",
+    "revision": 1,
+    "goal": "跑一遍 verify_all.py 确认三个模块都好了，然后把 'all green' 写进 checked.txt。",
+    "acceptance": [
+     {
+      "id": "c1",
+      "description": "verify_all.py 通过",
+      "command": [
+       "python",
+       "verify_all.py"
+      ]
+     }
+    ],
+    "output_schema": {
+     "type": "object",
+     "properties": {
+      "file": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "file"
+     ]
+    },
+    "task_class": "TOOL_CALL",
+    "hard_signals": [
+     "BUDGET_EXCEEDED",
+     "CONFLICT_DETECTED",
+     "HUMAN_INTERVENTION",
+     "SCOPE_VIOLATION",
+     "STEP_LIMIT",
+     "TIMEOUT",
+     "TOOL_FAILURE",
+     "VALIDATION_FAILED"
+    ],
+    "silence_policy": "TRUST",
+    "probe_interval_s": null,
+    "model": "claude-opus-5",
+    "sandbox": {
+     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-kltrhlt9",
+     "allowed_binaries": [
+      "python"
+     ],
+     "use_docker": false,
+     "image": "python:3.12-slim",
+     "network": "none"
+    },
+    "scope": [
+     "checked.txt"
+    ],
+    "tools": [
+     "write_file",
+     "read_file",
+     "list_files",
+     "run"
+    ],
+    "deadline_s": 300.0,
+    "max_steps": 8,
+    "token_budget": 60000,
+    "context_refs": [],
+    "depends_on": [
+     "t3_report"
+    ]
+   }
+  }
+ },
+ "events": [
+  {
+   "id": "ev_e13fc1f48101",
+   "task_id": "task_composite_root",
+   "seq": 1,
+   "kind": "plan",
+   "text": "",
+   "ref_id": null,
+   "payload": {
+    "layers": [
+     [
+      "t1_parse",
+      "t2_format"
+     ],
+     [
+      "t3_report"
+     ],
+     [
+      "t4_check"
+     ]
+    ],
+    "max_parallel": 2,
+    "decomposable": true,
+    "issues": []
+   },
+   "created_at": 1786378077.741507
+  },
+  {
+   "id": "ev_c8371072ee3d",
+   "task_id": "task_composite_root",
+   "seq": 2,
+   "kind": "review",
+   "text": "",
+   "ref_id": null,
+   "payload": {
+    "structural": [],
+    "sufficient": true,
+    "missing": [],
+    "tokens": 20,
+    "reviewer": "scripted-composite",
+    "independent": false
+   },
+   "created_at": 1786378077.7463672
+  },
+  {
+   "id": "ev_11912d9022bd",
+   "task_id": "task_composite_root",
+   "seq": 3,
+   "kind": "log",
+   "text": "[REVIEW] 复核者 scripted-composite（拆解者自己）",
+   "ref_id": null,
+   "payload": {},
+   "created_at": 1786378077.753046
+  },
+  {
+   "id": "ev_9b2fd2c98b7a",
+   "task_id": "task_composite_root",
+   "seq": 4,
+   "kind": "log",
+   "text": "[REVIEW] 验收标准反推：覆盖完整",
+   "ref_id": null,
+   "payload": {},
+   "created_at": 1786378077.75841
+  },
+  {
+   "id": "ev_2205683455e0",
+   "task_id": "task_composite_root",
+   "seq": 5,
+   "kind": "log",
+   "text": "[LAYER] 1/3 并行 2: ['t1_parse', 't2_format']",
+   "ref_id": null,
+   "payload": {},
+   "created_at": 1786378077.7633467
+  },
+  {
+   "id": "ev_48c5e2d4ae02",
+   "task_id": "task_composite_root",
+   "seq": 6,
+   "kind": "log",
+   "text": "[LAYER] 2/3 并行 1: ['t3_report']",
+   "ref_id": null,
+   "payload": {},
+   "created_at": 1786378077.9030032
+  },
+  {
+   "id": "ev_f056d0a1ebea",
+   "task_id": "task_composite_root",
+   "seq": 7,
+   "kind": "log",
+   "text": "[LAYER] 3/3 并行 1: ['t4_check']",
+   "ref_id": null,
+   "payload": {},
+   "created_at": 1786378078.0086575
+  }
+ ],
+ "signals": {},
+ "decisions": {},
+ "pending_children": []
+}

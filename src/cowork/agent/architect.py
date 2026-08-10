@@ -504,6 +504,101 @@ class Architect:
                 kwargs[field_name] = changes[field_name]
         return spec.bump(**kwargs)
 
+    # -- 人的裁决落地（M6 restore 路径）-------------------------------------- #
+
+    def apply_human_ruling(
+        self, state: TaskState, ruling: HumanRuling, store
+    ) -> DecisionRecord:
+        """把人的答复落成一条 DecisionRecord —— restore 路径的裁决入口。
+
+        与 decide() 的网关后路径同构：ruling 接管 action / rationale / spec_changes，
+        触发信号、升级原因、模型当时的建议都从挂起时的占位裁决上取回。
+        **spec 的改动仍然走 `_apply_changes`** —— 人的答复不能绕过架构师直接改
+        spec（§7 第 1 条），这里就是那扇门。
+        """
+        escalated = [
+            d for d in store.decisions_for(state.spec.id) if d.escalation_reason
+        ]
+        placeholder = escalated[-1] if escalated else None
+        triggers = list(placeholder.trigger) if placeholder else []
+
+        action = ruling.action
+        spec_changes = dict(ruling.spec_changes or {})
+        new_spec = None
+        resume_mode = None
+        if action is Action.MODIFY_TASK:
+            new_spec = self._apply_changes(state.spec, spec_changes)
+            resume_mode = choose_resume_mode(state.spec, new_spec)
+        elif action in (Action.CONTINUE, Action.REASSIGN):
+            new_spec = state.spec
+            resume_mode = (
+                ResumeMode.RESUME if action is Action.CONTINUE else ResumeMode.RESTART
+            )
+
+        # 占位裁决当年没进 history（decide() 提前返回），人的裁决补上这一笔，
+        # 否则「同一指纹连续出现」的计数在 restore 之后会漏掉这次失败的尝试
+        sigs = {s.id: s for s in store.signals_for(state.spec.id)}
+        trigger_sigs = [sigs[i] for i in triggers if i in sigs]
+        if trigger_sigs:
+            self._history.setdefault(state.spec.id, []).append(
+                {
+                    "fingerprint": fingerprint(trigger_sigs),
+                    "signals": sorted({s.type.value for s in trigger_sigs}),
+                    "action": action.value,
+                    "rationale": ruling.rationale[:300],
+                }
+            )
+
+        return DecisionRecord(
+            task_id=state.spec.id,
+            trigger=triggers,
+            decider=Decider.HUMAN,
+            complexity_score=(
+                placeholder.suggestion.get("complexity_score")
+                if placeholder and placeholder.suggestion
+                else None
+            ),
+            escalation_reason=placeholder.escalation_reason if placeholder else None,
+            action=action,
+            new_spec=new_spec,
+            spec_changes=spec_changes,
+            # 人接手后也保留模型当时的建议：事后复盘要能对照
+            # 「模型想怎么做 / 人最后怎么定的」（§10.1）
+            suggestion=placeholder.suggestion if placeholder else None,
+            resume_mode=resume_mode,
+            rationale=ruling.rationale,
+        )
+
+    def prime_history(self, task_id: str, store) -> None:
+        """从存储重建 `_history[task_id]` —— restore 时调用。
+
+        `_history` 是内存态，restore 出来的 Architect 是新实例；不重建的话
+        「同一指纹连续 N 次」的确定性升级（§7.2 第 1b 条）会从 0 开始，
+        restore 之前的失败尝试就白数了。重建材料都在存储里：每条裁决的
+        trigger 指着信号，指纹可以从信号重算。
+        """
+        sigs = {s.id: s for s in store.signals_for(task_id)}
+        history: list[dict] = []
+        for d in store.decisions_for(task_id):
+            triggers = [sigs[i] for i in d.trigger if i in sigs]
+            if not triggers:
+                continue
+            # 人的介入不走 LLM、不进 history；挂起占位在 decide() 里提前返回，
+            # 也没进 history —— 两者在重建时同样跳过
+            if any(s.type is SignalType.HUMAN_INTERVENTION for s in triggers):
+                continue
+            if d.resume_mode is None:
+                continue
+            history.append(
+                {
+                    "fingerprint": fingerprint(triggers),
+                    "signals": sorted({s.type.value for s in triggers}),
+                    "action": d.action.value,
+                    "rationale": d.rationale[:300],
+                }
+            )
+        self._history[task_id] = history
+
     # -- 验收（§5）---------------------------------------------------------- #
 
     def verify(self, spec: TaskSpec, ctx: AgentContext) -> tuple[bool, str]:

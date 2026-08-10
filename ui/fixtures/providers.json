@@ -1,0 +1,132 @@
+[
+ {
+  "name": "anthropic",
+  "base": null,
+  "key_env": "ANTHROPIC_API_KEY",
+  "models": {
+   "subagent": "claude-sonnet-5",
+   "architect": "claude-opus-5",
+   "triage": "claude-haiku-4-5-20251001"
+  },
+  "verified": false,
+  "effort": "anthropic",
+  "cache": "explicit"
+ },
+ {
+  "name": "deepseek",
+  "base": "https://api.deepseek.com/v1",
+  "key_env": "DEEPSEEK_API_KEY",
+  "models": {
+   "subagent": "deepseek-v4-flash",
+   "architect": "deepseek-v4-flash",
+   "triage": "deepseek-v4-flash"
+  },
+  "verified": true,
+  "effort": "deepseek",
+  "cache": "automatic"
+ },
+ {
+  "name": "doubao",
+  "base": "https://ark.cn-beijing.volces.com/api/v3",
+  "key_env": "ARK_API_KEY",
+  "models": {
+   "subagent": "doubao-seed-2.0-lite",
+   "architect": "doubao-seed-2.0-pro",
+   "triage": "doubao-seed-2.0-lite"
+  },
+  "verified": false,
+  "effort": "doubao",
+  "cache": "automatic"
+ },
+ {
+  "name": "gemini",
+  "base": "https://generativelanguage.googleapis.com/v1beta/openai/",
+  "key_env": "GEMINI_API_KEY",
+  "models": {
+   "subagent": "gemini-3.6-flash",
+   "architect": "gemini-3.6-flash",
+   "triage": "gemini-3.5-flash-lite"
+  },
+  "verified": false,
+  "effort": "gemini",
+  "cache": "automatic"
+ },
+ {
+  "name": "kimi",
+  "base": "https://api.moonshot.cn/v1",
+  "key_env": "MOONSHOT_API_KEY",
+  "models": {
+   "subagent": "kimi-k3",
+   "architect": "kimi-k3",
+   "triage": "kimi-k3"
+  },
+  "verified": true,
+  "effort": "kimi",
+  "cache": "automatic"
+ },
+ {
+  "name": "litellm",
+  "base": "http://localhost:4000/v1",
+  "key_env": "COWORK_LLM_API_KEY",
+  "models": {
+   "subagent": null,
+   "architect": null,
+   "triage": null
+  },
+  "verified": true,
+  "effort": null,
+  "cache": "unknown"
+ },
+ {
+  "name": "openai",
+  "base": "https://api.openai.com/v1",
+  "key_env": "OPENAI_API_KEY",
+  "models": {
+   "subagent": "gpt-5.6-terra",
+   "architect": "gpt-5.6-sol",
+   "triage": "gpt-5.6-luna"
+  },
+  "verified": false,
+  "effort": "openai",
+  "cache": "automatic"
+ },
+ {
+  "name": "qwen",
+  "base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "key_env": "DASHSCOPE_API_KEY",
+  "models": {
+   "subagent": "qwen-plus",
+   "architect": "qwen-max",
+   "triage": "qwen-turbo"
+  },
+  "verified": false,
+  "effort": "qwen",
+  "cache": "automatic"
+ },
+ {
+  "name": "xai",
+  "base": "https://api.x.ai/v1",
+  "key_env": "XAI_API_KEY",
+  "models": {
+   "subagent": "grok-4.5",
+   "architect": "grok-4.5",
+   "triage": "grok-4.5"
+  },
+  "verified": false,
+  "effort": "xai",
+  "cache": "automatic"
+ },
+ {
+  "name": "zhipu",
+  "base": "https://open.bigmodel.cn/api/paas/v4",
+  "key_env": "ZHIPUAI_API_KEY",
+  "models": {
+   "subagent": "glm-5",
+   "architect": "glm-5",
+   "triage": "glm-5-turbo"
+  },
+  "verified": false,
+  "effort": "zhipu",
+  "cache": "automatic"
+ }
+]

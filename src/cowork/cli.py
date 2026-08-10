@@ -424,6 +424,31 @@ def _bench(args: argparse.Namespace) -> int:
     return _bench_report(argparse.Namespace(records=str(out), json=False))
 
 
+def _serve(args: argparse.Namespace) -> int:
+    """M6 服务层：HTTP + SSE，顺带挂 ui/dist 的静态文件（先 npm run build）。"""
+    try:
+        import uvicorn
+    except ImportError:
+        print("缺依赖：pip install -e .[server]", file=sys.stderr)
+        return 2
+    from pathlib import Path
+
+    from .server import create_app
+
+    ui_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
+    app = create_app(
+        db_path=args.db,
+        default_backend=args.backend,
+        workspace=args.workspace,
+        max_cycles=args.max_cycles,
+        ui_dist=str(ui_dist) if ui_dist.is_dir() else None,
+    )
+    print(f"store: {args.db}   backend: {args.backend}")
+    print(f"UI: {'http://{}:{}'.format(args.host, args.port) if ui_dist.is_dir() else '（ui/dist 不存在，先 cd ui && npm run build）'}")
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
 def _threads(args: argparse.Namespace) -> int:
     """把某个库里的线程按界面层契约导出（M6 §9 第 3 / 4 条）。
 
@@ -796,6 +821,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="给了就出这条线程的详情（含时间线），不给就出列表")
     th.add_argument("--json", action="store_true", help="列表也用 JSON")
     th.set_defaults(func=_threads)
+
+    s = sub.add_parser("serve", help="M6 服务层：HTTP + SSE + 静态 UI")
+    s.add_argument("--host", default="127.0.0.1",
+                   help="只绑 loopback 是刻意的：没有权限概念（接口文档 §6）")
+    s.add_argument("--port", type=int, default=8000)
+    s.add_argument("--db", default="cowork.sqlite", help="SQLite 库路径")
+    s.add_argument("--backend", choices=PROVIDER_NAMES, default="deepseek")
+    s.add_argument("--workspace", default=None,
+                   help="任务 workspace 根目录（默认每次拆解一个临时目录）")
+    s.add_argument("--max-cycles", type=int, default=8, dest="max_cycles")
+    s.set_defaults(func=_serve)
 
     i = sub.add_parser("inspect", help="导出某个 SQLite 库里的任务与决策")
     i.add_argument("db")

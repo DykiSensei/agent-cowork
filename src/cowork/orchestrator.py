@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .agent.architect import Architect, HumanGate
+from .agent.architect import Architect, HumanGate, HumanRuling
 from .agent.subagent import Subagent
 from .llm import Backend
 from .llm.errors import ModelError
@@ -137,78 +137,160 @@ class Orchestrator:
         self.state.started_at = time.time()
         self._last_probe = time.monotonic()
         self.store.save_task(self.state)
+        return self._drive(max_cycles)
 
+    # ------------------------------------------------------------------ #
+    # restore 路径（M6 §9）：人答复之后，从存储把任务重建出来接着跑
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def restore(
+        cls,
+        task_id: str,
+        *,
+        backend: Backend,
+        store,
+        policy: Policy = DEFAULT_POLICY,
+        human_gate: HumanGate | None = None,
+        log: Callable[[str], None] = print,
+    ) -> "Orchestrator":
+        """从存储重建一个挂起的任务。
+
+        现场材料全在存储里：TaskState 在 tasks 表，AgentContext 在 checkpoint 里
+        （produced / reasoning_trace 两个顶层键，from_dict 原样回来），rebase
+        次数与架构师的指纹历史从 decisions / signals 表重算 —— 不加新存储。
+        """
+        state = store.load_task(task_id)
+        if state is None:
+            raise ValueError(f"没有这个任务: {task_id}")
+        if state.status is not TaskStatus.AWAITING_HUMAN:
+            raise ValueError(
+                f"只有 AWAITING_HUMAN 的任务能 restore（当前 {state.status.value}）"
+            )
+        orch = cls(
+            state.spec,
+            backend=backend,
+            store=store,
+            policy=policy,
+            human_gate=human_gate,
+            log=log,
+        )
+        orch.state = state
+        cp = (
+            store.load_checkpoint(state.checkpoint_id)
+            if state.checkpoint_id
+            else None
+        )
+        orch.ctx = (
+            cp.agent_context if cp is not None else AgentContext(task_spec=state.spec)
+        )
+        decisions = store.decisions_for(task_id)
+        orch.decisions = list(decisions)
+        orch._rebase_count = sum(
+            1 for d in decisions if d.resume_mode is ResumeMode.REBASE
+        )
+        orch.architect.prime_history(task_id, store)
+        return orch
+
+    def resume_with_ruling(
+        self, ruling: HumanRuling, max_cycles: int = 8
+    ) -> RunResult:
+        """人的答复到了：先落成裁决（走架构师，不绕过去），再接着跑。
+
+        max_cycles 是**恢复之后**的新预算 —— 挂起前已经烧掉的 cycle 不清零，
+        interrupt_count / rebase 次数都在 state 里带着。
+        """
+        decision = self.architect.apply_human_ruling(self.state, ruling, self.store)
+        self.store.save_decision(decision)
+        self.decisions.append(decision)
+        self._event(
+            "decision", ref_id=decision.id, payload={"action": decision.action.value}
+        )
+        self._render(decision)
+        return self._drive(max_cycles, first=decision)
+
+    # ------------------------------------------------------------------ #
+
+    def _drive(
+        self, max_cycles: int, first: DecisionRecord | None = None
+    ) -> RunResult:
+        """cycle 循环主体。`first` 是 restore 路径带进来的裁决：已经落库、
+        记过事件，这里直接应用（不先跑一轮 step 循环）。
+        """
+        decision = first
         for cycle in range(1, max_cycles + 1):
-            self.state.status = TaskStatus.RUNNING
-            subagent = Subagent(self.backend)
-            self.state.agent_id = subagent.id
-            self.store.save_task(self.state)
-            self._say(
-                f"[RUN ] cycle={cycle} rev={self.ctx.task_spec.revision} "
-                f"agent={subagent.id} step={self.state.current_step}"
-            )
-
-            outcome, probe_sig = self._run_with_probes(subagent)
-
-            # 软信号在检查点批量消费（§3.4）
-            if outcome.soft_signals:
-                for s in outcome.soft_signals:
-                    self.store.save_signal(s)
-                escalated = self.architect.consume_soft(outcome.soft_signals)
+            if decision is None:
+                self.state.status = TaskStatus.RUNNING
+                subagent = Subagent(self.backend)
+                self.state.agent_id = subagent.id
+                self.store.save_task(self.state)
                 self._say(
-                    f"[SOFT] 消费 {len(outcome.soft_signals)} 条，"
-                    f"升级 {len(escalated)} 条"
+                    f"[RUN ] cycle={cycle} rev={self.ctx.task_spec.revision} "
+                    f"agent={subagent.id} step={self.state.current_step}"
                 )
 
-            if probe_sig is not None:
-                # 探查发现跑偏。走的是和「架构师验收不通过」完全相同的路径。
-                triggers = [probe_sig]
-            elif outcome.status is TaskStatus.COMPLETED:
-                passed, reason = self.architect.verify(self.ctx.task_spec, self.ctx)
-                if passed:
-                    self._set_status(TaskStatus.COMPLETED)
-                    self._say(f"[DONE] {reason}")
-                    return RunResult(self.state, self.ctx, self.decisions, outcome.output)
+                outcome, probe_sig = self._run_with_probes(subagent)
 
-                # 验收不通过 -> 当作 L0 信号处理（§5 流程图右下角）
-                self._say(f"[FAIL] 架构师验收不通过: {reason}")
-                sig = self.bus.emit_hard(
-                    SignalType.VALIDATION_FAILED,
-                    self.spec.id,
-                    payload={"origin": "architect_verify"},
-                    evidence=reason,
+                # 软信号在检查点批量消费（§3.4）
+                if outcome.soft_signals:
+                    for s in outcome.soft_signals:
+                        self.store.save_signal(s)
+                    escalated = self.architect.consume_soft(outcome.soft_signals)
+                    self._say(
+                        f"[SOFT] 消费 {len(outcome.soft_signals)} 条，"
+                        f"升级 {len(escalated)} 条"
+                    )
+
+                if probe_sig is not None:
+                    # 探查发现跑偏。走的是和「架构师验收不通过」完全相同的路径。
+                    triggers = [probe_sig]
+                elif outcome.status is TaskStatus.COMPLETED:
+                    passed, reason = self.architect.verify(self.ctx.task_spec, self.ctx)
+                    if passed:
+                        self._set_status(TaskStatus.COMPLETED)
+                        self._say(f"[DONE] {reason}")
+                        return RunResult(self.state, self.ctx, self.decisions, outcome.output)
+
+                    # 验收不通过 -> 当作 L0 信号处理（§5 流程图右下角）
+                    self._say(f"[FAIL] 架构师验收不通过: {reason}")
+                    sig = self.bus.emit_hard(
+                        SignalType.VALIDATION_FAILED,
+                        self.spec.id,
+                        payload={"origin": "architect_verify"},
+                        evidence=reason,
+                    )
+                    self.store.save_signal(sig)
+                    triggers = [sig]
+                else:
+                    triggers = list(outcome.preempting_signals)
+
+                # ---- INTERRUPTED ----
+                self.state.interrupt_count += 1
+                self.state.signal_log.extend(s.id for s in triggers)
+                self._set_status(TaskStatus.INTERRUPTED)
+                for s in triggers:
+                    self._event("signal", ref_id=s.id, payload={"type": s.type.value})
+                self._say(
+                    f"[STOP] {triggers[0].type.value if triggers else '未知'} "
+                    f"@step={self.state.current_step} interrupt_count={self.state.interrupt_count}"
                 )
-                self.store.save_signal(sig)
-                triggers = [sig]
-            else:
-                triggers = list(outcome.preempting_signals)
 
-            # ---- INTERRUPTED ----
-            self.state.interrupt_count += 1
-            self.state.signal_log.extend(s.id for s in triggers)
-            self._set_status(TaskStatus.INTERRUPTED)
-            for s in triggers:
-                self._event("signal", ref_id=s.id, payload={"type": s.type.value})
-            self._say(
-                f"[STOP] {triggers[0].type.value if triggers else '未知'} "
-                f"@step={self.state.current_step} interrupt_count={self.state.interrupt_count}"
-            )
+                try:
+                    decision = self.architect.decide(self.state, triggers, self.ctx)
+                except ModelError as exc:
+                    # 架构师自己也调不动模型了（典型场景：virtual key 预算耗尽，
+                    # Subagent 和架构师用同一把 key）。没有决策者，只能挂起等人。
+                    self._set_status(TaskStatus.AWAITING_HUMAN)
+                    self._say(f"[STOP] 架构师无法决策（{exc.signal_type.value}）: {exc.message[:200]}")
+                    return RunResult(self.state, self.ctx, self.decisions)
 
-            try:
-                decision = self.architect.decide(self.state, triggers, self.ctx)
-            except ModelError as exc:
-                # 架构师自己也调不动模型了（典型场景：virtual key 预算耗尽，
-                # Subagent 和架构师用同一把 key）。没有决策者，只能挂起等人。
-                self._set_status(TaskStatus.AWAITING_HUMAN)
-                self._say(f"[STOP] 架构师无法决策（{exc.signal_type.value}）: {exc.message[:200]}")
-                return RunResult(self.state, self.ctx, self.decisions)
+                self.store.save_decision(decision)
+                self.decisions.append(decision)
+                self._event("decision", ref_id=decision.id,
+                            payload={"action": decision.action.value})
+                self._render(decision)
 
-            self.store.save_decision(decision)
-            self.decisions.append(decision)
-            self._event("decision", ref_id=decision.id,
-                        payload={"action": decision.action.value})
-            self._render(decision)
-
+            # ---- 应用裁决（restore 带进来的那一轮直接落在这里） ----
             if decision.action is Action.ABANDON:
                 self._set_status(TaskStatus.ABANDONED)
                 return RunResult(self.state, self.ctx, self.decisions)
@@ -236,6 +318,7 @@ class Orchestrator:
             self.sandbox = Sandbox(decision.new_spec.sandbox, decision.new_spec.scope)
             self.loop = StepLoop(bus=self.bus, sandbox=self.sandbox, store=self.store)
             self.store.save_task(self.state)
+            decision = None
 
         self._set_status(TaskStatus.FAILED)
         self._say(f"[STOP] 超过 max_cycles={max_cycles}")
