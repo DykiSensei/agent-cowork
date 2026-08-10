@@ -25,6 +25,63 @@ class Triage:
 
 
 @dataclass
+class CacheStats:
+    """提示词缓存的记账（§11.14）。
+
+    各家报的字段名不一样，但语义都是「这次请求的输入里有多少 token 命中了缓存」。
+    实测三种形状（`usage.model_dump()` 原样抓的）：
+
+        OpenAI 系   usage.prompt_tokens_details.cached_tokens
+        DeepSeek    上面那个 + usage.prompt_cache_hit_tokens（两个都给，值相同）
+        Moonshot    上面那个 + **顶层 usage.cached_tokens**；而且**第一次调用时
+                    prompt_tokens_details 整个是 null**，第二次才出现
+
+    所以三个位置挨个试，谁有读谁 —— 只认一个字段就会把「这家换了个名字」
+    读成「一次都没命中」。
+
+    `calls_with_usage` 单独记的理由同上：**「这家不报」和「没命中」在账面上
+    长得一样**，但结论完全相反，不能混。
+    """
+
+    calls: int = 0
+    calls_with_usage: int = 0
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+
+    @property
+    def hit_rate(self) -> float | None:
+        if not self.prompt_tokens:
+            return None
+        return self.cached_tokens / self.prompt_tokens
+
+    def observe(self, usage) -> None:
+        self.calls += 1
+        if usage is None:
+            return
+        prompt = getattr(usage, "prompt_tokens", 0) or 0
+        # details 可能整个是 None（Moonshot 第一次调用就是），所以 getattr 要挡住
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = getattr(details, "cached_tokens", None) if details is not None else None
+        if cached is None:
+            cached = getattr(usage, "prompt_cache_hit_tokens", None)
+        if cached is None:
+            cached = getattr(usage, "cached_tokens", None)
+        if prompt:
+            self.calls_with_usage += 1
+            self.prompt_tokens += prompt
+            self.cached_tokens += int(cached or 0)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calls": self.calls,
+            "calls_with_usage": self.calls_with_usage,
+            "prompt_tokens": self.prompt_tokens,
+            "cached_tokens": self.cached_tokens,
+            "hit_rate": round(self.hit_rate, 4) if self.hit_rate is not None else None,
+        }
+
+
+@dataclass
 class SubtaskDraft:
     """生成者产出的一个子任务（§12 M7 7.3）。
 
@@ -132,4 +189,5 @@ class Backend(Protocol):
 
 from .scripted import ScriptedBackend  # noqa: E402
 
-__all__ = ["Backend", "Triage", "ArchitectVerdict", "SubtaskDraft", "ScriptedBackend"]
+__all__ = ["Backend", "Triage", "ArchitectVerdict", "SubtaskDraft", "CacheStats",
+           "ScriptedBackend"]

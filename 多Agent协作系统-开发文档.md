@@ -1,8 +1,9 @@
-# 多 Agent 协作系统 — 开发文档 v0.12
+# 多 Agent 协作系统 — 开发文档 v0.13
 
-> 状态：**M7 完成**，四条出口标准全部达成；下一步 **M6（群聊界面层）**
+> 状态：**M7 完成**；供应商面扩到 9 家、提示词缓存开始记账。下一步 **M6（群聊界面层）**
 > 日期：2026-08-10
 >
+> **v0.13 变更**：新增 §11.14 —— `cli.PROVIDERS` 扩到 9 家 + `models` 自检命令；提示词缓存记账（三种字段形状）、Anthropic 显式 `cache_control` 断点、OpenAI `prompt_cache_key`；实测 DeepSeek 命中 74%。
 > **v0.12 变更**：补上 §11.13（生成-复核循环的真实样本 + 拆解提示词对照，37 次拆解 / 0.77M token），风险 #17 关闭、新增 #18；`max_regenerate` 第一次有实测依据；发现「指纹重复」判据在拆解层几乎是死的；修掉复核者失败抛穿 `plan()`、以及复核调用被 4096 截断两个问题。
 > **v0.11 变更**：M7 7.3 / 7.4 / 7.5 收口，新增 §11.12（生成侧实测，5 个目标）；`Backend` 新增 `decompose`，`Architect` 新增 `decompose` / `plan`，`HumanGate` 新增 `review_plan`；`plan.deterministic_review()` 新增 `isolated_dependency` 检查；`policy` 新增 `max_regenerate`；§9 风险 #14 关闭、新增 #16 / #17；DeepSeek 预设换到 v4-flash。
 > **v0.10 变更**：M7 的 7.1（`Architect(reviewer_backend=...)`）与 7.2（跨模型复核对照，120+120 次调用）收口，新增 §11.11；§12 M7 任务表标注进度；§9 风险 #3 按实测更新。
@@ -1388,6 +1389,76 @@ token 中位那栏是**没控变量的**，两臂的重生成轮数分布不同�
 - **复核调用也会被 4096 截断**。§11.12 只把拆解调用的额度提到了 16000，复核仍是默认的 4096 —— 而复核要读完整份拆解再推理，`kimi-k3` 实测把 4096 全烧在 reasoning 上、正文 0 字符。现在 `REVIEW_MAX_TOKENS = 8000`。**改一处额度时要问一句：同一条链上还有谁的输入变长了。**
 
 **成本**：36 + 1 次拆解，约 0.77M token，墙钟约 50 分钟（3 并发）。
+
+---
+
+### 11.14 多供应商与提示词缓存
+
+#### 支持面：一张表 + 一个自检命令
+
+`cli.PROVIDERS` 现在收 9 家 + 一个自托管代理入口。除 Anthropic 走自己的 SDK 外，其余全是 OpenAI 方言，加一家只改这张表。
+
+| 供应商 | base_url | key | 默认 (subagent / architect / triage) | 本机验证 |
+|---|---|---|---|---|
+| `deepseek` | `api.deepseek.com/v1` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` ×3 | ✅ |
+| `kimi` | `api.moonshot.cn/v1` | `MOONSHOT_API_KEY` | `kimi-k3` ×3 | ✅ |
+| `openai` | `api.openai.com/v1` | `OPENAI_API_KEY` | `gpt-5.6-terra` / `-sol` / `-luna` | ❌ 无 key |
+| `anthropic` | SDK | `ANTHROPIC_API_KEY` | `claude-sonnet-5` / `claude-opus-5` / `claude-haiku-4-5` | ❌ 无 key |
+| `gemini` | `generativelanguage.googleapis.com/v1beta/openai/` | `GEMINI_API_KEY` | `gemini-3.6-flash` ×2 / `gemini-3.5-flash-lite` | ❌ 无 key |
+| `qwen` | `dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` | `qwen-plus` / `qwen-max` / `qwen-turbo` | ❌ 无 key |
+| `zhipu` | `open.bigmodel.cn/api/paas/v4` | `ZHIPUAI_API_KEY` | `glm-5` ×2 / `glm-5-turbo` | ❌ 无 key |
+| `xai` | `api.x.ai/v1` | `XAI_API_KEY` | `grok-4.5` ×3 | ❌ 无 key |
+| `doubao` | `ark.cn-beijing.volces.com/api/v3` | `ARK_API_KEY` | `doubao-seed-2.0-*` | ❌ 无 key |
+| `litellm` | `localhost:4000/v1` | `COWORK_LLM_API_KEY` | 由代理决定 | ✅ |
+
+**「本机验证」这一栏不是装饰**。没打通过的行是从各家文档抄来的，抄对了也可能明天就过期 —— 模型下线时端点还在、key 还有效，只是那个 id 不再被服务。DeepSeek 的 `deepseek-chat` → `deepseek-v4-flash` 就是这么发生的：代码里那个 id 静静地失效了，直到一次真实调用才暴露。
+
+所以加了 `python -m cowork.cli models`：拿各家的 `GET /v1/models` 逐行对这张表，报「OK / 对不上 / 问不到 / 跳过」。**「跳过」和「对不上」严格分开** —— 缺 key 是没验证到，不是配错了。本机跑出来：
+
+```
+✓ deepseek   OK    ['deepseek-v4-flash'] 都在服务端
+✓ kimi       OK    ['kimi-k3'] 都在服务端
+- 其余 8 家   跳过   没有对应的 key，未验证
+```
+
+两个选型上的取舍写在这里：
+
+- **qwen 用滚动别名**（`qwen-max` / `qwen-plus` / `qwen-turbo`）而不是 `qwen3.8-max` 这种带版本号的 id。别名自己跟最新版走，对一张会过期的表来说这比钉死版本更耐放。
+- **阿里的新文档推 `{WorkspaceId}.<region>.maas.aliyuncs.com`**，那个 URL 拼不出通用预设，所以预设仍用官方声明「仍然可用」的旧域名；要用工作空间域名就设 `COWORK_LLM_BASE_URL`。
+
+#### 提示词缓存：先度量，再谈优化
+
+在这之前，「命中率高不高」这个问题在这个项目里**没有答案** —— 没有任何地方读过缓存字段。所以顺序是：先记账，再看要不要改。
+
+**三种字段形状，实测抓的**（`usage.model_dump()` 原样）：
+
+| | 字段 | 备注 |
+|---|---|---|
+| OpenAI 系 | `prompt_tokens_details.cached_tokens` | 通用形状 |
+| DeepSeek | 上面那个 + `prompt_cache_hit_tokens` | 两个都给，值相同 |
+| Moonshot | 上面那个 + **顶层 `cached_tokens`**；且**第一次调用时 `prompt_tokens_details` 整个是 `null`** | 只认一个字段就会读成 0 |
+| Anthropic | `cache_read_input_tokens` / `cache_creation_input_tokens` | **不含在 `input_tokens` 里，要加回去**，否则开了缓存反而账面变少 |
+
+`CacheStats` 三个位置挨个试。**「这家不报」和「一次没命中」在账面上长得一样但结论相反**，所以 `calls_with_usage` 单独记。
+
+**实测基线**（`demo --backend deepseek`，12 次调用）：**命中 74%**（10,240 / 13,928 输入 token）。同一个请求连打两次的对照更干净：第一次 `prompt_cache_hit_tokens=0`，第二次 `1664/1774 = 94%`。
+
+**为什么本来就有 74%：拼装顺序恰好是对的**，而这是一条沉默的不变量：
+
+```
+system  角色提示词 + 输出约束 + JSON schema     ← 同一种调用里一字不变
+user    目标 / 验收标准 / scope / 已产出 / 执行记录  ← 从不变到变，顺序也是对的
+```
+
+各家的前缀缓存都只认「从头开始逐字节相同」的那一段。**把 schema 挪进 user、或者在 system 里插一个任务 id 或时间戳，功能测试全绿、命中率直接归零，而账单下个月才告诉你。** 所以这条顺序现在有测试钉着（`test_openai_compat.TestPromptCaching`），不是靠注释。
+
+**三处改动**：
+
+1. **Anthropic 的缓存是显式的** —— 不打 `cache_control` 断点就一次都不命中。断点打在 system 块上，边界正好落在「不变 / 每次都变」之间。这一家的收益是从 0 开始的，不是从 74%。
+2. **`prompt_cache_key`**：只发给声明支持的一家（OpenAI）。key 从 `sys_prompt` 自己算哈希 —— 它标识的正好就是那段可缓存前缀，改了提示词 key 自动跟着换，不会出现「提示词改了、key 还指着旧分片」。不认识的字段在严格端点上是 400，为一点路由收益把整条链打挂不划算。
+3. **记账落到 CLI 输出**：`demo` / `plan` 跑完打一行命中率。**不打出来的度量等于没有度量** —— §11.6c 那两个「代码里没人读」的死参数就是前车之鉴。
+
+**一个没有被优化掉的观察**：`kimi` 在 demo 上报 0%。原始 usage 显示它确实会缓存（同一请求第二次 `cached_tokens=1536`），只是那个 demo 太短、同类型调用没几次重复。**这不是缺陷，是样本问题** —— 记在这里免得下次有人看到 0% 就去改拼装顺序。
 
 ---
 

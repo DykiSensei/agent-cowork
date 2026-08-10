@@ -17,7 +17,7 @@ import os
 from typing import Any
 
 from ..actions import AgentAction, Finish, SoftSignalAction, ToolCall
-from ..llm import ArchitectVerdict, SubtaskDraft, Triage
+from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, Triage
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..signals import SOFT_SIGNALS, SignalType
 from ..types import AgentContext, Signal, TaskSpec
@@ -451,6 +451,7 @@ class AnthropicBackend:
         self.triage_model = triage_model
         self.effort = effort
         self.max_tokens = max_tokens
+        self.cache_stats = CacheStats()
 
     # ------------------------------------------------------------------ #
 
@@ -464,10 +465,20 @@ class AnthropicBackend:
         thinking: bool = True,
         effort: str | None = None,
     ) -> tuple[dict[str, Any], int]:
+        # Anthropic 的提示词缓存是**显式**的：不打 cache_control 断点就一次都不命中，
+        # 这和 OpenAI 系「够长就自动缓存」不是一回事（§11.14）。断点打在 system 上 ——
+        # 角色提示词在同一种调用里一字不变，而 user 每次都不同，缓存的边界正好在这。
+        # 断点之前的内容才进缓存，所以 system 必须是完整的一块，不能把可变内容拼进去。
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": self.max_tokens,
-            "system": system,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "messages": [{"role": "user", "content": user}],
             "output_config": {"format": {"type": "json_schema", "schema": schema}},
         }
@@ -487,6 +498,15 @@ class AnthropicBackend:
             raise ModelCallFailed(f"连不上模型服务: {exc}") from exc
 
         tokens = resp.usage.input_tokens + resp.usage.output_tokens
+        # Anthropic 把缓存读写单独计在两个字段里，且**它们不含在 input_tokens 里**，
+        # 所以要显式加回去，否则打开缓存之后账面 token 会凭空变少（§11.14）。
+        cache_read = getattr(resp.usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(resp.usage, "cache_creation_input_tokens", 0) or 0
+        tokens += cache_read + cache_write
+        self.cache_stats.calls += 1
+        self.cache_stats.calls_with_usage += 1
+        self.cache_stats.prompt_tokens += resp.usage.input_tokens + cache_read + cache_write
+        self.cache_stats.cached_tokens += cache_read
         if resp.stop_reason == "refusal":
             raise ModelCallFailed(f"模型拒绝了请求: {resp.stop_details}")
         text = next((b.text for b in resp.content if b.type == "text"), "{}")

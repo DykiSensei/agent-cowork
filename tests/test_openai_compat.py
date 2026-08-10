@@ -293,6 +293,185 @@ class _FakeClient:
         return type("R", (), {"choices": [choice], "usage": None})()
 
 
+class TestPromptCaching(unittest.TestCase):
+    """缓存命中率靠的是拼装顺序，而顺序是一条**沉默的**不变量（§11.14）。
+
+    把 schema 挪进 user、或者在 system 里插一个任务 id / 时间戳，功能测试全绿，
+    命中率直接归零，账单要下个月才告诉你。所以在这里钉死。
+    """
+
+    def _backend(self, **over):
+        from cowork.llm.openai_compat import OpenAICompatBackend
+
+        kw = dict(base_url="http://localhost:1/v1", api_key="sk-fake")
+        kw.update(over)
+        b = OpenAICompatBackend(**kw)
+        b.client = _FakeClient(['{"sufficient": true, "missing": []}'] * 8)
+        return b
+
+    def test_static_first_variable_last(self):
+        b = self._backend()
+        b.review_decomposition("这个目标每次都不一样", [])
+        msgs = b.client.calls[0]["messages"]
+
+        self.assertEqual([m["role"] for m in msgs], ["system", "user"])
+        self.assertNotIn("这个目标每次都不一样", msgs[0]["content"], "可变内容混进了前缀")
+        self.assertIn("sufficient", msgs[0]["content"], "schema 应该待在可缓存的前缀里")
+
+    def test_prefix_is_identical_across_calls_of_the_same_kind(self):
+        b = self._backend()
+        b.review_decomposition("目标 A", [])
+        b.review_decomposition("目标 B", [])
+        self.assertEqual(
+            b.client.calls[0]["messages"][0], b.client.calls[1]["messages"][0],
+            "同一种调用的 system 块必须逐字节相同，否则前缀缓存一次都不命中",
+        )
+
+    def test_cache_key_is_derived_from_the_prefix(self):
+        """key 跟着提示词走：改了提示词自动换分片，不会指着旧的。"""
+        b = self._backend(cache_key_supported=True)
+        b.review_decomposition("目标 A", [])
+        b.review_decomposition("目标 B", [])
+        keys = [c["prompt_cache_key"] for c in b.client.calls]
+        self.assertEqual(keys[0], keys[1])
+
+        other = self._backend(cache_key_supported=True)
+        other.client = _FakeClient([json.dumps({"subtasks": [{
+            "id": "t1", "goal": "做 t1", "task_class": "CODE", "scope": ["t1.py"],
+            "depends_on": [], "acceptance": [
+                {"id": "c1", "description": "行为判据", "command": []}],
+        }]})])
+        other.decompose("随便一个目标")
+        self.assertNotEqual(other.client.calls[0]["prompt_cache_key"], keys[0],
+                            "不同调用类型的前缀不同，key 也该不同")
+
+    def test_cache_key_not_sent_to_providers_that_did_not_declare_it(self):
+        """不认识的字段在严格端点上是 400 —— 为一点路由收益打挂整条链不划算。"""
+        b = self._backend()
+        b.review_decomposition("目标", [])
+        self.assertNotIn("prompt_cache_key", b.client.calls[0])
+
+
+class TestCacheStats(unittest.TestCase):
+    """各家报缓存用量的字段名不一样，两种形状都要认（§11.14）。"""
+
+    def _usage(self, **kw):
+        return type("U", (), kw)()
+
+    def test_openai_shape(self):
+        from cowork.llm import CacheStats
+
+        s = CacheStats()
+        s.observe(self._usage(
+            prompt_tokens=1000,
+            prompt_tokens_details=type("D", (), {"cached_tokens": 768})(),
+        ))
+        self.assertEqual(s.cached_tokens, 768)
+        self.assertAlmostEqual(s.hit_rate, 0.768)
+
+    def test_deepseek_shape(self):
+        from cowork.llm import CacheStats
+
+        s = CacheStats()
+        s.observe(self._usage(prompt_tokens=868, prompt_cache_hit_tokens=768))
+        self.assertEqual(s.cached_tokens, 768)
+
+    def test_moonshot_top_level_field(self):
+        """Moonshot 还额外挂一个顶层 cached_tokens —— 实测抓到的第三种形状。"""
+        from cowork.llm import CacheStats
+
+        s = CacheStats()
+        s.observe(self._usage(prompt_tokens=1786, cached_tokens=1536))
+        self.assertEqual(s.cached_tokens, 1536)
+
+    def test_null_details_on_the_first_call(self):
+        """Moonshot 第一次调用 prompt_tokens_details 整个是 null，不能炸。"""
+        from cowork.llm import CacheStats
+
+        s = CacheStats()
+        s.observe(self._usage(prompt_tokens=1786, prompt_tokens_details=None))
+        self.assertEqual(s.cached_tokens, 0)
+        self.assertEqual(s.calls_with_usage, 1)
+
+    def test_missing_usage_is_not_a_zero_hit_rate(self):
+        """「这家不报」和「一次没命中」不是一回事，混了就会得出错误结论。"""
+        from cowork.llm import CacheStats
+
+        s = CacheStats()
+        s.observe(None)
+        s.observe(self._usage(prompt_tokens=0))
+        self.assertEqual(s.calls, 2)
+        self.assertEqual(s.calls_with_usage, 0)
+        self.assertIsNone(s.hit_rate)
+
+    def test_accumulates_across_calls(self):
+        from cowork.llm import CacheStats
+
+        s = CacheStats()
+        s.observe(self._usage(prompt_tokens=100, prompt_cache_hit_tokens=0))
+        s.observe(self._usage(prompt_tokens=100, prompt_cache_hit_tokens=100))
+        self.assertEqual((s.prompt_tokens, s.cached_tokens), (200, 100))
+        self.assertEqual(s.hit_rate, 0.5)
+
+
+class TestAnthropicCaching(unittest.TestCase):
+    """Anthropic 的缓存是**显式**的：不打断点就一次都不命中（§11.14）。
+
+    这条和 OpenAI 系「够长就自动缓存」不是一回事，删掉 cache_control 之后
+    功能一切正常、命中率静默归零 —— 所以要有测试盯着。
+    """
+
+    def _backend(self):
+        from cowork.llm.anthropic_backend import AnthropicBackend
+
+        b = AnthropicBackend(api_key="sk-fake")
+        b.client = _FakeAnthropic()
+        return b
+
+    def test_system_block_carries_a_cache_breakpoint(self):
+        b = self._backend()
+        b.review_decomposition("目标", [])
+        system = b.client.calls[0]["system"]
+
+        self.assertIsInstance(system, list, "system 要是块列表才挂得上 cache_control")
+        self.assertEqual(system[0]["cache_control"], {"type": "ephemeral"})
+
+    def test_variable_content_stays_out_of_the_cached_block(self):
+        b = self._backend()
+        b.review_decomposition("这个目标每次都不一样", [])
+        self.assertNotIn("这个目标每次都不一样", b.client.calls[0]["system"][0]["text"])
+
+    def test_cache_tokens_are_added_back_into_the_total(self):
+        """缓存读写不含在 input_tokens 里，不加回去的话账面 token 会凭空变少。"""
+        b = self._backend()
+        b.client.usage = type("U", (), {
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_read_input_tokens": 900, "cache_creation_input_tokens": 0,
+        })()
+        _, _, tokens = b.review_decomposition("目标", [])
+
+        self.assertEqual(tokens, 1050)
+        self.assertEqual(b.cache_stats.cached_tokens, 900)
+        self.assertAlmostEqual(b.cache_stats.hit_rate, 0.9)
+
+
+class _FakeAnthropic:
+    def __init__(self):
+        self.calls = []
+        self.messages = self
+        self.usage = type("U", (), {
+            "input_tokens": 10, "output_tokens": 5,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        })()
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        block = type("B", (), {"type": "text", "text": '{"sufficient": true, "missing": []}'})()
+        return type("R", (), {
+            "content": [block], "usage": self.usage, "stop_reason": "end_turn",
+        })()
+
+
 class TestBackendWiring(unittest.TestCase):
     def test_reasoner_skips_json_mode(self):
         """deepseek-reasoner 不支持 response_format，只能靠提示词约束。"""

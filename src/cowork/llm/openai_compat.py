@@ -18,13 +18,14 @@ JSON 可靠性靠三层，而不是赌供应商的 schema 支持：
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 from typing import Any
 
 from ..actions import AgentAction
-from ..llm import ArchitectVerdict, SubtaskDraft, Triage
+from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, Triage
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..runtime.detectors import validate_schema
 from ..types import AgentContext, Signal, TaskSpec
@@ -52,7 +53,8 @@ from .anthropic_backend import (
     _render_subagent_context,
 )
 
-# 已知端点。直连时用这些，走 LiteLLM 时用 http://localhost:4000/v1
+# 已知端点。直连时用这些，走 LiteLLM 时用 http://localhost:4000/v1。
+# 完整的一张表在 cli.PROVIDERS —— 这里只留后端自己兜底用的几个。
 PRESETS = {
     "deepseek": "https://api.deepseek.com/v1",
     "moonshot": "https://api.moonshot.cn/v1",
@@ -80,6 +82,7 @@ class OpenAICompatBackend:
         max_retries: int = 2,
         repair_rounds: int = 1,
         decompose_system: str | None = None,
+        cache_key_supported: bool = False,
     ) -> None:
         import openai  # 延迟导入：跑脚本后端时不需要
 
@@ -105,6 +108,10 @@ class OpenAICompatBackend:
         # 规则」的质量来源，所以必须能被换掉做对照（§11.13）。其余提示词不给
         # 覆盖入口 —— 能换就会有人换，而没有对照组的提示词改动是没法验证的。
         self.decompose_system = decompose_system or DECOMPOSE_SYSTEM
+        self.cache_key_supported = cache_key_supported
+        # 缓存记账（§11.14）。**先有度量再谈优化** —— 在这之前
+        # 「命中率高不高」在这个项目里是没有答案的，任何调整都是猜。
+        self.cache_stats = CacheStats()
         # 实例级覆盖类属性：跨模型对照里两个 arm 都是这个类，只报类名等于没记
         # （§12 M7 7.2 的记录要能区分是谁复核的）。用架构师模型 —— 复核走的就是它。
         self.name = f"openai-compat:{self.architect_model}"
@@ -117,6 +124,11 @@ class OpenAICompatBackend:
     ) -> tuple[dict[str, Any], int]:
         import openai
 
+        # 拼装顺序就是缓存命中率本身：**静态在前、可变在后**。
+        # 各家的前缀缓存都只认「从头开始逐字节相同」的那一段，所以角色提示词 +
+        # 输出约束 + schema（同一种调用里一字不变）必须整体排在最前面，
+        # 随每次调用变化的 user 内容排在最后。把 schema 挪到 user 里、或者在
+        # system 里插一个时间戳/任务 id，都会把命中率直接打到 0（§11.14）。
         sys_prompt = (
             f"{system}\n\n"
             "只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释文字。\n"
@@ -133,6 +145,13 @@ class OpenAICompatBackend:
             "max_tokens": max_tokens or self.max_tokens,
             "messages": messages,
         }
+        if self.cache_key_supported:
+            # 把同一种调用路由到同一个缓存分片。key **从 sys_prompt 自己算**：
+            # 它标识的正好就是那段可缓存前缀，改了提示词 key 自动跟着变，
+            # 不会出现「提示词改了、key 还指着旧分片」。只对声明支持的一家发 ——
+            # 不认识的字段在严格端点上是 400。
+            digest = hashlib.sha256(sys_prompt.encode("utf-8")).hexdigest()[:16]
+            kwargs["prompt_cache_key"] = f"cowork-{digest}"
         if not any(m in model for m in _NO_JSON_MODE):
             kwargs["response_format"] = {"type": "json_object"}
 
@@ -148,6 +167,7 @@ class OpenAICompatBackend:
                 raise ModelCallFailed(f"连不上模型服务: {exc}") from exc
 
             usage = getattr(resp, "usage", None)
+            self.cache_stats.observe(usage)
             if usage:
                 tokens += (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
 

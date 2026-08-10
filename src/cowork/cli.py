@@ -16,32 +16,114 @@ import sys
 
 
 # 每个供应商的端点、key 来源、默认模型分工。
-# models = (subagent, architect, triage)。
+#
+# models = (subagent, architect, triage)：Subagent 干活、架构师做决策、分诊走廉价档。
+# 一家只有一个型号时三个位置写同一个，不是偷懒 —— §4.1「不同模型干擅长的事」
+# 是能力，不是义务。
+#
+# **这张表会过期**，而且是无声地过期：模型下线时端点通常还在，只是换了 id。
+# DeepSeek 的 deepseek-chat → deepseek-v4-flash 就是这么发生的。所以配了
+# `python -m cowork.cli models` —— 它拿各家的 GET /v1/models 对一遍这张表，
+# 别靠读文档判断这里写的还对不对。
+#
+# `verified` 记的是这一行**在本机用真 key 打通过**。没打通过的不是错的，
+# 是没被验证过的 —— 两者不能混为一谈。
 PROVIDERS: dict[str, dict] = {
     "deepseek": {
         "base": "https://api.deepseek.com/v1",
         "key_env": "DEEPSEEK_API_KEY",
-        # v4 起 DeepSeek 只暴露 deepseek-v4-flash / deepseek-v4-pro 两个 id
-        # （`GET /v1/models`），deepseek-chat / deepseek-reasoner 只剩别名。
-        # 三个角色统一 flash：**这等于放弃了「架构师用推理档」这条分工**
-        # （§4.1），要拿回来设 COWORK_ARCHITECT_MODEL=deepseek-v4-pro。
-        # 注意 §11.6 / §11.9 / §11.11 的实测数据都出自 deepseek-reasoner，
-        # 换档之后那些数字不能直接外推。
+        # v4 起只暴露 deepseek-v4-flash / deepseek-v4-pro（GET /v1/models 实测），
+        # deepseek-chat / deepseek-reasoner 只剩别名。三个角色统一 flash：
+        # **这等于放弃了「架构师用推理档」**，要拿回来设
+        # COWORK_ARCHITECT_MODEL=deepseek-v4-pro。注意 §11.6 / §11.9 / §11.11
+        # 的实测数据都出自 deepseek-reasoner，换档后不能直接外推。
         "models": ("deepseek-v4-flash",) * 3,
+        "verified": True,
+        "cache": "automatic",   # 命中在 usage.prompt_cache_hit_tokens
     },
     "kimi": {
-        # Moonshot 的 model id 改得比较勤，用 GET /v1/models 查当前账号可用的
         "base": "https://api.moonshot.cn/v1",
         "key_env": "MOONSHOT_API_KEY",
         "models": ("kimi-k3",) * 3,
+        "verified": True,
+        "cache": "automatic",
+    },
+    "anthropic": {
+        # 唯一走自己 SDK 的一家（llm/anthropic_backend.py），不吃这里的 base
+        "base": None,
+        "key_env": "ANTHROPIC_API_KEY",
+        "models": ("claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5-20251001"),
+        "verified": False,
+        # Anthropic 的缓存是**显式**的：不打 cache_control 断点就一次都不命中
+        "cache": "explicit",
     },
     "openai": {
-        # 走 LiteLLM 或任意 OpenAI 兼容端点，全靠环境变量指定
+        "base": "https://api.openai.com/v1",
+        "key_env": "OPENAI_API_KEY",
+        # gpt-5.6 三档：sol 旗舰 / terra 均衡 / luna 廉价（官方 models 文档）
+        "models": ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"),
+        "verified": False,
+        # 自动，≥1024 token 的前缀才进缓存；支持 prompt_cache_key 稳定路由
+        "cache": "automatic",
+        "cache_key": True,
+    },
+    "gemini": {
+        # OpenAI 兼容层，不是原生 /v1beta/models 那套
+        "base": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "key_env": "GEMINI_API_KEY",
+        "models": ("gemini-3.6-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"),
+        "verified": False,
+        "cache": "automatic",
+    },
+    "qwen": {
+        # 阿里百炼。新文档推 {WorkspaceId}.<region>.maas.aliyuncs.com，
+        # 但那个 URL 拼不出通用预设；官方说旧域名仍然可用，所以预设用旧的，
+        # 要用工作空间域名就设 COWORK_LLM_BASE_URL。
+        "base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "key_env": "DASHSCOPE_API_KEY",
+        # qwen-max / plus / turbo 是**滚动别名**，自己跟最新版走 ——
+        # 对预设来说这比钉死 qwen3.8-max 这种带版本号的更耐放。
+        "models": ("qwen-plus", "qwen-max", "qwen-turbo"),
+        "verified": False,
+        "cache": "automatic",
+    },
+    "zhipu": {
+        "base": "https://open.bigmodel.cn/api/paas/v4",
+        "key_env": "ZHIPUAI_API_KEY",
+        "models": ("glm-5", "glm-5", "glm-5-turbo"),
+        "verified": False,
+        "cache": "automatic",
+    },
+    "xai": {
+        "base": "https://api.x.ai/v1",
+        "key_env": "XAI_API_KEY",
+        "models": ("grok-4.5",) * 3,
+        "verified": False,
+        "cache": "automatic",
+    },
+    "doubao": {
+        # 火山方舟。Ark 的 model 位历史上要填 endpoint id（ep-xxxx），
+        # 现在支持模型名，但版本号带日期后缀且滚动更新 —— 这一行最容易过期，
+        # 跑一次 `cowork.cli models doubao` 再用。
+        "base": "https://ark.cn-beijing.volces.com/api/v3",
+        "key_env": "ARK_API_KEY",
+        "models": ("doubao-seed-2.0-lite", "doubao-seed-2.0-pro", "doubao-seed-2.0-lite"),
+        "verified": False,
+        "cache": "automatic",
+    },
+    "litellm": {
+        # 自托管代理：保留 virtual key 的预算强制（§10.3）。模型由代理侧决定，
+        # 所以三个位置都留空，靠 COWORK_*_MODEL 指定。
         "base": "http://localhost:4000/v1",
         "key_env": "COWORK_LLM_API_KEY",
-        "models": (None, "deepseek-chat", None),
+        "models": (None, None, None),
+        "verified": True,
+        "cache": "unknown",
     },
 }
+
+# 全部供应商名，给 argparse 的 choices 用 —— 加一家只改上面那张表
+PROVIDER_NAMES = sorted(PROVIDERS)
 
 
 def _make_store(kind: str):
@@ -84,25 +166,55 @@ def _make_backend(kind: str):
 
     if kind == "scripted":
         return None  # demo.build / demo_composite.build 会用各自的脚本后端
+    if kind not in PROVIDERS:
+        raise ValueError(kind)
+
+    p = PROVIDERS[kind]
+    sub, arch, triage = p["models"]
     if kind == "anthropic":
         from .llm.anthropic_backend import AnthropicBackend
 
-        return AnthropicBackend()
-    if kind in PROVIDERS:
-        from .llm.openai_compat import OpenAICompatBackend
-
-        p = PROVIDERS[kind]
-        sub, arch, triage = p["models"]
-        # base_url / api_key 都显式解析：两家 key 同时存在时，
-        # 靠后端内部的回退链会拿错 key（实测踩过）
-        return OpenAICompatBackend(
-            base_url=os.environ.get("COWORK_LLM_BASE_URL") or p["base"],
-            api_key=os.environ.get("COWORK_LLM_API_KEY") or os.environ.get(p["key_env"]),
-            subagent_model=os.environ.get("COWORK_SUBAGENT_MODEL", sub),
+        return AnthropicBackend(
             architect_model=os.environ.get("COWORK_ARCHITECT_MODEL", arch),
             triage_model=os.environ.get("COWORK_TRIAGE_MODEL", triage),
         )
-    raise ValueError(kind)
+
+    from .llm.openai_compat import OpenAICompatBackend
+
+    # base_url / api_key 都显式解析：两家 key 同时存在时，
+    # 靠后端内部的回退链会拿错 key（实测踩过）
+    return OpenAICompatBackend(
+        base_url=os.environ.get("COWORK_LLM_BASE_URL") or p["base"],
+        api_key=os.environ.get("COWORK_LLM_API_KEY") or os.environ.get(p["key_env"]),
+        subagent_model=os.environ.get("COWORK_SUBAGENT_MODEL", sub),
+        architect_model=os.environ.get("COWORK_ARCHITECT_MODEL", arch),
+        triage_model=os.environ.get("COWORK_TRIAGE_MODEL", triage),
+        # 只有明确支持的一家才带 prompt_cache_key：不认识的字段在严格端点上
+        # 会 400，为了一点点路由收益把整条链打挂不划算
+        cache_key_supported=bool(p.get("cache_key")),
+    )
+
+
+def _report_cache(*backends) -> None:
+    """把提示词缓存的命中情况打出来。
+
+    放在每个真实后端跑完之后 —— **不打出来的度量等于没有度量**，
+    这个项目在 M2 已经吃过一次「参数没人读」的亏（§11.6c 的两个死参数）。
+    """
+    for b in backends:
+        stats = getattr(b, "cache_stats", None)
+        if stats is None or not stats.calls:
+            continue
+        if stats.hit_rate is None:
+            print(f"缓存       {getattr(b, 'name', '?')}：{stats.calls} 次调用，"
+                  f"这家不报缓存用量", file=sys.stderr)
+            continue
+        print(
+            f"缓存       {getattr(b, 'name', '?')}：命中 {stats.hit_rate:.0%}"
+            f"（{stats.cached_tokens:,}/{stats.prompt_tokens:,} 输入 token，"
+            f"{stats.calls} 次调用）",
+            file=sys.stderr,
+        )
 
 
 def _run_demo(args: argparse.Namespace) -> int:
@@ -110,10 +222,11 @@ def _run_demo(args: argparse.Namespace) -> int:
 
     lines: list[str] = []
     log = lines.append if args.json else print
+    backend = _make_backend(args.backend)
     orch, ws = build(
         args.workspace,
         store=_make_store(args.store),
-        backend=_make_backend(args.backend),
+        backend=backend,
         use_docker=args.docker,
     )
     orch.log = log
@@ -156,6 +269,8 @@ def _run_demo(args: argparse.Namespace) -> int:
         for s in orch.store.signals_for(result.state.spec.id):
             print(f"  {s.level.value} {s.type.value:<18} {s.source.value:<8} {s.disposition.value}")
 
+    if backend is not None:
+        _report_cache(backend)
     return 0 if result.state.status.value == "COMPLETED" else 1
 
 
@@ -251,6 +366,65 @@ def _bench(args: argparse.Namespace) -> int:
     return _bench_report(argparse.Namespace(records=str(out), json=False))
 
 
+def _models(args: argparse.Namespace) -> int:
+    """拿各家的 GET /v1/models 对一遍 PROVIDERS 表。
+
+    存在的理由：**这张表会无声地过期**。模型下线时端点还在、key 还有效，
+    只是那个 id 不再被服务，报错要等到第一次真实调用（而且报出来的往往是
+    404 model_not_found 之外的别的东西）。DeepSeek 的 deepseek-chat →
+    deepseek-v4-flash 就是这么发生的。所以给一个能直接问的命令，
+    别靠读文档判断表里写的还对不对。
+    """
+    import os
+    import urllib.error
+    import urllib.request
+
+    names = [args.provider] if args.provider else PROVIDER_NAMES
+    rows: list[tuple[str, str, str]] = []
+    exit_code = 0
+
+    for name in names:
+        p = PROVIDERS[name]
+        wanted = sorted({m for m in p["models"] if m})
+        key = os.environ.get("COWORK_LLM_API_KEY") or os.environ.get(p["key_env"] or "")
+        if not key:
+            rows.append((name, "跳过", f"没有 {p['key_env']}，未验证"))
+            continue
+        if name == "anthropic":
+            # 自己的 SDK，模型列表接口也不同 —— 这里只报「有 key」，不假装验证过
+            rows.append((name, "跳过", "走 Anthropic SDK，不吃 /v1/models"))
+            continue
+        if not p["base"]:
+            rows.append((name, "跳过", "没有 base_url"))
+            continue
+
+        url = p["base"].rstrip("/") + "/models"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+                served = {m["id"] for m in json.load(resp).get("data", [])}
+        except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+            # 连不上/不支持这个接口都不算配置错 —— 说清楚是「没问到」而不是「不对」
+            rows.append((name, "问不到", f"{type(exc).__name__}: {str(exc)[:60]}"))
+            exit_code = max(exit_code, 1)
+            continue
+
+        missing = [m for m in wanted if m not in served]
+        if missing:
+            rows.append((name, "对不上", f"服务端没有 {missing}；实际有 {sorted(served)[:6]}"))
+            exit_code = 2
+        else:
+            rows.append((name, "OK", f"{wanted} 都在服务端"))
+
+    width = max(len(r[0]) for r in rows)
+    for name, status, detail in rows:
+        mark = {"OK": "✓", "对不上": "✗", "问不到": "?", "跳过": "-"}[status]
+        print(f"{mark} {name:<{width}}  {status:<6} {detail}")
+    print("\n「跳过」不代表配置错，只代表这次没验证到 —— 缺 key 或那家没有这个接口。",
+          file=sys.stderr)
+    return exit_code
+
+
 def _plan(args: argparse.Namespace) -> int:
     """从一个自然语言目标拆出可派发的子任务（§12 M7 7.3 / 7.4）。"""
     import tempfile
@@ -285,6 +459,7 @@ def _plan(args: argparse.Namespace) -> int:
         log=(lambda _m: None) if args.json else print,
     )
 
+    _report_cache(architect.backend, architect.reviewer_backend)
     if args.json:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         return 0 if result.accepted else 1
@@ -500,7 +675,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--store", choices=["sqlite", "pg"], default="sqlite")
     d.add_argument(
         "--backend",
-        choices=["scripted", "anthropic", "deepseek", "kimi", "openai"],
+        choices=["scripted", *PROVIDER_NAMES],
         default="scripted",
         help=(
             "anthropic 需 ANTHROPIC_API_KEY；deepseek 需 DEEPSEEK_API_KEY；"
@@ -510,6 +685,11 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--docker", action="store_true", help="用 Docker 沙箱跑工具调用")
     d.set_defaults(func=_run_demo)
 
+    m = sub.add_parser("models", help="拿各家的 /v1/models 对一遍 PROVIDERS 表")
+    m.add_argument("provider", nargs="?", choices=PROVIDER_NAMES, default=None)
+    m.add_argument("--timeout", type=float, default=15.0)
+    m.set_defaults(func=_models)
+
     i = sub.add_parser("inspect", help="导出某个 SQLite 库里的任务与决策")
     i.add_argument("db")
     i.set_defaults(func=_inspect)
@@ -518,10 +698,10 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--workspace", default=None)
     c.add_argument("--json", action="store_true")
     c.add_argument("--store", choices=["sqlite", "pg"], default="sqlite")
-    c.add_argument("--backend", choices=["scripted", "anthropic", "deepseek", "kimi", "openai"],
+    c.add_argument("--backend", choices=["scripted", *PROVIDER_NAMES],
                    default="scripted")
     c.add_argument("--reviewer",
-                   choices=["auto", "none", "anthropic", "deepseek", "kimi", "openai"],
+                   choices=["auto", "none", *PROVIDER_NAMES],
                    default="auto",
                    help=f"拆解复核的供应商（§12 M7 7.1）。auto：真实后端时用 "
                         f"{DEFAULT_REVIEWER}、脚本后端时不复核；none 退回同模型复核")
@@ -529,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
     c.set_defaults(func=_run_composite)
 
     b = sub.add_parser("bench", help="M2 参数实测跑批（§12 M2）")
-    b.add_argument("--backend", choices=["anthropic", "deepseek", "kimi", "openai"],
+    b.add_argument("--backend", choices=PROVIDER_NAMES,
                    default="deepseek")
     b.add_argument("--repeat", type=int, default=5,
                    help="每个任务跑几次。§11.5d：单次运行是噪声，不要低于 5")
@@ -545,10 +725,10 @@ def main(argv: list[str] | None = None) -> int:
 
     pl = sub.add_parser("plan", help="从一个自然语言目标拆出子任务（§12 M7 7.3/7.4）")
     pl.add_argument("goal", help="原始目标，一句自然语言")
-    pl.add_argument("--backend", choices=["anthropic", "deepseek", "kimi", "openai"],
+    pl.add_argument("--backend", choices=PROVIDER_NAMES,
                     default="deepseek", help="拆解者")
     pl.add_argument("--reviewer",
-                    choices=["auto", "none", "anthropic", "deepseek", "kimi", "openai"],
+                    choices=["auto", "none", *PROVIDER_NAMES],
                     default="auto", help=f"复核者，auto = {DEFAULT_REVIEWER}")
     pl.add_argument("--gate", choices=["auto", "cli"], default="auto",
                     help="升级给人时谁来答：auto 自动放行，cli 你自己在终端拍板")
@@ -561,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
     pl.set_defaults(func=_plan)
 
     rv = sub.add_parser("bench-review", help="跨模型复核对照实测（§12 M7 7.2）")
-    rv.add_argument("--backend", choices=["anthropic", "deepseek", "kimi", "openai"],
+    rv.add_argument("--backend", choices=PROVIDER_NAMES,
                     default="deepseek", help="拆解者/同模型基线用的供应商")
     rv.add_argument("--arms", default="deepseek,kimi",
                     help="逗号分隔的复核者供应商。等于 --backend 的那个是同模型基线")
@@ -580,10 +760,10 @@ def main(argv: list[str] | None = None) -> int:
 
     bp = sub.add_parser("bench-plan",
                         help="拆解提示词对照 + 生成-复核循环实测（§12 M7 7.4 / 风险 #17）")
-    bp.add_argument("--backend", choices=["anthropic", "deepseek", "kimi", "openai"],
+    bp.add_argument("--backend", choices=PROVIDER_NAMES,
                     default="deepseek", help="拆解者")
     bp.add_argument("--reviewer",
-                    choices=["auto", "none", "anthropic", "deepseek", "kimi", "openai"],
+                    choices=["auto", "none", *PROVIDER_NAMES],
                     default="auto")
     bp.add_argument("--arms", default=None, help="full,naive 的子集，默认两个都跑")
     bp.add_argument("--goals", default=None, help="逗号分隔的目标 id，默认全跑")

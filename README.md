@@ -438,7 +438,19 @@ src/cowork/
 | 后端 | 方言 | 供应商 | CLI |
 |---|---|---|---|
 | `llm/anthropic_backend.py` | Anthropic Messages | Claude 全系 | `--backend anthropic` |
-| `llm/openai_compat.py` | OpenAI Chat Completions | DeepSeek、Kimi(Moonshot)、任何 OpenAI 兼容端点 | `--backend deepseek` / `kimi` / `openai` |
+| `llm/openai_compat.py` | OpenAI Chat Completions | 其余全部 | `--backend deepseek` / `kimi` / `openai` / `gemini` / `qwen` / `zhipu` / `xai` / `doubao` / `litellm` |
+
+九家的端点、key 变量名和默认模型都在 `cli.PROVIDERS` 一张表里，加一家只改那张表。
+
+**那张表会无声地过期** —— 供应商下线一个模型 id 时，端点还在、key 还有效，
+只有那个 id 没了。所以填完 key 先跑一遍自检，别读文档猜：
+
+```bash
+python -m cowork.cli models          # 逐行对 GET /v1/models
+python -m cowork.cli models deepseek # 只看一家
+```
+
+它区分「对不上」（表错了）和「跳过」（缺 key，这次没验证到）—— 后者不代表配置有问题。
 
 ### 配置密钥
 
@@ -465,8 +477,9 @@ python -m cowork.cli demo --backend deepseek
 python -m cowork.cli demo --backend kimi
 ```
 
-默认分工：架构师 `deepseek-reasoner`，Subagent 与分诊 `deepseek-chat`。
-用 `COWORK_ARCHITECT_MODEL` / `COWORK_SUBAGENT_MODEL` / `COWORK_TRIAGE_MODEL` 覆盖。
+默认分工见 `cli.PROVIDERS`，用 `COWORK_ARCHITECT_MODEL` / `COWORK_SUBAGENT_MODEL` /
+`COWORK_TRIAGE_MODEL` 覆盖。DeepSeek 从 v4 起只暴露 `deepseek-v4-flash` / `-pro`，
+三个角色现在统一 flash —— 想让架构师回到推理档就设 `COWORK_ARCHITECT_MODEL=deepseek-v4-pro`。
 
 ### 经 LiteLLM（要 virtual key 的预算强制时）
 
@@ -479,7 +492,7 @@ curl -X POST http://localhost:4000/key/generate \
 
 COWORK_LLM_BASE_URL=http://localhost:4000/v1 \
 COWORK_LLM_API_KEY=sk-<上面返回的 virtual key> \
-python -m cowork.cli demo --backend openai
+python -m cowork.cli demo --backend litellm
 ```
 
 `litellm.config.yaml` 里已配好 claude / deepseek / kimi 的模型组，按需增删。

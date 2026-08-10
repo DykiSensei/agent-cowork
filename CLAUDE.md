@@ -40,15 +40,16 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 248 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 261 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
 python -m unittest discover -s tests -t . -v                          # 看每个用例名
 
+python -m cowork.cli models                     # 拿各家 /v1/models 对一遍 PROVIDERS 表
 python -m cowork.cli demo                       # SQLite + 本地沙箱 + 脚本后端
 python -m cowork.cli demo --store pg --docker   # Postgres + Docker 沙箱
-python -m cowork.cli demo --backend deepseek    # 真实模型（也可 kimi / anthropic / openai）
+python -m cowork.cli demo --backend deepseek    # 真实模型，9 家见 cli.PROVIDERS
 python -m cowork.cli demo --json                # 每行一条 JSON，末尾一份完整结果
 python -m cowork.cli inspect <db.sqlite>        # 导出某个库的任务与 DecisionRecord
 python -m cowork.cli composite                  # M4 复合任务：并行 + 冲突检测
@@ -247,6 +248,20 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   正文 0 字符。三件事都要做：额度给够（拆解 16000）、**把截断单独认出来**
   （截断的 JSON 报出来是「不是合法 JSON」，照着查会查错方向）、
   **截断后原样重掷而不是带残文修复**（残文回灌只会让它接着写半截 JSON）。
+- **提示词的拼装顺序就是缓存命中率**，而且它是条沉默的不变量：静态（角色提示词 +
+  输出约束 + schema）在前、可变（目标 / 上下文 / 执行记录）在后。把 schema 挪进
+  user、或在 system 里插个任务 id，**功能测试全绿、命中率直接归零，账单下个月才
+  告诉你**。现在有 `test_openai_compat.TestPromptCaching` 钉着。实测 deepseek 74%。
+- **缓存字段各家名字不一样，只认一个就会读成 0**：OpenAI 系
+  `prompt_tokens_details.cached_tokens`、DeepSeek 另给 `prompt_cache_hit_tokens`、
+  Moonshot 还有顶层 `cached_tokens` 且**首次调用 details 是 null**、
+  Anthropic 的 `cache_read_input_tokens` **不含在 input_tokens 里、要加回去**。
+  另外「这家不报」和「没命中」在账面上一样但结论相反，要分开记。
+- **Anthropic 的缓存是显式的**，不打 `cache_control` 断点一次都不命中 ——
+  和 OpenAI 系「够长就自动缓存」不是一回事，删掉断点不会有任何测试变红。
+- **`PROVIDERS` 表会无声地过期**：模型下线时端点还在、key 还有效，只有那个 id 没了。
+  别读文档判断，跑 `python -m cowork.cli models`。表里 `verified` 记的是
+  「本机用真 key 打通过」—— 没打通过不等于错，等于没验证，两者不能混。
 - **改一处 token 额度时，问一句同一条链上还有谁的输入变长了**。M7 把拆解调用提到
   16000，复核调用留在 4096 —— 而复核要读完整份拆解再推理，实测被吃满、正文 0 字符。
 - **两侧的失败要走同一条路**。`plan()` 第一版只接住生成者的 `ModelError`，
@@ -289,7 +304,8 @@ demo*.py        M1 单任务 / M4 复合任务的验证场景 —— 「隐藏�
 runtime/        确定性层：bus / sandbox / detectors / loop —— 这里不许出现 LLM 调用
 agent/          architect（唯一写入决策点：中断决策 + 拆解生成 plan()/decompose()；
                 reviewer_backend = 无写权的复核者）/ subagent（薄绑定层）
-llm/            __init__ 是后端协议本身：Backend Protocol + ArchitectVerdict / Triage，
+llm/            __init__ 是后端协议本身：Backend Protocol + ArchitectVerdict /
+                Triage / CacheStats，
                 **给模型加一种能力从这里改**；scripted（确定性测试用）/
                 anthropic_backend / openai_compat / errors
 store/          sqlite（默认）/ postgres（正式）
