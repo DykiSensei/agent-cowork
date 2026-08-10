@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   fetchDetail,
   fetchThreads,
+  postCancel,
   postIntervene,
   postRuling,
   subscribeStream,
@@ -21,6 +22,7 @@ export interface AppProps {
   onSwitchMode: (m: Mode) => void;
   onOpenSettings: () => void;
   onIntervene: (taskId: string, instruction: string) => Promise<boolean>;
+  onCancel: (taskId: string, reason: string) => Promise<boolean>;
   onRuling: (taskId: string, action: string, rationale: string) => Promise<boolean>;
 }
 
@@ -115,6 +117,10 @@ export default function App() {
     return (await postIntervene(taskId, instruction)).ok;
   }, []);
 
+  const onCancel = useCallback(async (taskId: string, reason: string) => {
+    return (await postCancel(taskId, reason)).ok;
+  }, []);
+
   const onRuling = useCallback(
     async (taskId: string, action: string, rationale: string) => {
       return (await postRuling(taskId, action, rationale)).ok;
@@ -153,6 +159,7 @@ export default function App() {
       history.replaceState(null, "", "#settings");
     },
     onIntervene,
+    onCancel,
     onRuling,
   };
   return mode === "lite" ? <LiteApp {...props} /> : <ProApp {...props} />;

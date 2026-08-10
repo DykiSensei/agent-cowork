@@ -71,6 +71,7 @@ export default function ProApp(props: AppProps) {
             taskId={props.selected}
             detail={props.detail}
             onIntervene={props.onIntervene}
+            onCancel={props.onCancel}
             onRuling={props.onRuling}
           />
         ) : (

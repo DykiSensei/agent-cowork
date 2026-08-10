@@ -18,9 +18,9 @@ from cowork.actions import Finish, ToolCall
 from cowork.bench import ALL_TASKS, BENCH_TASKS, PROBE_TASKS, Category
 from cowork.bench.analyze import (
     complexity_roc,
+    interrupt_latency,
     interrupts_vs_success,
     render,
-    step_deadline,
     summarize,
     task_set_health,
 )
@@ -266,7 +266,7 @@ class TestAnalyze(unittest.TestCase):
 
     def test_checkpoint_overhead_ratio(self):
         recs = [_rec(step_seconds=[1.0, 1.0], checkpoint_seconds=[0.01, 0.01])]
-        self.assertAlmostEqual(step_deadline(recs)["checkpoint_overhead_ratio"], 0.01)
+        self.assertAlmostEqual(interrupt_latency(recs)["checkpoint_overhead_ratio"], 0.01)
 
     def test_degenerate_task_is_flagged(self):
         """ONE_REBASE 类零中断 = 模型自己避开了，这批数据不能用（§11.5a）。"""

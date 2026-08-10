@@ -91,14 +91,12 @@ class Policy:
     # 不是当前的成本驱动项。
     probe_excerpt_chars: int = 4000
 
-    # 单个 step 的 soft deadline（§5.1），超过则 Runtime 强制切段。
-    # 依据：step 墙钟耗时 p50 1.65s / p95 3.11s / p99 5.90s / max 10.79s（n=651）。
-    # 抢占只在 step 边界发生，所以这组数就是中断响应延迟本身。30s 给到 max 的
-    # 约 3 倍余量，同时把一个卡死 step 的等待从一分钟砍半。
-    # **注意：这个值当前没有任何代码读它**，loop.py 并未实现 soft deadline 切段。
-    # 另外风险 #1 的前提被证伪了 —— checkpoint 写入耗时中位 0.2ms，
-    # 占 step 总耗时的 0.009%，step 粒度完全不需要为 checkpoint 开销让步（§11.6c）。
-    step_soft_deadline_s: float = 30.0
+    # 这里曾有 step_soft_deadline_s（单个 step 的 soft deadline，§5.1）。**已删除** ——
+    # 它从来没有任何代码读它，loop.py 并未实现 soft deadline 切段，而 M2 还在为它
+    # 出一节报告、给一个「建议值」。一个不生效的参数配一份实测建议，比没有这个参数更坏。
+    # 中断响应延迟的实测本身仍然有效、也仍在 bench 里（`analyze.interrupt_latency()`）：
+    # step 墙钟耗时 p50 1.65s / p95 3.11s / p99 5.90s / max 10.79s（n=651），
+    # 抢占只在 step 边界发生，所以这组数就是延迟本身。真要做切段时从那组数起步。
 
 
 DEFAULT_POLICY = Policy()

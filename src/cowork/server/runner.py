@@ -25,7 +25,7 @@ from ..agent.architect import (
 from ..orchestrator import Orchestrator
 from ..policy import DEFAULT_POLICY
 from ..scheduler import Scheduler
-from ..types import Action, SandboxProfile, TaskSpec, TaskStatus
+from ..types import Action, SandboxProfile, TaskEvent, TaskSpec, TaskStatus
 
 # PROVIDERS 预设表和后端工厂目前住在 cli 里 —— 服务层复用同一份，
 # 不另抄（将来值得挪进 llm/，那是另一次整理）
@@ -116,6 +116,14 @@ class Runner:
         plan_id = ids.task_id()  # 同时也是将来那条复合线程的 root_id
         with self._lock:
             self.plans[plan_id] = PlanEntry(id=plan_id, goal=goal, created_at=time.time())
+        # 人的原话落进 root 线程的第一条事件（M6 §9 那两条小缺口）。
+        # 为什么非记不可：spec.goal 会被架构师改写，rev>1 之后**人最初说的那句话
+        # 就再也拿不回来了**，而界面开头那个「你发布任务」的气泡要的正是原话。
+        # 同时这也是复合线程 root_goal 的落库处 —— 两条缺口是同一件事。
+        # 写在 root_id 上，而 root 没有 tasks 行：events 上不能有外键，见 schema.sql。
+        self.store.append_event(
+            TaskEvent(task_id=plan_id, kind="human", text=goal)
+        )
         threading.Thread(
             target=self._plan_worker, args=(plan_id, goal, backend), daemon=True
         ).start()
@@ -255,6 +263,19 @@ class Runner:
         if orch is None:
             return False
         orch.intervene(instruction)
+        return True
+
+    def cancel(self, task_id: str, reason: str = "") -> bool:
+        """停掉正在跑的任务。返回 False = 它不在跑（已经终局，或还没派发）。
+
+        和 `rule_task(action=ABANDON)` 是两件事：那条管 AWAITING_HUMAN 的任务
+        （走 restore 重建现场），这条管**正在烧钱的**那些。两者合起来才覆盖全部
+        「我要它停」的场景。
+        """
+        orch = self.running.get(task_id)
+        if orch is None:
+            return False
+        orch.cancel(reason)
         return True
 
     # ------------------------------------------------------------------ #

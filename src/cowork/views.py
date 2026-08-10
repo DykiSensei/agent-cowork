@@ -71,13 +71,28 @@ def thread_list(store) -> list[dict[str, Any]]:
     for parent_id, kids in children.items():
         if parent_id in by_id:
             continue  # 父任务是真实存在的任务，上面已经收了
-        rows.append(_synthetic_parent(parent_id, kids))
+        rows.append(_synthetic_parent(parent_id, kids, _root_goal(store, parent_id)))
 
     rows.sort(key=lambda r: (r["updated_at"] or 0, r["task_id"]), reverse=True)
     return rows
 
 
-def _synthetic_parent(parent_id: str, kids: list[TaskState]) -> dict[str, Any]:
+def _root_goal(store, task_id: str) -> str:
+    """复合线程开头那句人话：root 线程的第一条 `human` 事件。
+
+    服务层在 `POST /tasks` 时把人的原话写在这里（M6 §9）。拿不到就返回空串 ——
+    `cli composite` 那种没有服务层的入口不会有这条事件，那时候退回「复合任务（N）」
+    这个合成标题，**不要拿子任务的 goal 顶替**：那是架构师写的，不是人说的。
+    """
+    for e in _events(store, task_id, 0):
+        if e.kind == "human":
+            return (e.text or "").strip()
+    return ""
+
+
+def _synthetic_parent(
+    parent_id: str, kids: list[TaskState], root_goal: str = ""
+) -> dict[str, Any]:
     """给「只有子任务、没有父任务记录」的复合任务合成一条列表项。
 
     状态按最坏情况取：有人等人 → 等人；有人失败 → 失败；全完成才叫完成。
@@ -95,9 +110,10 @@ def _synthetic_parent(parent_id: str, kids: list[TaskState]) -> dict[str, Any]:
     else:
         status = TaskStatus.PENDING
     started = [k.started_at for k in kids if k.started_at]
+    title = root_goal.splitlines()[0][:80] if root_goal else f"复合任务（{len(kids)} 个子任务）"
     return {
         "task_id": parent_id,
-        "title": f"复合任务（{len(kids)} 个子任务）",
+        "title": title,
         "status": status.value,
         "composite": True,
         "tokens_used": sum(k.tokens_used for k in kids),
@@ -161,6 +177,9 @@ def _composite_detail(
     return {
         "kind": "composite",
         "state": None,
+        # 人最初说的那句话。它也在 events 里（第一条 human 事件），这里再给一份是
+        # 因为界面的标题栏要它，而标题栏不该去翻时间线
+        "root_goal": _root_goal(store, task_id),
         "plan": plan,
         "review": review,
         "tasks": {k.spec.id: k.to_dict() for k in children},

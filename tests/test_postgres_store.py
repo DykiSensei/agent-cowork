@@ -98,14 +98,41 @@ class TestPostgresStore(unittest.TestCase):
         self.assertEqual([e.text for e in self.store.events_for(self.spec.id)], ["一", "二"])
         self.assertEqual([e.seq for e in self.store.events_for(self.spec.id, 1)], [2])
 
-    def test_events_go_away_with_their_task(self):
-        """外键 ON DELETE CASCADE：任务删了，时间线不该留成孤儿。"""
+    def test_events_can_be_written_for_a_thread_with_no_task_row(self):
+        """**事件是线程级的，不是任务级的** —— 这条曾经被一个外键悄悄破坏。
+
+        复合任务的 root 线程按设计没有 tasks 行（`views._synthetic_parent`），
+        而分层结果、拆解复核、冲突仲裁全写在 root 上。events.task_id 上加外键时，
+        这些写入在 PG 上被拒绝、又被 `Scheduler._event()` 的 except 吞掉：
+        复合线程的时间线整个是空的，且一条报错都没有。SQLite 不强制外键，
+        所以本机测试全绿 —— 这个缺陷只在 PG 上、只在复合任务上出现。
+        """
+        from cowork.types import TaskEvent
+
+        root = "task_root_no_such_row_pg"
+        with self.store.conn.cursor() as cur:
+            cur.execute("DELETE FROM events WHERE task_id=%s", (root,))
+        ev = self.store.append_event(
+            TaskEvent(task_id=root, kind="plan", text="", payload={"layers": []})
+        )
+        self.assertEqual(ev.seq, 1)
+        self.assertEqual(len(self.store.events_for(root)), 1)
+        with self.store.conn.cursor() as cur:
+            cur.execute("DELETE FROM events WHERE task_id=%s", (root,))
+
+    def test_events_outlive_their_task(self):
+        """去掉外键的代价，如实钉住：任务删了，事件会留成孤儿。
+
+        接受这个代价的理由是 events 表的定位 —— 它是**到达序的索引**，不是内容的
+        第二份拷贝，正文都在 signals / decisions 里。孤儿索引没有正确性影响，
+        而外键会让复合线程整个不可用（见上一条）。
+        """
         from cowork.types import TaskEvent
 
         self.store.append_event(TaskEvent(task_id=self.spec.id, kind="log", text="x"))
         with self.store.conn.cursor() as cur:
             cur.execute("DELETE FROM tasks WHERE id=%s", (self.spec.id,))
-        self.assertEqual(self.store.events_for(self.spec.id), [])
+        self.assertEqual(len(self.store.events_for(self.spec.id)), 1)
 
     def test_db_rejects_flat_context(self):
         """存成一坨扁平消息列表的话，§6 整节都无法实现——所以 DB 层直接拒。"""

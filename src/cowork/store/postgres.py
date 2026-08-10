@@ -39,7 +39,7 @@ ALTER TABLE decisions ADD COLUMN IF NOT EXISTS spec_changes_json JSONB;
 ALTER TABLE decisions ADD COLUMN IF NOT EXISTS suggestion_json   JSONB;
 CREATE TABLE IF NOT EXISTS events (
     id           TEXT PRIMARY KEY,
-    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id      TEXT NOT NULL,
     seq          INTEGER NOT NULL,
     kind         TEXT NOT NULL,
     text         TEXT NOT NULL DEFAULT '',
@@ -49,6 +49,14 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE (task_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_ev_task ON events(task_id, seq);
+-- events.task_id 曾经是 REFERENCES tasks(id)，那是个错的约束：**事件是线程级的，
+-- 不是任务级的**。复合任务的 root 线程按设计就没有 tasks 行（`Scheduler` 拿到的
+-- 是一组现成的 spec，没人建过那个父任务 —— 见 `views._synthetic_parent`），
+-- 而分层结果、拆解复核、冲突仲裁全都写在 root 上。
+-- 于是在 Postgres 上这些写入被外键拒绝，又被 `Scheduler._event()` 的 except 吞掉：
+-- **复合线程的时间线在 PG 上整个是空的，一条报错都不会出现**。
+-- SQLite 不强制外键，所以测试全绿。删掉这个约束，别再给 events 加外键。
+ALTER TABLE events DROP CONSTRAINT IF EXISTS events_task_id_fkey;
 """
 
 

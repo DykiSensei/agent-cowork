@@ -207,15 +207,30 @@ export default function LiteStream({
   taskId,
   detail,
   onIntervene,
+  onCancel,
   onRuling,
 }: {
   taskId: string;
   detail: TaskDetail;
   onIntervene: (taskId: string, text: string) => Promise<boolean>;
+  onCancel: (taskId: string, reason: string) => Promise<boolean>;
   onRuling: (taskId: string, action: string, rationale: string) => Promise<boolean>;
 }) {
   const [bar, setBar] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const events = useMemo(() => translate(detail), [detail]);
+
+  // 只在「还在跑」的时候给停止按钮。已经挂起的任务要走「等你拍板」那张卡，
+  // 已经终局的没什么可停 —— 给一个必然 409 的按钮比不给更糟。
+  const running =
+    detail.kind === "single" &&
+    (detail.state?.status === "RUNNING" || detail.state?.status === "INTERRUPTED");
+
+  const submitCancel = () => {
+    if (stopping) return;
+    setStopping(true);
+    void onCancel(taskId, "").finally(() => setStopping(false));
+  };
 
   const submitIntervene = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -290,8 +305,16 @@ export default function LiteStream({
             <input placeholder="插一句话，改变它接下来的做法…" autoComplete="off" />
             <button type="submit">发送</button>
           </form>
+          {running && (
+            <button type="button" className="l-stop" onClick={submitCancel} disabled={stopping}>
+              {stopping ? "正在停…" : "停下来"}
+            </button>
+          )}
         </div>
-        <div className="l-hint">你的话会直接变成它的新指令，不是闲聊。</div>
+        <div className="l-hint">
+          你的话会直接变成它的新指令，不是闲聊。
+          {running && "「停下来」是彻底不做了，它会把手头这一小步做完就收工。"}
+        </div>
       </div>
     </main>
   );

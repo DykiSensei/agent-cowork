@@ -22,7 +22,12 @@ from cowork.actions import Finish, ToolCall
 from cowork.llm import ArchitectVerdict, SubtaskDraft
 from cowork.llm.scripted import ScriptedBackend
 from cowork.orchestrator import Orchestrator
-from cowork.server import create_app  # 模块级不引 fastapi，只有调用时才需要
+from cowork.server import (  # 模块级不引 fastapi，只有调用时才需要
+    check_bind_host,
+    create_app,
+    exposure_warning,
+    is_loopback_host,
+)
 from cowork.store import SqliteStore
 from cowork.types import (
     Criterion,
@@ -203,6 +208,12 @@ class TestServer(unittest.TestCase):
                 # 本机 .env 有两家 key -> profiles 应该被惰性生成出来
                 self.assertIn("available_providers", plan)
 
+                # 人的原话立刻落在 root 线程上 —— 拆解还没跑完就该在了，
+                # 否则 spec.goal 被架构师改写后就再也拿不回来（M6 §9）
+                root_events = client.app.state.runner.store.events_for(plan_id)
+                self.assertEqual(root_events[0].kind, "human")
+                self.assertEqual(root_events[0].text, "做一个造文件的小工具")
+
                 r = client.post(f"/api/plans/{plan_id}/dispatch", json={})
                 self.assertEqual(r.status_code, 202, r.text)
                 root_id = r.json()["root_id"]
@@ -222,10 +233,13 @@ class TestServer(unittest.TestCase):
                 self.assertIn("t1_build", detail["tasks"])
                 self.assertEqual(detail["pending_children"], [])
 
-                # 列表里复合任务折成一条
+                # 列表里复合任务折成一条，标题是人自己的话不是「复合任务（N）」
                 threads = client.get("/api/tasks").json()
                 row = next(t for t in threads if t["task_id"] == root_id)
                 self.assertTrue(row["composite"])
+                self.assertEqual(row["title"], "做一个造文件的小工具")
+                # 详情里 root_goal 单独给一份（标题栏不该去翻时间线）
+                self.assertEqual(detail["root_goal"], "做一个造文件的小工具")
 
     # ---------------------------------------------------------- #
     # 写端的错误面
@@ -264,6 +278,45 @@ class TestServer(unittest.TestCase):
                     json={"action": "YOLO", "rationale": "x"},
                 )
                 self.assertEqual(r.status_code, 400)
+
+    def test_cancel_endpoint(self):
+        """取消的**接线**（端点 → runner → orchestrator.cancel）。
+
+        语义（不问架构师、停在 step 边界、产出保留）在 `test_cancel.py` 里钉，
+        那边不需要起 HTTP 也就不会有时序抖动。这里只验证注册表这一跳。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            spec, backend = _restore_scenario(tmp / "ws")
+            (tmp / "ws").mkdir()
+            client = self._app(backend, tmp)
+            with client:
+                runner = client.app.state.runner
+
+                # 不在运行中 -> 409，且提示里要指到 ruling 那条路
+                r = client.post("/api/tasks/task_nope/cancel", json={})
+                self.assertEqual(r.status_code, 409)
+                self.assertIn("ruling", r.json()["error"])
+
+                orch = Orchestrator(
+                    spec,
+                    backend=backend,
+                    store=runner.store,
+                    human_gate=runner.gate,
+                    log=QUIET,
+                )
+                runner.running[spec.id] = orch  # runner 起跑时就是这么登记的
+                try:
+                    r = client.post(
+                        f"/api/tasks/{spec.id}/cancel", json={"reason": "不做了"}
+                    )
+                    self.assertEqual(r.status_code, 202, r.text)
+                    self.assertIsNotNone(orch._cancelled)
+                    self.assertIn("不做了", orch._cancelled)
+                    kinds = [e.kind for e in runner.store.events_for(spec.id)]
+                    self.assertIn("human", kinds)
+                finally:
+                    runner.running.pop(spec.id, None)
 
     # ---------------------------------------------------------- #
     # 设置页
@@ -374,6 +427,34 @@ class TestServer(unittest.TestCase):
                     self.assertIn(b"retry", first)
             finally:
                 server.should_exit = True
+
+
+class TestBindGuard(unittest.TestCase):
+    """绑定准入检查。**不带 fastapi 的 skip** —— `bind.py` 不依赖它，
+    而这条防线恰恰是在依赖没装齐的机器上也必须成立的。
+    """
+
+    def test_loopback_forms_are_allowed(self):
+        for host in ("127.0.0.1", "localhost", "::1", "[::1]", "127.5.5.5", "LocalHost"):
+            self.assertTrue(is_loopback_host(host), host)
+            self.assertIsNone(check_bind_host(host), host)
+
+    def test_exposed_hosts_are_refused_by_default(self):
+        # 空串在 uvicorn 里等价于全接口，必须和 0.0.0.0 同等对待
+        for host in ("0.0.0.0", "", "192.168.1.10", "::", "example.com"):
+            self.assertFalse(is_loopback_host(host), host)
+            refusal = check_bind_host(host)
+            self.assertIsNotNone(refusal, host)
+            self.assertIn("--i-know-its-exposed", refusal)
+
+    def test_explicit_acknowledgement_allows_but_still_warns(self):
+        self.assertIsNone(check_bind_host("0.0.0.0", acknowledged=True))
+        self.assertIn("0.0.0.0", exposure_warning("0.0.0.0"))
+
+    def test_unresolvable_name_is_not_treated_as_loopback(self):
+        """解析不了就当暴露 —— 这里的默认必须偏保守。"""
+        self.assertFalse(is_loopback_host("not a host"))
+        self.assertIsNotNone(check_bind_host("not a host"))
 
 
 if __name__ == "__main__":

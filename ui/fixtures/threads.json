@@ -1,17 +1,17 @@
 [
  {
   "task_id": "task_composite_root",
-  "title": "复合任务（4 个子任务）",
+  "title": "做一个能统计词频的小工具，带缓存和命令行入口",
   "status": "COMPLETED",
   "composite": true,
   "tokens_used": 3200,
   "revision": 1,
   "current_step": 8,
   "terminal": true,
-  "updated_at": 1786378078.0144973
+  "updated_at": 1786388534.2867477
  },
  {
-  "task_id": "task_b193fcea6652",
+  "task_id": "task_32011be22c71",
   "title": "生成周报草稿",
   "status": "INTERRUPTED",
   "composite": false,
@@ -19,10 +19,10 @@
   "revision": 1,
   "current_step": 0,
   "terminal": false,
-  "updated_at": 1786378077.71881
+  "updated_at": 1786388533.9599621
  },
  {
-  "task_id": "task_697b445c5380",
+  "task_id": "task_27d2f6d44e82",
   "title": "实现 word_count(text) 词频统计",
   "status": "RUNNING",
   "composite": false,
@@ -30,10 +30,10 @@
   "revision": 1,
   "current_step": 0,
   "terminal": false,
-  "updated_at": 1786378077.7063673
+  "updated_at": 1786388533.9498916
  },
  {
-  "task_id": "task_eaecb366976c",
+  "task_id": "task_f0a513342a52",
   "title": "整理 README 与目录结构",
   "status": "PENDING",
   "composite": false,
@@ -41,10 +41,10 @@
   "revision": 1,
   "current_step": 0,
   "terminal": false,
-  "updated_at": 1786378077.7015293
+  "updated_at": 1786388533.9450579
  },
  {
-  "task_id": "task_d6fecfb8c0fb",
+  "task_id": "task_1988848a26a7",
   "title": "在 solution.py 里实现 is_palindrome(s) -> bool，判断字符串是否回文。",
   "status": "ABANDONED",
   "composite": false,
@@ -52,10 +52,10 @@
   "revision": 1,
   "current_step": 2,
   "terminal": true,
-  "updated_at": 1786378077.5789914
+  "updated_at": 1786388533.8144407
  },
  {
-  "task_id": "task_9c37d5150c56",
+  "task_id": "task_b0620a74a43c",
   "title": "在 solution.py 里实现 is_palindrome(s) -> bool，判断字符串是否回文。",
   "status": "FAILED",
   "composite": false,
@@ -63,10 +63,10 @@
   "revision": 2,
   "current_step": 2,
   "terminal": true,
-  "updated_at": 1786378077.429486
+  "updated_at": 1786388533.6707146
  },
  {
-  "task_id": "task_df44e8e8bb30",
+  "task_id": "task_2844c268ee4b",
   "title": "在 solution.py 里实现 is_palindrome(s) -> bool，判断字符串是否回文。",
   "status": "AWAITING_HUMAN",
   "composite": false,
@@ -74,10 +74,10 @@
   "revision": 1,
   "current_step": 2,
   "terminal": false,
-  "updated_at": 1786378077.3075042
+  "updated_at": 1786388533.5398932
  },
  {
-  "task_id": "task_a0338b0d02b8",
+  "task_id": "task_06e40d67280d",
   "title": "在 solution.py 里实现 is_palindrome(s) -> bool，判断字符串是否回文。",
   "status": "COMPLETED",
   "composite": false,
@@ -85,6 +85,6 @@
   "revision": 2,
   "current_step": 4,
   "terminal": true,
-  "updated_at": 1786378077.0581253
+  "updated_at": 1786388533.305034
  }
 ]

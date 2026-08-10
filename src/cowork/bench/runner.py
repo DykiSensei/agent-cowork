@@ -6,8 +6,8 @@ Runtime、Orchestrator、Architect 一行都不动。理由在包的 __init__ �
 
 每条记录写一行 JSON（JSONL）。字段设计对着 §12 M2 那张表：
 
-    step_seconds        -> step_soft_deadline_s（中断响应延迟 = 一个 step 的时长）
-    checkpoint_seconds  -> step_soft_deadline_s（checkpoint 写入开销占比）
+    step_seconds        -> 中断响应延迟（= 一个 step 的时长，抢占只在 step 边界发生）
+    checkpoint_seconds  -> checkpoint 写入开销占比（证伪了风险 #1 的前提）
     decisions[].score   -> complexity_threshold（ROC）
     rebase_count/intent -> max_rebase（连续 REBASE 后的偏离度）
     architect_calls     -> soft_queue_threshold / soft_interval_s（分诊频次 × 单次成本）
@@ -49,8 +49,7 @@ class _TimedBackend:
     """给每次模型调用打上墙钟耗时与 token。
 
     next_step 的耗时就是**中断响应延迟的上界** —— 抢占只在 step 边界发生，
-    所以外部中断最坏要等当前 step 跑完（§5.1）。这是 step_soft_deadline_s
-    唯一有意义的实测口径。
+    所以外部中断最坏要等当前 step 跑完（§5.1）。
     """
 
     def __init__(self, inner) -> None:

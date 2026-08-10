@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `多Agent协作系统-开发文档.md`，动完之后回去更新它。
 另有 `M6-界面层接口.md`：给界面层那一侧的接口约定。**改动 `to_dict()` 的形状、
 `HumanGate` 的签名、或信号类型时，那份文档也要跟着改** —— 它是对外承诺。
+`AGENTS.md` 是同一批事实的精简版（给别家编码代理）：本文件里的命令、代码地图、
+四条不变量改了，那边也要跟着改，否则两份指南会慢慢分叉。
 
 当前：M0–M7 全部完成。**M6 群聊界面层已落地**：前端 `ui/`（React + TS + Vite
 双模式界面 + 设置页，细节见 `ui/README.md`）；服务层 `src/cowork/server/`
@@ -46,7 +48,7 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 335 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 348 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -78,6 +80,13 @@ python -m cowork.cli bench-review-report review_ab.jsonl  # 只出报告，不�
 python -m cowork.cli bench-plan --repeat 3                # M7 7.4 拆解提示词对照，约 50 分钟 / 0.8M token
 python -m cowork.cli bench-plan --goals wc --repeat 1     # 冒烟（--arms full,naive 可选一个）
 python -m cowork.cli bench-plan-report plan_ab.jsonl      # 只出报告，不重跑
+
+pip install -e .[server]                        # M6 服务层依赖：fastapi / uvicorn / httpx
+python -m cowork.cli serve                      # HTTP + SSE + ui/dist 静态页，只绑 loopback
+                                                # --backend / --db / --workspace / --max-cycles
+cd ui && npm install && npm run dev             # 前端 5173，自带 mock API，不需要后端在跑
+cd ui && npm run build                          # tsc --noEmit + vite build（typecheck 在这一步）
+PYTHONPATH=src python ui/mock/make_fixtures.py  # 重生成 ui/fixtures（在仓库根跑）
 ```
 
 `bench` 要花真钱和 25 分钟，跑之前先用 `--tasks p1_word_count --repeat 1` 冒烟。
@@ -288,7 +297,21 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   「本机用真 key 打通过」—— 没打通过不等于错，等于没验证，两者不能混。
 - **把用户输入拼进结构化文本的地方都要校验**。设置页写 `.env` 时，值里一个换行
   就等于多写一行 —— 一次「设置 API key」的请求能顺手写 `COWORK_LLM_BASE_URL`，
-  之后所有请求连同 key 一起送到别处。`serve` 只绑 loopback 是同一条防线的另一半。
+  之后所有请求连同 key 一起送到别处。`serve` 只绑 loopback 是同一条防线的另一半，
+  而**默认值不是防线**：现在由 `server/bind.py` 硬拦，非回环地址拒绝启动。
+- **`events` 上不能有外键**（§11.18）。事件是**线程级**的，而复合任务的 root 线程
+  按设计没有 `tasks` 行。PG 的 schema 曾给 `events.task_id` 加
+  `REFERENCES tasks(id)`：分层 / 复核 / 仲裁的事件全被拒，又被 `Scheduler._event()`
+  的 `except` 吞掉 —— **复合线程时间线在 PG 上整个为空，零报错**，而 SQLite 不强制
+  外键所以测试全绿。推论有两条：**「这行属于谁」按线程问不按任务问**；
+  **`except: pass` 合理的地方正是缺陷能活最久的地方**。
+- **取消不是介入的变体**。`intervene` 把控制权交回架构师，而架构师可能回 `CONTINUE`
+  —— 那样人的取消就降级成建议了。`Orchestrator.cancel()` 走完抢占直接 `ABANDONED`，
+  **不调 `decide()`**。边界两条：在飞的 step 会跑完、产出保留（停的是循环不是回滚）。
+  `ruling(ABANDON)` 管挂起的、`cancel` 管在跑的，合起来才覆盖「我要它停」。
+- **「有代码读它」不等于「它在起作用」**。死参数要一路问到调用链的头：
+  `step_soft_deadline_s` 无人读（已删），而 `soft_queue_threshold` / `soft_interval_s`
+  有读者 `Architect.should_consume_soft()` —— 但那个方法没有任何调用方。
 - **事件表是到达序的索引，不是内容的第二份拷贝**。信号和裁决的正文只在各自的
   表里，`events` 只记「第几条、什么类型、指向谁」。内联正文 = 同一件事两个真相来源。
   排序靠 `seq`（Store 写入时分配）不靠 `created_at` —— 并行任务的时间戳会撞在
@@ -336,6 +359,13 @@ plan.py         §12 M4 拓扑分层 / 可分解性 / 静态 scope 冲突 + M5b 
 scheduler.py    §12 M4 并行调度 + 产出层冲突检测 + 仲裁
 views.py        M6 的投影层：Store → 界面层契约的形状。无业务逻辑，只有取数拼装
 config.py       .env 加载（环境变量优先，空值=未设置）+ redact，不引 python-dotenv
+cli.py          全部子命令 + PROVIDERS 预设表 + DEFAULT_REVIEWER —— 服务层复用同一份
+server/         M6 服务层（可选 extra）：app 路由 / runner 线程编排 + plan 注册表 /
+                gate（ChatGate：把问题摆出来立即返回，人从 HTTP 端点答复）/
+                tap（写入处发事件 → SSE）/ settings_io（.env 读写）/
+                bind（绑定地址准入，非回环拒绝启动）。
+                一次 run 是阻塞的，所以执行都在 daemon 线程里；后端实例每次起跑现建，
+                设置页改的 key / 模型 / 挡位对新任务立即生效
 demo*.py        M1 单任务 / M4 复合任务的验证场景 —— 「隐藏要求」写在这里
 runtime/        确定性层：bus / sandbox / detectors / loop —— 这里不许出现 LLM 调用
 agent/          architect（唯一写入决策点：中断决策 + 拆解生成 plan()/decompose()；

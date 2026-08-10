@@ -433,7 +433,15 @@ def _serve(args: argparse.Namespace) -> int:
         return 2
     from pathlib import Path
 
-    from .server import create_app
+    from .server import check_bind_host, create_app, exposure_warning, is_loopback_host
+
+    # 准入检查在建 app 之前：拒绝要发生在任何端口被占用、任何 key 被读取之前。
+    refusal = check_bind_host(args.host, acknowledged=args.i_know_its_exposed)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 2
+    if not is_loopback_host(args.host):
+        print(exposure_warning(args.host), file=sys.stderr)
 
     ui_dist = Path(__file__).resolve().parents[2] / "ui" / "dist"
     app = create_app(
@@ -824,7 +832,11 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("serve", help="M6 服务层：HTTP + SSE + 静态 UI")
     s.add_argument("--host", default="127.0.0.1",
-                   help="只绑 loopback 是刻意的：没有权限概念（接口文档 §6）")
+                   help="只绑 loopback 是刻意的：没有权限概念（接口文档 §6）。"
+                        "非回环地址会被拒绝，除非同时给 --i-know-its-exposed")
+    s.add_argument("--i-know-its-exposed", action="store_true",
+                   dest="i_know_its_exposed",
+                   help="确认要把一个无认证、能读写 API key 的服务绑到回环之外")
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--db", default="cowork.sqlite", help="SQLite 库路径")
     s.add_argument("--backend", choices=PROVIDER_NAMES, default="deepseek")

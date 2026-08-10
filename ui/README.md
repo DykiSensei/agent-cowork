@@ -57,7 +57,8 @@ shot-app-*.png         React 版的自检截图
 ## mock 端点
 
 读类：`GET /api/tasks`、`GET /api/tasks/:id`（views 投影原样透传）。
-写类：`POST /api/tasks/:id/intervene|ruling`（202，mock 不驱动任何任务）。
+写类：`POST /api/tasks/:id/intervene|cancel|ruling`（202，mock 不驱动任何任务；
+真实服务里 cancel 对不在运行的任务回 409）。
 `GET /api/stream` 是 SSE，只发心跳。
 设置页：`GET/PUT /api/providers[/:name]`、`GET/PUT /api/settings` ——
 key 只写不读，回包只有 `configured` + 最后 4 位识别串。
@@ -68,6 +69,9 @@ key 只写不读，回包只有 `configured` + 最后 4 位识别串。
 pip install -e .[server]
 python -m cowork.cli serve          # HTTP + SSE + 本目录 dist/ 的静态 UI，只绑 loopback
 ```
+
+**只绑 loopback 是硬拦不是默认值**：`--host` 指向非回环地址会直接拒绝启动
+（要过必须显式 `--i-know-its-exposed`）。理由是设置页能读写各家 API key。
 
 端点与 mock 完全一致，前端不用改任何东西。与 mock 的差别：
 

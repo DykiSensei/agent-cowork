@@ -100,6 +100,19 @@ def create_app(
             return err(409, "任务不在运行中 —— 介入只对运行中的任务生效（下一个 step 边界）")
         return {"accepted": True}
 
+    @app.post("/api/tasks/{task_id}/cancel", status_code=202)
+    async def cancel_task(task_id: str, req: Request):
+        body = await req.json() if req.headers.get("content-length") else {}
+        if not runner.cancel(task_id, (body.get("reason") or "").strip()):
+            # 挂起的任务不在这条路上 —— 那是 ruling(ABANDON)，提示里说清楚，
+            # 否则界面只能给用户一个「409」
+            return err(
+                409,
+                "任务不在运行中。已经挂起的任务请用 ruling（action=ABANDON），"
+                "已经终局的任务不需要取消",
+            )
+        return {"accepted": True}
+
     @app.post("/api/tasks/{task_id}/ruling", status_code=202)
     async def rule_task(task_id: str, req: Request):
         body = await req.json()

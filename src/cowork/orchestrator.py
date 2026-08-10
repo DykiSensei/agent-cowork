@@ -27,6 +27,7 @@ from .types import (
     Action,
     AgentContext,
     Artifact,
+    Decider,
     DecisionRecord,
     ResumeMode,
     SilencePolicy,
@@ -75,6 +76,9 @@ class Orchestrator:
         self.state = TaskState(spec=spec, status=TaskStatus.PENDING)
         self.ctx = AgentContext(task_spec=spec)
         self.decisions: list[DecisionRecord] = []
+        # 取消理由。非 None 就是「人已经拍板停下」——_drive 在 step 边界之后
+        # 看它，看到了就不再问架构师（见 cancel()）
+        self._cancelled: str | None = None
         self._rebase_count = 0
         self._last_probe = time.monotonic()
         self.probe_count = 0
@@ -130,6 +134,45 @@ class Orchestrator:
         # human 与 log 分开：界面要把人说的话渲染成对话气泡，不是一行日志
         self._event("human", text=instruction, ref_id=sig.id)
         return sig
+
+    def cancel(self, reason: str = "") -> Signal:
+        """人要求停下来。**这是 intervene 的另一半，不是它的变体。**
+
+        `intervene` 说的是「换个做法接着干」，所以它把控制权交回架构师；
+        cancel 说的是「别干了」，架构师无事可决 —— 走完抢占之后直接进 ABANDONED，
+        **不调 decide()**。省下的不只是一次 3.5k token 的调用：让架构师去裁决
+        一件人已经拍板的事，它有可能回 CONTINUE，那时候「取消」就成了一个建议。
+
+        停下来的时机仍然是 step 边界（`take_preempt()`），§10.1 的地基不动 ——
+        所以最坏要等当前 step 跑完，实测中位 1.65s / p95 3.11s。
+        """
+        self._cancelled = reason.strip() or "人取消了这个任务"
+        sig = self.bus.human_intervention(self.spec.id, f"[取消] {self._cancelled}")
+        self.store.save_signal(sig)
+        self.log(f"[HUMAN] 取消: {self._cancelled}")
+        self._event("human", text=f"取消任务：{self._cancelled}", ref_id=sig.id)
+        return sig
+
+    def _finish_cancelled(self, triggers: list[Signal]) -> RunResult:
+        """取消的收尾：记一条 decider=HUMAN 的裁决，然后 ABANDONED。
+
+        为什么还要写裁决记录：ABANDONED 在界面上和「架构师主动放弃」是同一个
+        终局，不写的话时间线上只剩一个没有来由的终止。这条记录不带 new_spec ——
+        取消不改 spec，所以它不构成第二个写入点（§2.3）。
+        """
+        record = DecisionRecord(
+            task_id=self.spec.id,
+            trigger=[s.id for s in triggers],
+            decider=Decider.HUMAN,
+            action=Action.ABANDON,
+            rationale=self._cancelled or "人取消了这个任务",
+        )
+        self.store.save_decision(record)
+        self.decisions.append(record)
+        self._event("decision", ref_id=record.id, payload={"action": record.action.value})
+        self._set_status(TaskStatus.ABANDONED)
+        self._say(f"[STOP] 人取消了这个任务：{record.rationale}")
+        return RunResult(self.state, self.ctx, self.decisions)
 
     # ------------------------------------------------------------------ #
 
@@ -219,6 +262,10 @@ class Orchestrator:
         """
         decision = first
         for cycle in range(1, max_cycles + 1):
+            # 取消可能在两个 cycle 之间到达（上一轮刚收尾、下一轮还没起 Subagent）。
+            # 这里和下面 INTERRUPTED 之后各查一次，两处合起来才没有缝。
+            if self._cancelled is not None:
+                return self._finish_cancelled([])
             if decision is None:
                 self.state.status = TaskStatus.RUNNING
                 subagent = Subagent(self.backend)
@@ -274,6 +321,10 @@ class Orchestrator:
                     f"[STOP] {triggers[0].type.value if triggers else '未知'} "
                     f"@step={self.state.current_step} interrupt_count={self.state.interrupt_count}"
                 )
+
+                # 人已经拍板停下：不问架构师（它可能回 CONTINUE，那取消就成了建议）
+                if self._cancelled is not None:
+                    return self._finish_cancelled(triggers)
 
                 try:
                     decision = self.architect.decide(self.state, triggers, self.ctx)

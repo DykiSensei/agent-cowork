@@ -80,9 +80,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
 -- 时间线的到达序索引（M6 §9 第 4 条）。**不是内容的第二份拷贝**：
 -- 信号与裁决的正文仍然只在各自的表里，这里只记「第几条、什么类型、指向谁」。
 -- 排序靠 seq 不靠 created_at —— 并行任务的时间戳会撞在同一毫秒上。
+--
+-- **task_id 上刻意没有外键。** 事件是**线程级**的，而线程不等于任务：复合任务的
+-- root 线程按设计就没有 tasks 行（见 views._synthetic_parent），可是分层结果、
+-- 拆解复核、冲突仲裁全写在 root 上。加了外键这些写入会被拒绝，而调用方把异常
+-- 吞掉（事件是旁路），结果是复合线程的时间线整个消失且不报错。别加回来。
 CREATE TABLE IF NOT EXISTS events (
     id           TEXT PRIMARY KEY,
-    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id      TEXT NOT NULL,
     seq          INTEGER NOT NULL,
     kind         TEXT NOT NULL,
     text         TEXT NOT NULL DEFAULT '',

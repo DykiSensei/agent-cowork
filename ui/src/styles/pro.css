@@ -239,6 +239,10 @@
                   background:var(--inset);color:var(--text);padding:8px 10px;font:12.5px var(--sans)}
   .composer input:focus{outline:none;border-color:var(--blue)}
   .composer .btn{border-color:var(--blue);background:rgba(88,166,255,.13);color:var(--blue)}
+  /* 取消是不可逆终局（ABANDONED），配色和「介入」分开：介入是蓝的可继续，这个是红的到头了 */
+  .composer .btn.danger{border-color:var(--red);background:rgba(248,81,73,.12);color:var(--red)}
+  .composer .btn.danger:hover{background:rgba(248,81,73,.22)}
+  .composer .btn:disabled{opacity:.55;cursor:default}
   .composer .hint{margin-top:6px;font-size:11px;color:var(--faint);max-width:820px}
   .composer .hint b{color:var(--dim);font-weight:600}
 

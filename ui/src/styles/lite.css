@@ -101,6 +101,10 @@
   .l-composer input:focus{outline:none;border-color:#bfd4fb;background:#fff}
   .l-composer button{border-radius:999px;border:none;background:#23272e;color:#fff;
         padding:0 18px;font-size:13px;cursor:pointer}
+  /* 「停下来」不做成主按钮：它是不可逆的，不该和「发送」抢同一个视觉重量 */
+  .l-composer button.l-stop{background:#fff;color:#b4433c;border:1px solid #edc9c6}
+  .l-composer button.l-stop:hover{background:#fdf3f2}
+  .l-composer button:disabled{opacity:.55;cursor:default}
   .l-hint{max-width:736px;margin:6px auto 0;font-size:11.5px;color:var(--l-dim)}
   .l-sysbar{display:none;max-width:736px;margin:0 auto 8px;background:#eef4ff;
         border:1px solid #cfdefc;color:#2f5fd0;border-radius:10px;

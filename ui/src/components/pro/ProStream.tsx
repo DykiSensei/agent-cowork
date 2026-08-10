@@ -207,8 +207,9 @@ function AwaitCard({
             · 将写入 DecisionRecord（decider=HUMAN）。
             <br />
             <span style={{ color: "var(--faint)", fontSize: "11.5px" }}>
-              真实链路：服务层拿答复构造 HumanRuling，从 checkpoint 恢复继续跑（restore
-              路径仍未实现，见接口文档 §9）。
+              真实链路：服务层拿答复构造 HumanRuling，`Orchestrator.restore()` 从
+              checkpoint 重建现场继续跑；spec 的改动仍经 `Architect.apply_human_ruling()`
+              落地，不绕过架构师。
             </span>
           </div>
         </div>
@@ -390,17 +391,30 @@ export default function ProStream({
   taskId,
   detail,
   onIntervene,
+  onCancel,
   onRuling,
 }: {
   taskId: string;
   detail: TaskDetail;
   onIntervene: (taskId: string, text: string) => Promise<boolean>;
+  onCancel: (taskId: string, reason: string) => Promise<boolean>;
   onRuling: (taskId: string, action: string, rationale: string) => Promise<boolean>;
 }) {
   const [bar, setBar] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const events = useMemo(() => translate(detail), [detail]);
   const isAwaiting =
     detail.kind === "single" && detail.state?.status === "AWAITING_HUMAN";
+  // 取消只对运行中的任务成立：AWAITING_HUMAN 走 ruling(ABANDON)，终局无可取消
+  const isRunning =
+    detail.kind === "single" &&
+    (detail.state?.status === "RUNNING" || detail.state?.status === "INTERRUPTED");
+
+  const submitCancel = () => {
+    if (stopping) return;
+    setStopping(true);
+    void onCancel(taskId, "在界面上取消").finally(() => setStopping(false));
+  };
 
   const submitIntervene = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -468,6 +482,17 @@ export default function ProStream({
           <button className="btn" type="submit">
             介入
           </button>
+          {isRunning && (
+            <button
+              className="btn danger"
+              type="button"
+              onClick={submitCancel}
+              disabled={stopping}
+              title="ABANDON，不经架构师裁决"
+            >
+              {stopping ? "取消中…" : "取消任务"}
+            </button>
+          )}
         </form>
         <div className="hint">
           {detail.kind === "composite" ? (
@@ -482,6 +507,13 @@ export default function ProStream({
           ) : (
             <span>
               <b>下一个 step 边界生效</b>，不是立即。中断后抢占队列清空，连点只有一条生效。
+              {isRunning && (
+                <>
+                  {" "}
+                  <b>取消任务</b>同样停在 step 边界，但<b>不问架构师</b> —— 直接
+                  ABANDONED，已落盘的产出保留。
+                </>
+              )}
             </span>
           )}
         </div>

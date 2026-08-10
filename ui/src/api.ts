@@ -32,6 +32,18 @@ export function postIntervene(taskId: string, instruction: string) {
   });
 }
 
+/**
+ * 停掉正在跑的任务。和 ruling(ABANDON) 是两条路：那条管已经挂起的，
+ * 这条管**正在烧钱的**。任务不在运行中时服务端回 409。
+ */
+export function postCancel(taskId: string, reason: string) {
+  return fetch(`/api/tasks/${taskId}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
 export function postRuling(taskId: string, action: string, rationale: string) {
   return fetch(`/api/tasks/${taskId}/ruling`, {
     method: "POST",

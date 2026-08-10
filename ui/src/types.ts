@@ -173,6 +173,8 @@ export interface SingleDetail extends DetailBase {
 export interface CompositeDetail extends DetailBase {
   kind: "composite";
   state: null;
+  /** 人最初说的那句话（root 线程第一条 human 事件）。老库 / CLI 入口没有则为空串。 */
+  root_goal: string;
   plan: PlanData | null;
   review: ReviewData | null;
   tasks: Record<string, TaskState>;

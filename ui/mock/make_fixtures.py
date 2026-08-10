@@ -125,6 +125,14 @@ def main() -> None:
 
     # 8. 复合任务 → 父线程（合成）+ 4 个子任务
     sched, _ = demo_composite.build(store=store, log=QUIET)
+    # 服务层在 POST /tasks 时会把人的原话写成 root 线程第一条 human 事件；
+    # `demo_composite` 是 CLI 入口、没有那一步，这里补上，否则 mock 里的复合线程
+    # 永远看不到开头那个气泡，而真实服务里是有的 —— fixtures 的意义就是别分叉
+    if sched.root_id:
+        store.append_event(TaskEvent(
+            task_id=sched.root_id, kind="human",
+            text="做一个能统计词频的小工具，带缓存和命令行入口",
+        ))
     outcome = sched.run()
     print("COMPOSITE  ", sched.root_id, "completed =", outcome.completed)
 

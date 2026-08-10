@@ -12,8 +12,15 @@ M5a ✅ 停止判断       判别力 Youden J 0.12 → 0.60（第一版是回归
 M5b ✅ 拆解复核       验收标准反推 10/10 命中。**但拆解生成侧从未实现**
 M7 ✅ 拆解三角色      生成者 / 复核者 / 人。跨模型复核 J 0.66 → 0.98；
                      5 个自然语言目标全部拆出可执行子任务集并跑到产出
-M6 ◻ 群聊界面层      ← 下一步。接口文档见 `M6-界面层接口.md`
+M6 ✅ 群聊界面层      前端 ui/（React + TS，简洁/专业双模式 + 设置页）+
+                     服务层 src/cowork/server/（FastAPI + SSE + restore 路径）
 ```
+
+**M0–M7 全部完成。** 一句话目标进去，拆解 → 复核 → 分层并行执行 → 中断 →
+人裁决 → 从 checkpoint 恢复，全程可以在界面上看着跑。
+
+在读下去之前，先看一眼[这个原型不适合做什么](#这个原型不适合做什么) ——
+它是**给一个人在本机用的研究原型**，不是可以对外提供服务的东西。
 
 ---
 
@@ -24,7 +31,7 @@ docker compose up -d postgres litellm
 python -m unittest discover -s tests -t .
 ```
 
-335 个测试。三样基础设施都不起时，依赖它们的 14 个会 skip（3 个 Postgres +
+348 个测试。三样基础设施都不起时，依赖它们的 14 个会 skip（3 个 Postgres +
 5 个 LiteLLM + 6 个 Docker 沙箱），其余照常跑；打真实供应商的用例需要
 `DEEPSEEK_API_KEY` 或 `MOONSHOT_API_KEY`（`.env` 里配好即可，测试会自动读）。
 
@@ -35,11 +42,25 @@ python -m cowork.cli demo --backend deepseek   # 真实模型（需要 key，见
 
 python -m cowork.cli composite --backend deepseek          # M4 复合任务：并行 + 冲突检测
 
+python -m cowork.cli plan "把 CSV 转成带图表的周报" --run    # M7：一句话 → 拆解 → 并行跑到产出
+
 python -m cowork.cli bench --backend deepseek --repeat 5   # M2 参数实测跑批
 python -m cowork.cli bench-report bench_runs.jsonl         # 出参数结论
 ```
 
 （未安装时先 `pip install -e .`，或 `set PYTHONPATH=src`。）
+
+带界面跑：
+
+```bash
+pip install -e .[server]
+cd ui && npm install && npm run build && cd ..
+python -m cowork.cli serve      # http://127.0.0.1:8000
+```
+
+`serve` **只绑 loopback，绑别的地址会被直接拒绝** —— 理由见
+[这个原型不适合做什么](#这个原型不适合做什么)。只想看界面不想起后端的话，
+`cd ui && npm run dev` 自带 mock API（数据是真实运行导出的，见 `ui/README.md`）。
 
 演示场景的实际输出：
 
@@ -172,7 +193,7 @@ Kimi（`kimi-k3`）都跑通了完整链路，产出的 `solution.py` 经独立�
 | `complexity_threshold` | 0.6 | 0.4 | ROC 最佳 Youden 点（TPR 0.66 / FPR 0.35）；原值只有 TPR 0.38 |
 | `max_rebase` | 3 | 2 | 完成率 REBASE 2 次 41%、3 次 33%、**4 次 0%** |
 | `budget_escalation_ratio` | 0.8 | 0.6 | 0.8 越线后中位只剩 0 token 就到终局，等于事后通知 |
-| `step_soft_deadline_s` | 60 | 30 | step 耗时 p99 5.9s / max 10.8s（n=651） |
+| ~~`step_soft_deadline_s`~~ | 60 | 已删除 | 定过 30s（step 耗时 p99 5.9s / max 10.8s，n=651），但没有任何代码读它 —— v0.20 删掉参数，测量保留 |
 
 `max_interrupts=3` 是唯一被数据支持保留的：条件成功率 ≥3 次 18%、≥4 次 7%、≥5 次 0%。
 
@@ -193,7 +214,8 @@ Kimi（`kimi-k3`）都跑通了完整链路，产出的 `solution.py` 经独立�
 `soft_queue_threshold` / `soft_interval_s` 在当前调用路径上是死的：
 `Architect.should_consume_soft()` 没有任何调用方，而且软信号极稀疏
 （75 次运行 20 条，队列深度最大 2，阈值 5 永远达不到）。`step_soft_deadline_s`
-同样没有代码读它。结论是「接上或删掉」，不是编一个数。
+同样没有代码读它。结论是「接上或删掉」，不是编一个数 ——
+**v0.20 把 `step_soft_deadline_s` 删了**（测量保留在 `analyze.interrupt_latency()`）。
 
 顺带证伪了风险 #1 的前提：checkpoint 写入耗时中位 **0.2ms**，占 step 总耗时的
 **0.009%** —— step 粒度完全不需要为 checkpoint 开销让步。
@@ -426,6 +448,14 @@ src/cowork/
     postgres.py         §10.2 正式选型
   plan.py               §12 M4 拓扑分层 / 可分解性 / 静态冲突（全确定性）
   scheduler.py          §12 M4 并行调度 + 产出层冲突检测 + 仲裁
+  views.py              M6 投影层：Store → 界面层契约的形状，无业务逻辑
+  server/               M6 服务层（pip install -e .[server]）
+    app.py              FastAPI 路由，只做「调 runner/views + 序列化」
+    runner.py           线程编排 + plan 注册表 + restore 路径
+    gate.py             ChatGate：摆出问题、立即返回，答复走 HTTP
+    tap.py              写入处发事件 → SSE（先落库后广播）
+    bind.py             绑定地址准入检查 —— 非回环直接拒
+    settings_io.py      设置页写 .env（键名与换行都要校验，见下）
   demo_composite.py     M4 出口场景：4 子任务 / 2 种 task_class / 并行度 2
   bench/                实测工具（不参与生产链路）
     tasks.py            M2 的 15 个任务 + M3 的 PROBE 对照 arm
@@ -434,6 +464,9 @@ src/cowork/
     review_ab.py        M7 7.2 跨模型复核对照：12 个带标准答案的拆解 + TPR/FPR/J
     plan_ab.py          M7 7.4 拆解提示词对照 + 生成-复核循环指标
 ```
+
+界面层在仓库根的 `ui/`（React 18 + TS + Vite，双模式 + 设置页，自带 mock API），
+细节见 `ui/README.md`。
 
 根目录还有两份文档：`多Agent协作系统-开发文档.md`（主线，设计与全部实测记录）、
 `M6-界面层接口.md`（给界面层那一侧看的接口约定）。
@@ -528,14 +561,40 @@ Subagent 的动作解析会崩在一个看似正常的响应上。
 
 ---
 
+## 这个原型不适合做什么
+
+按「能不能交给别人跑真实活儿」这个标准，下面几条是**设计层面的**，不是待办：
+
+**不要把它服务化给多个人用。** 没有认证、没有多用户概念 —— `HumanGate` 不知道
+「哪个人」在回答。而设置页能读写 `.env` 里的各家 API key 和
+`COWORK_LLM_BASE_URL`。这三件事叠在同一个 HTTP 面上，暴露到回环之外就等于
+交出账号：任何能访问那个端口的人都能取走 key、把所有请求改道、用你的额度起任务。
+所以 `serve` 绑非回环地址会**直接拒绝启动**（要过就得显式 `--i-know-its-exposed`，
+且仍然警告）。真要多人用，需要的是认证 + 权限模型，不是一个开关。
+
+**不要指望它替你控制成本。** 应用层只有 `budget_escalation_ratio` 这类软限制；
+真正的硬强制来自 LiteLLM 的 virtual key，而不起 LiteLLM 直连供应商时那层不存在。
+架构师本身是系统里最贵的组件（M2 实测占总 token 的 51.3%，每次介入约 7k）。
+一次 `plan --run` 打真实模型是 10–35k token 起步，跑批是 1.6M。
+
+**架构师仍然是唯一的写入决策点，而且执行期无人复核它。** M7 只解了拆解那半
+（生成者 / 复核者 / 人三角色分开）；`decide()` 那条路上它依然是单点。
+MAST 数据里 42% 的失败来自规格不清，恰好发生在这一层 —— 这是文档自评的
+**v0.1 最大已知缺口**（风险 #3），不是打磨能解决的。
+
+**服务层是单进程的，plan 注册表在内存里。** 服务重启会丢还没派发的拆解
+（已派发的任务不受影响，它们在库里）。
+
+---
+
 ## 还没做
 
 | 项 | 状态 |
 |---|---|
-| M6 群聊界面层 | **下一步**。当前是 CLI + `--json` 结构化日志。接口、约束、以及后端还欠什么，都在 `M6-界面层接口.md` |
 | 「拆出来的东西合起来能不能跑」 | 风险 #16：结构层查交集与环、语义层查覆盖，都不问这个。`isolated_dependency` 只堵了一种形态（§11.12） |
 | 拆解质量没有无偏度量 | 风险 #18：「复核一轮放行率」会被拆解粒度带偏，要真比质量得看派发执行后的产出（§11.13） |
-| 7 家供应商未验证 | `openai` / `gemini` / `qwen` / `zhipu` / `xai` / `doubao` / `anthropic` 的预设是照文档抄的，本机没有 key。有 key 就跑 `cowork.cli models` 对一遍（§11.14） |
-| M2 的两个遗留 | `soft_queue_threshold` / `soft_interval_s` 与 `step_soft_deadline_s` 都无代码读取，需决定接上还是删掉 |
+| 7 家供应商未验证 | 只有 `deepseek` / `kimi` 在本机用真 key 打通过（`PROVIDERS` 表里 `verified=True` 记的就是这件事）。`openai` / `gemini` / `qwen` / `zhipu` / `xai` / `doubao` / `anthropic` 的预设是照文档抄的 —— **没验证不等于错，等于没验证**。有 key 就跑 `cowork.cli models` 对一遍（§11.14）。注意模型下线时端点还在、key 还有效，只有那个 id 没了，所以别读文档判断 |
+| 界面上没接的三处 | 选中 `MODIFY_TASK` 时的 spec 编辑区、子任务 thread 跳转、复合任务介入时路由到哪个子任务（`ProStream.tsx` 里都标着） |
+| M2 的遗留 | `step_soft_deadline_s` 已删（v0.20）。还剩 `soft_queue_threshold` / `soft_interval_s`：它们只被 `Architect.should_consume_soft()` 读，而那个方法没有任何调用方（orchestrator 在每个检查点无条件消费）—— 同样是接上还是删掉 |
 | PROBE 的收益 | 27 次探查 0 次命中。要标定收益，需要一个会可靠漂移的 `GENERATIVE` 任务 |
 | `e3_scope_bait` 任务 | 没按设计触发 `SCOPE_VIOLATION`，需重新设计（开发文档 §11.6g） |

@@ -68,11 +68,15 @@ export function translate(detail: TaskDetail): StreamEvent[] {
     }
   };
 
-  // 任务创建时刻没有 human 事件（后端目前只在 intervene 时写），而 goal 的
-  // 原文在 rev>1 之后拿不回 —— 这里用当前 spec.goal 合成开头的气泡。
-  // 接口文档 §9 已记录这条小缺口。
+  // 开头那句「你发布任务」。服务层现在会在 POST /tasks 时把**人的原话**写成
+  // root 线程的第一条 human 事件 —— 有真的就用真的，别再合成（合成用的是当前
+  // spec.goal，而它被架构师改写过，rev>1 时那已经不是人说的话了）。
+  //
+  // 还需要保留合成这条退路：`cli composite` / 老库里没有那条事件，
+  // 以及单任务被直接派发（不经拆解）时也没有。
+  const hasRealOpening = detail.events[0]?.kind === "human";
   const firstGoal =
-    detail.kind === "single" ? detail.state?.spec.goal : null;
+    hasRealOpening || detail.kind !== "single" ? null : detail.state?.spec.goal;
 
   for (const ev of detail.events) {
     switch (ev.kind) {

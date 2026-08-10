@@ -177,6 +177,29 @@ class TestThreadList(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "AWAITING_HUMAN",
                          "一个子任务等人，整件事就是等人")
 
+    def test_composite_title_uses_the_humans_own_words(self):
+        """人的原话在 root 线程的第一条 human 事件里（M6 §9）。
+
+        为什么不拿子任务的 goal 顶替：那是架构师写的。而父任务的 spec.goal
+        在 rev>1 之后也已经不是人最初说的那句了 —— 所以只认这条事件。
+        """
+        from cowork.types import TaskEvent
+
+        self.store.append_event(
+            TaskEvent(task_id="task_comp", kind="human",
+                      text="给我做个能查天气的小工具\n带缓存")
+        )
+        self.store.save_task(TaskState(spec=spec("kid1", parent="task_comp")))
+
+        row = views.thread_list(self.store)[0]
+        self.assertEqual(row["title"], "给我做个能查天气的小工具", "标题只取第一行")
+
+    def test_composite_title_falls_back_when_there_is_no_human_event(self):
+        """`cli composite` / 老库没有那条事件，退回合成标题而不是报错。"""
+        self.store.save_task(TaskState(spec=spec("kid1", parent="task_comp")))
+        row = views.thread_list(self.store)[0]
+        self.assertEqual(row["title"], "复合任务（1 个子任务）")
+
     def test_terminal_flag(self):
         self.store.save_task(TaskState(spec=spec("done"), status=TaskStatus.COMPLETED))
         self.store.save_task(TaskState(spec=spec("run"), status=TaskStatus.RUNNING))

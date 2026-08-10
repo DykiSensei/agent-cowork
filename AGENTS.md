@@ -42,7 +42,7 @@ Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAP
 pip install -e .                                  # 或 set PYTHONPATH=src（仅 CLI 需要）
 
 docker compose up -d postgres litellm             # postgres:5433 / litellm:4000
-python -m unittest discover -s tests -t .         # 335 个测试。用 unittest，没引 pytest
+python -m unittest discover -s tests -t .         # 348 个测试。用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -91,7 +91,8 @@ llm/            __init__ 是后端协议本身（给模型加能力从这里改�
                 scripted / anthropic_backend / openai_compat / errors
 store/          sqlite（默认）/ postgres
 server/         M6 服务层：app（路由）/ runner（线程编排 + plan 注册表）/
-                gate（ChatGate）/ tap（写入处发事件）/ settings_io（.env 读写）
+                gate（ChatGate）/ tap（写入处发事件）/ settings_io（.env 读写）/
+                bind（绑定地址准入：非回环拒绝启动）
 views.py        界面层投影：thread_list / task_detail / pending_ruling（服务层只调它）
 bench/          实测工具，只包装不改被测对象，不参与生产链路
 demo*.py        验证场景，「隐藏要求」写在这里
@@ -132,7 +133,7 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
 
 ## 测试策略
 
-- 335 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
+- 348 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
 - **同一场景跨运行方差很大**（中断 0–5 次，token 0–50k）：单次运行不能作为
   参数或结论的依据，**也不能拿它写断言**。
 - **改提示词必须两侧都测**（正例 + 反例）：M5a 第一版只看不可解侧是「大胜」，
@@ -156,6 +157,11 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
 
 ## 主要踩坑（详单见 CLAUDE.md「踩过的坑」）
 
+- **`events` 表上不能有外键**：事件是线程级的，而复合任务的 root 线程按设计没有
+  `tasks` 行。加了外键 → PG 上复合线程时间线全空且零报错（异常被合理地吞掉了），
+  SQLite 不强制外键所以测试全绿。
+- **取消不走架构师**：`intervene` 交回控制权，架构师可能回 `CONTINUE`，人的取消
+  会降级成建议。`Orchestrator.cancel()` 抢占后直接 `ABANDONED`。
 - 抢占队列必须在中断时清空，否则一次中断放大成无限中断。
 - 模型调用失败要变成硬信号，不能抛异常穿透整个 run。
 - 硬信号是「任务级失败」，探测不存在文件返回 `ok=False` 不算（靠

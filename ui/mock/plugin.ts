@@ -7,6 +7,7 @@
  *   GET  /api/tasks                 → fixtures/threads.json（views.thread_list）
  *   GET  /api/tasks/:id             → fixtures/<id>.json（views.task_detail）
  *   POST /api/tasks/:id/intervene   → 202（mock 不驱动任何任务）
+ *   POST /api/tasks/:id/cancel      → 202（真实服务：不在运行中回 409）
  *   POST /api/tasks/:id/ruling      → 202
  *   GET  /api/stream                → SSE，只发心跳
  *
@@ -110,7 +111,7 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
         : sendJson(res, 404, { error: "not found" });
     }
 
-    const act = url.pathname.match(/^\/api\/tasks\/([\w-]+)\/(intervene|ruling)$/);
+    const act = url.pathname.match(/^\/api\/tasks\/([\w-]+)\/(intervene|cancel|ruling)$/);
     if (req.method === "POST" && act) {
       await drain(req);
       return sendJson(res, 202, { accepted: true });

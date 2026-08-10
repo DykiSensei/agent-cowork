@@ -1,8 +1,21 @@
-# 多 Agent 协作系统 — 开发文档 v0.20
+# 多 Agent 协作系统 — 开发文档 v0.21
 
-> 状态：**M6 服务层落地**（FastAPI + restore 路径 + SSE + 设置页真实持久化）。M0–M7 全部收口。
+> 状态：**M0–M7 全部收口**，按「能不能发布」的标准做了一轮收尾。
 > 日期：2026-08-11
 >
+> **v0.21 变更**（发布前收尾，不是新里程碑）：
+> ①**修掉一个只在 Postgres 上、只在复合任务上出现的静默缺陷** —— `events.task_id`
+> 有外键指向 `tasks(id)`，而复合任务的 root 线程按设计没有 tasks 行，于是分层结果 /
+> 拆解复核 / 冲突仲裁的事件在 PG 上全被外键拒绝，又被 `Scheduler._event()` 的
+> `except` 吞掉：**复合线程时间线整个为空且零报错**。SQLite 不强制外键所以测试全绿。
+> 约束已删（幂等 DDL 给老库补 `DROP CONSTRAINT IF EXISTS`），教训记进 §11.18。
+> ②新增**任务取消**（`Orchestrator.cancel()` + `POST /tasks/{id}/cancel` + 两个模式的界面入口）：
+> 停在 step 边界、**不问架构师**、产出保留，终局 `ABANDONED` 并留 `decider=HUMAN` 的裁决。
+> ③`serve` 绑定地址**硬拦**（`server/bind.py`）：非回环直接拒绝启动，要过必须
+> `--i-know-its-exposed`。④补上接口文档 §9 欠的两条：人的原话落成 root 线程第一条
+> `human` 事件，`views` 增 `root_goal`、复合行标题改用它。⑤删掉死参数
+> `step_soft_deadline_s`（从未有代码读它，bench 却在给它出建议值）。
+> ⑥README 增「这个原型不适合做什么」。测试 335 → 348。
 > **v0.20 变更**：新增 §11.17（服务层与 restore 的设计记录）；§11.1 对照表、路线图、风险 #6 三处状态同步为「M6 已收口」；修掉设置页写 `.env` 的换行注入（一次 PUT 能写任意环境变量，含把 base_url 指向别处）。
 > **v0.19 变更**：M6 服务层 —— `src/cowork/server/`（FastAPI，单进程，runner 在线程里）；**restore 路径实现**：`Orchestrator.restore()` + `resume_with_ruling()` + `Architect.apply_human_ruling()`（人的裁决仍走架构师那扇门）+ `prime_history()`（指纹连续计数跨 restore 存活，从存储重算）；run() 拆出 `_drive()` 供两条路径共用；`Scheduler` 加 registry（活 Orchestrator 注册表，介入路由用）；状态同步定为「`TapStore` 写入处发事件 + SSE 通知 + 前端回源重拉」；设置页端点落地 .env（key 只写不读）；`cowork serve` 子命令；测试 335 个（新增 `test_server` 5 个，含 restore 端到端：挂起 → HTTP 裁决 → 恢复 → COMPLETED）。
 > **v0.18 变更**：M6 前端对齐 v0.15 的投影层 —— `ui/fixtures/` 改为 `make_fixtures.py` 用真实运行 + `views` 导出（手写 mock 退役）；前端新增翻译层（事件索引 → 时间线）、「等你拍板」卡片改吃 `pending_ruling()`、spec diff 用真 `spec_changes`、复合线程渲染 `pending_children`；新增**设置页**（各家 API key 只写不读 + 全局模型/推理挡位，mock 端点见接口文档 §6）；又发现两条小缺口记入接口文档 §9（创建任务无 `human` 事件、`root_goal` 不落库）。
@@ -568,7 +581,7 @@ else:
 
 | # | 问题 | 状态 | 归属里程碑 |
 |---|---|---|---|
-| 1 | step 粒度的经验值未定，需实测 checkpoint 开销 | ✅ **前提被证伪**（§11.6c）。checkpoint 写入占 step 耗时的 0.009%，粒度不受它制约。`step_soft_deadline_s` 定为 30s，但**当前无代码读它** | M2 ✅ |
+| 1 | step 粒度的经验值未定，需实测 checkpoint 开销 | ✅ **前提被证伪**（§11.6c）。checkpoint 写入占 step 耗时的 0.009%，粒度不受它制约。`step_soft_deadline_s` 无代码读取，**v0.20 已删除**（测量保留在 `analyze.interrupt_latency()`）| M2 ✅ |
 | 2 | 廉价评估用什么模型、`THRESHOLD` 取值 | ⚠️ **测了，结论是这条路径没那么有用**。`complexity_threshold` 调到 0.4（最佳 Youden），但 AUC 仅 0.672；90 条该升级的决策里 63 条靠确定性规则拦下（§11.6c） | M2 ✅ |
 | 3 | 架构师本身成为单点故障——它的规格拆解错误无人纠正 | ⚠️ **进一步削弱**。停止判断已修（§11.9，J 0.12→0.60）；复核者现在可换独立供应商（M7 7.1），跨模型判别力 J 0.98 vs 同款模型 0.66（§11.11，12 用例 / 三种缺陷形态 / 两侧各 59 次）。**仍未消除**：无人复核的是「架构师自己拆的东西」，而生成侧还不存在 | M7 7.1/7.2 ⚠️ → **7.3** 才谈得上闭环 |
 | 4 | 软信号在无客观判据的任务里是唯一可观测性来源 | ⚠️ **PROBE 已实现，但收益未标定**：27 次探查 0 次判跑偏，成本 1.45–1.64x 已知、收益未知（§11.7b）。软信号本身也极稀疏（75 次运行 20 条） | M3 ⚠️ |
@@ -919,7 +932,7 @@ python -m cowork.cli bench-report bench_runs.jsonl
 | `max_interrupts` | 3 | **3（保留）** | 条件成功率：≥1 次 46%、≥2 次 32%、≥3 次 18%、≥4 次 7%、≥5 次 0%。3 正好在跌破 20% 处 |
 | `max_rebase` | 3 | **2** | 完成率 REBASE 2 次 41%、3 次 33%、4 次 0%。第 4 次 REBASE 没救回过任何一次运行 |
 | `budget_escalation_ratio` | 0.8 | **0.6** | 0.8 越线后中位只剩 0 token 就到终局，等于事后通知；0.6 提前约 4.8k token，误升级只多 1 次 |
-| `step_soft_deadline_s` | 60 | **30** | step 耗时 p50 1.65s / p95 3.11s / p99 5.90s / max 10.79s（n=651）。30s ≈ max 的 3 倍余量 |
+| ~~`step_soft_deadline_s`~~ | 60 | **已删除** | 当时定到 30s（step 耗时 p50 1.65s / p95 3.11s / p99 5.90s / max 10.79s，n=651）。但 `loop.py` 从未实现切段，这个值一天都没生效过 —— v0.20 删掉参数，保留测量（`analyze.interrupt_latency()`）|
 | `soft_queue_threshold` / `soft_interval_s` | 5 / 30s | **测不出来** | 见下 |
 
 **最重要的结论不是这些数字，是三件比数字更硬的事**：
@@ -928,7 +941,7 @@ python -m cowork.cli bench-report bench_runs.jsonl
 
 2. **`soft_queue_threshold` / `soft_interval_s` 在当前调用路径上是死参数**。`Architect.should_consume_soft()` 没有任何调用方——orchestrator 在每个检查点无条件批量消费。且软信号极稀疏：75 次运行里 13 次出现过、共 20 条、队列深度最大 2，阈值 5 永远达不到；分诊总成本 13 次调用 × 中位 309 token，占总量 0.3%。**结论是「接上或删掉」，不是编一个数**。
 
-3. **风险 #1 的前提被证伪**。checkpoint 写入耗时中位 **0.2ms**，占 step 总耗时的 **0.009%**。「step 粒度受 checkpoint 开销制约」这个假设在 SQLite + 本地沙箱下不成立，step 粒度可以完全按中断响应延迟来定。另外 `step_soft_deadline_s` **当前没有任何代码读它**，`loop.py` 并未实现 soft deadline 切段。
+3. **风险 #1 的前提被证伪**。checkpoint 写入耗时中位 **0.2ms**，占 step 总耗时的 **0.009%**。「step 粒度受 checkpoint 开销制约」这个假设在 SQLite + 本地沙箱下不成立，step 粒度可以完全按中断响应延迟来定。另外 `step_soft_deadline_s` **没有任何代码读它**，`loop.py` 并未实现 soft deadline 切段 —— **v0.20 已删除这个参数**（连同 bench 里给它出建议值的那一节标题；测量本身保留为 `analyze.interrupt_latency()`）。留着一个不生效的参数、还配一份实测建议值，比没有这个参数更坏：读的人会以为切段是有的。
 
 **（d）中断的成本结构：架构师占掉一半 token**
 
@@ -1639,6 +1652,69 @@ user    目标 / 验收标准 / scope / 已产出 / 执行记录  ← 从不变�
 
 ---
 
+### 11.18 发布前收尾：三个只有换个标准才会发现的问题
+
+把标准从「链路能不能跑通」换成「能不能交给别人跑」，翻出来的东西和前面十七节
+性质不同 —— 它们都不影响任何一条既有测试。
+
+#### 一、外键把复合线程的时间线整个吃掉了（只在 PG，只在复合，零报错）
+
+`events.task_id` 原来是 `REFERENCES tasks(id) ON DELETE CASCADE`。看着完全合理，
+但它和一条既有设计正面冲突：**复合任务的 root 线程没有 `tasks` 行**
+（`Scheduler` 拿到的是一组现成 spec，没人建过那个父任务 —— `views._synthetic_parent`
+就是为这件事存在的）。而分层结果、拆解复核、冲突仲裁全部写在 root 上。
+
+于是在 Postgres 上，这些写入被外键拒绝；`Scheduler._event()` 又有一句
+`except: pass`（理由正当：事件是旁路，写不进去不该影响调度）。两者叠起来的结果是
+**复合线程在 PG 上时间线全空，而且不会有任何一条错误日志**。
+
+三个条件缺一不可才藏得住：SQLite 不强制外键（本机测试全绿）、PG 的用例是
+store 级的（不跑复合任务）、异常被合理地吞掉了。
+
+留下的判据：**「这张表的行属于谁」要按线程问，不要按任务问。** 事件是线程级的，
+而线程 ⊃ 任务 —— 复合 root 是个没有任务的线程。删约束的代价是任务删除后事件成孤儿，
+接受它：events 是到达序的**索引**，不是正文的第二份拷贝。
+
+更一般的那条：**`except: pass` 合理的地方，正是缺陷能活最久的地方。** 那句
+`except` 没写错，错的是没人问过「它实际上在吞什么」。
+
+#### 二、取消不是介入的一个变体
+
+原来只有 `intervene`（打断并给新指令）。差的那半是「别干了」，而它**不能**做成
+「介入时说一句放弃」：那条路要把控制权交回架构师，架构师完全可能回 `CONTINUE` ——
+于是人的取消降级成了一个建议。**人已经拍板的事不该再送去裁决。**
+
+所以 `cancel()` 走完既有抢占（step 边界，§10.1 地基不动）之后直接进 `ABANDONED`，
+不调 `decide()`。省下的不只是一次约 3.5k token 的调用，更是语义上的确定性。
+两条边界一并钉住：在飞的那个 step 会跑完（实测中位 1.65s / p95 3.11s），
+已落盘的产出保留 —— **停的是循环，不是回滚**。
+
+对称性也补齐了：`ruling(ABANDON)` 管 `AWAITING_HUMAN` 的任务，`cancel` 管
+正在跑的，两条合起来才覆盖「我要它停」。
+
+#### 三、安全默认值不是安全措施
+
+`serve` 一直「默认绑 127.0.0.1」，文档也写了理由。但默认值只挡住不知情的人，
+而这里出错的代价是：一个没有认证、没有多用户概念、设置页能读写各家 API key 和
+`COWORK_LLM_BASE_URL` 的服务被放到网络上 = 交出账号 + 交出改道能力。
+
+现在是硬拦（`server/bind.py`）：非回环地址**拒绝启动**，要过必须显式
+`--i-know-its-exposed`，且仍然警告。解析不了的主机名一律按暴露处理。
+判据：**当默认值错了的代价是不可逆的，就不要只提供默认值。**
+
+#### 顺带删掉的死参数
+
+`step_soft_deadline_s`：从来没有任何代码读它（`loop.py` 未实现切段），M2 却给它
+出了一整节报告和一个「建议值 30s」。**一个不生效的参数配一份实测建议，比没有这个
+参数更坏** —— 读的人会以为切段是有的。参数删除，测量保留为
+`analyze.interrupt_latency()`（它证伪了风险 #1，仍然有用）。
+
+同类还剩 `soft_queue_threshold` / `soft_interval_s`：它们有读者
+（`Architect.should_consume_soft()`），但那个方法没有任何调用方 —— orchestrator
+在每个检查点无条件消费。**「有代码读它」不等于「它在起作用」，要一路问到调用链的头。**
+
+---
+
 ## 12. 开发路线图
 
 ### 总览
@@ -1725,6 +1801,7 @@ M1.3 实测给这个前置加了两条硬要求（§11.5a / §11.5d）：
 | 2.3 | 六个参数各有实测依据 | 写进 `policy.py` 注释 | ✅ 三个下调、一个保留、两个「测不出来」 |
 
 **改了四个值**：`complexity_threshold` 0.6→0.4、`max_rebase` 3→2、`budget_escalation_ratio` 0.8→0.6、`step_soft_deadline_s` 60→30。`max_interrupts=3` 是唯一被数据支持保留原值的。
+（后话：`step_soft_deadline_s` 那次调整其实是白改的 —— 它没有任何代码读，v0.20 已删除。**当时就知道它是死的，却还是给它调了个值**，这本身是个教训：实测报告里出现一个参数，不等于系统里有人在用它。）
 
 **比参数更重要的三条结论**（§11.6c）：LLM 自评复杂度判别力弱（AUC 0.672），真正在拦风险的是 §7.2 的确定性规则；`soft_queue_threshold` / `soft_interval_s` 在当前调用路径上是死参数；风险 #1 的前提（checkpoint 开销制约 step 粒度）被证伪。
 

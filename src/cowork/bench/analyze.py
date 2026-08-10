@@ -126,11 +126,13 @@ def interrupt_sources(recs: list[dict]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# 1. step_soft_deadline_s
+# 1. 中断响应延迟 / checkpoint 开销
+#    原来这一节是给 step_soft_deadline_s 出建议值的，那个参数已删（无代码读它）。
+#    测量本身留着：它证伪了风险 #1 的前提，也是将来真做切段时的起点。
 # --------------------------------------------------------------------------- #
 
 
-def step_deadline(recs: list[dict]) -> dict[str, Any]:
+def interrupt_latency(recs: list[dict]) -> dict[str, Any]:
     steps = [s for r in recs for s in r["step_seconds"]]
     ckpt = [c for r in recs for c in r["checkpoint_seconds"]]
     step_total = sum(steps)
@@ -143,7 +145,6 @@ def step_deadline(recs: list[dict]) -> dict[str, Any]:
         # 上界是一个完整 step。
         "interrupt_latency_p50": round(_pct(steps, 0.50), 3),
         "interrupt_latency_p95": round(_pct(steps, 0.95), 3),
-        "current": DEFAULT_POLICY.step_soft_deadline_s,
     }
 
 
@@ -497,7 +498,7 @@ def summarize(recs: list[dict]) -> dict[str, Any]:
         "status": dict(Counter(r["status"] for r in recs)),
         "task_set_health": task_set_health(recs),
         "interrupt_sources": interrupt_sources(recs),
-        "step_soft_deadline_s": step_deadline(recs),
+        "interrupt_latency": interrupt_latency(recs),
         "complexity_threshold": complexity_roc(recs),
         "max_rebase": rebase_drift(recs),
         "soft_signals": soft_signal_economics(recs),
@@ -531,13 +532,12 @@ def render(summary: dict[str, Any]) -> str:
       f"（每次运行 {isrc['tool_failures_per_run'].get('p50')} 条，中位）")
     w(f"  验收级中断/次运行: {isrc['acceptance_interrupts_per_run']}")
 
-    s = summary["step_soft_deadline_s"]
-    w("\n## step_soft_deadline_s")
+    s = summary["interrupt_latency"]
+    w("\n## 中断响应延迟 / checkpoint 开销")
     w(f"  step 耗时 s: {s['step_seconds']}")
     w(f"  checkpoint 耗时 s: {s['checkpoint_seconds']}")
     w(f"  checkpoint 开销占 step 总耗时: {s['checkpoint_overhead_ratio']}")
-    w(f"  中断响应延迟 p50/p95: {s['interrupt_latency_p50']}s / {s['interrupt_latency_p95']}s"
-      f"（当前值 {s['current']}s）")
+    w(f"  中断响应延迟 p50/p95: {s['interrupt_latency_p50']}s / {s['interrupt_latency_p95']}s")
 
     c = summary["complexity_threshold"]
     w("\n## complexity_threshold")
