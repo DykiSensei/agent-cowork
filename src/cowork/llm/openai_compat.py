@@ -25,7 +25,7 @@ import re
 from typing import Any
 
 from ..actions import AgentAction
-from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, Triage
+from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, TaskProfile, Triage
 from ..llm.effort import resolve
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..runtime.detectors import validate_schema
@@ -38,6 +38,8 @@ from .anthropic_backend import (
     DECOMPOSE_SYSTEM,
     PROBE_SCHEMA,
     PROBE_SYSTEM,
+    PROFILE_SCHEMA,
+    PROFILE_SYSTEM,
     REVIEW_MAX_TOKENS,
     REVIEW_SCHEMA,
     REVIEW_SYSTEM,
@@ -47,9 +49,11 @@ from .anthropic_backend import (
     VERDICT_SCHEMA,
     _parse_action,
     _parse_drafts,
+    _parse_profiles,
     _render_architect_context,
     _render_decompose_context,
     _render_probe_context,
+    _render_profile_context,
     _render_review_context,
     _render_subagent_context,
 )
@@ -375,6 +379,17 @@ class OpenAICompatBackend:
             effort=self.architect_effort,
         )
         return _parse_drafts(data), tokens
+
+    def profile_tasks(self, specs: list[TaskSpec]) -> tuple[list[TaskProfile], int]:
+        # 走廉价档 + 廉价模型：描述任务而已，不是做决策
+        data, tokens = self._call(
+            model=self.triage_model,
+            system=PROFILE_SYSTEM,
+            user=_render_profile_context(specs),
+            schema=PROFILE_SCHEMA,
+            effort=self.cheap_effort,
+        )
+        return _parse_profiles(data, specs), tokens
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]

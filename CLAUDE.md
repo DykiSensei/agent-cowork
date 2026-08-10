@@ -259,6 +259,14 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   正文 0 字符。三件事都要做：额度给够（拆解 16000）、**把截断单独认出来**
   （截断的 JSON 报出来是「不是合法 JSON」，照着查会查错方向）、
   **截断后原样重掷而不是带残文修复**（残文回灌只会让它接着写半截 JSON）。
+- **跨供应商路由只路由 Subagent**（§11.16）。架构师永远只有一个 —— 按任务换供应商
+  等于把「唯一写入决策点」拆成几个。`RoutingBackend` 只分发 `next_step()`。
+  模型选择归人（`HumanGate.assign_models`），架构师只产出 `TaskProfile` 描述任务性质，
+  **提示词里明确要求它不要推荐用哪家**。
+- **`SpecTemplate.parent_id` 不给会连坏三处**（§11.16 实测）：子任务被当成顶层任务
+  → 任何 MODIFY_TASK 无条件升级；界面层按 parent_id 折叠复合线程 → 折不起来；
+  `Scheduler.root_id` 拿不到 → 复合时间线无处可挂。`plan()` 现在自己补一个。
+  **这个缺陷在单家、简单目标上永远暴露不了。**
 - **推理挡位是「按文档接上了」，不是「测出来有用」**（§11.15）。统一词表落到各家
   要取整（deepseek/kimi 没有 medium、gemini/xai 没有 max），取整必须报出来。
   实测 n=8 只有两格可观测：**deepseek 的关闭**（reasoning 恒 0）和 **kimi 的 max**
@@ -331,7 +339,8 @@ demo*.py        M1 单任务 / M4 复合任务的验证场景 —— 「隐藏�
 runtime/        确定性层：bus / sandbox / detectors / loop —— 这里不许出现 LLM 调用
 agent/          architect（唯一写入决策点：中断决策 + 拆解生成 plan()/decompose()；
                 reviewer_backend = 无写权的复核者）/ subagent（薄绑定层）
-llm/            effort.py 是推理挡位的映射层：统一词表 → 各家参数，不认识就不发
+llm/            effort.py 推理挡位映射：统一词表 → 各家参数，不认识就不发
+                routing.py 按任务路由 Subagent 到不同供应商（只路由 next_step）
                 __init__ 是后端协议本身：Backend Protocol + ArchitectVerdict /
                 Triage / CacheStats，
                 **给模型加一种能力从这里改**；scripted（确定性测试用）/

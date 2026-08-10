@@ -1,8 +1,9 @@
-# 多 Agent 协作系统 — 开发文档 v0.16
+# 多 Agent 协作系统 — 开发文档 v0.17
 
 > 状态：**M7 完成**；**M6 界面层前端完成**（双模式 UI + mock API，未接真实执行层）。下一步是 M6 的服务层（FastAPI + restore 路径）。
 > 日期：2026-08-10
 >
+> **v0.17 变更**：新增 §11.16 按任务选供应商 —— `RoutingBackend` + `Backend.profile_tasks()` + `HumanGate.assign_models()`，模型选择归人、架构师只描述任务特点；顺带修掉 `SpecTemplate.parent_id` 默认 None 导致的三处连锁缺陷（子任务被当成顶层任务）。
 > **v0.16 变更**：新增 §11.15 推理挡位 —— 统一词表 off/low/medium/high/max + 各家映射（`llm/effort.py`），架构师 / Subagent / 廉价角色三档可调（`COWORK_*_EFFORT`）；实测只有 deepseek 的关闭与 kimi 的 max 可观测，中间档位区分不出来。
 > **v0.15 变更**：补上 M6 前端发现的四条后端缺口 —— `DecisionRecord` 新增 `suggestion` / `spec_changes`、新增 `events` 表（到达序索引，非内容拷贝）、新增 `views.py` 投影层（`thread_list` / `task_detail` / `pending_ruling`）与 `cli threads`；两个 Store 都加了幂等 DDL，老库能就地升级。
 > **v0.14 变更**：M6 前端落地（`ui/`）：React + TS + Vite 双模式界面（简洁版默认 / 专业版），mock API 以 `demo --json` / `composite --json` 真实输出为数据骨架；§12 M6 四项任务里 6.1 / 6.2 / 6.3（界面侧）完成，6.4 与 restore 路径待服务层；前端新发现的后端缺口补进 `M6-界面层接口.md` §9（挂起时 verdict 未持久化、`spec_changes` 未持久化、缺 `GET /tasks`、日志不落库）。
@@ -1395,6 +1396,66 @@ token 中位那栏是**没控变量的**，两臂的重生成轮数分布不同�
 - **复核调用也会被 4096 截断**。§11.12 只把拆解调用的额度提到了 16000，复核仍是默认的 4096 —— 而复核要读完整份拆解再推理，`kimi-k3` 实测把 4096 全烧在 reasoning 上、正文 0 字符。现在 `REVIEW_MAX_TOKENS = 8000`。**改一处额度时要问一句：同一条链上还有谁的输入变长了。**
 
 **成本**：36 + 1 次拆解，约 0.77M token，墙钟约 50 分钟（3 并发）。
+
+---
+
+### 11.16 按任务选供应商（§10.3.3）
+
+**动机**：不同的活儿适合不同的模型，而拆解之后每个子任务的活儿是明确的（写后端 / 写前端 / 写文档 / 补测试）。让人在派发前把这件事定下来，比所有子任务共用一家更贴近实际。
+
+#### 流程：一次架构师调用 + 一次人的决定
+
+```
+拆解定型（并行度与分工已经算出来了）
+   ↓
+profile_tasks()      架构师**描述**每个子任务是什么性质的活儿   ← 顾问
+   ↓
+HumanGate.assign_models()   人按这份描述挑供应商              ← 仲裁
+   ↓
+assign_providers()   写进 TaskSpec.model（"供应商:模型"）      ← 进存储/界面/checkpoint
+   ↓
+RoutingBackend       派发时按前缀把 next_step() 分发到对应后端
+```
+
+**放在拆解定型之后**是有讲究的：拆解还没定的时候问「用哪家」，人手上没有可判断的依据。
+
+#### 三条边界
+
+1. **只有 Subagent 被路由。** 架构师（中断决策、验收、拆解、复核、分诊）永远走同一个后端 —— §2.3 说它是单一实例、持有连续上下文，按任务换供应商等于把「唯一写入决策点」拆成几个。`RoutingBackend` 只分发 `next_step()`，其余全部转给 `default`。
+2. **模型不选模型。** 架构师只产出 `TaskProfile`（kind / summary / demands），**提示词里明确要求不要推荐用哪家** —— 它不知道你账号里有哪些 key、也不知道你的成本约束，推荐等于猜，而猜出来的东西摆在人面前会变成默认答案。这和 `SpecTemplate` 不让模型给自己配沙箱是同一条原则。
+3. **分配落在 spec 上**，不是只活在内存里。写进 `TaskSpec.model`，于是它进存储、进界面、进 checkpoint —— 重启之后还知道这个任务当初是谁在跑。
+
+默认行为：**用户填了哪家的 key 就用哪家**（`cli.available_providers()` 只看 key 环境变量非空）。**只有一家可用时既不问也不花那次描述调用** —— 没得选的时候提问是在浪费人的注意力。
+
+#### 实测
+
+一个四子任务的目标（CSV→Markdown：解析 / 渲染 / CLI / README），规则「docs 给 kimi，其余给 deepseek」：
+
+```
+[backend] parser    -> deepseek      [docs] readme -> kimi
+[backend] renderer  -> deepseek
+[backend] cli       -> deepseek
+实际分工 {'deepseek': 19, 'kimi': 6}     ← 两家都真的在干活
+缓存合并 64.8%（单家基线 74%，§11.14）
+```
+
+**跨供应商的代价当场就量到了**：命中率从单家的 74% 掉到 64.8%，因为每家的前缀缓存各自冷启动。任务越短这个摊薄越明显。
+
+#### 顺带修掉一个三处连锁的缺陷
+
+第一次跑的时候 4 个子任务里 2 个直接挂起。根因是 `SpecTemplate.parent_id` 默认 `None`，而 `plan()` 没补 —— 于是生成出来的子任务**全被当成顶层任务**，`§7.2` 第 3 条「顶层任务的 MODIFY_TASK 一律升级给人」无条件命中。
+
+这一个默认值同时坏了三处：
+
+| | 症状 |
+|---|---|
+| 执行层 | 子任务第一次需要改规格就挂起 —— 而「把失败信号变成更清楚的规格」正是这个系统存在的意义 |
+| 界面层 | `views.thread_list()` 按 `parent_id` 折叠，为空时一次拆解的 N 个子任务各占一行，而不是一条复合线程 |
+| 时间线 | `Scheduler.root_id` 靠共同 `parent_id`，为空时分层/复核事件无处可挂 |
+
+`plan()` 现在在调用方没给时自己生成一个根 id，并通过 `DecompositionResult.root_id` 暴露出去（界面层要用它当那条复合线程的 id）。修完同一个目标从 2/4 完成变成 3/4。
+
+**这个缺陷在单家、简单目标上永远暴露不了** —— 之前 `plan --run` 的 wc.py 三个子任务零中断跑完，根本没机会撞到顶层升级那条规则。
 
 ---
 

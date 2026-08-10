@@ -111,6 +111,28 @@ class TestPlanLoop(unittest.TestCase):
             SqliteStore(), policy=policy or Policy(), human_gate=gate,
         )
 
+    def test_subtasks_get_a_shared_parent(self):
+        """没有共同 parent_id 时三处都坏（执行层升级、界面折叠、复合时间线）。
+
+        实测撞到过：4 个子任务里 2 个第一次要改规格就挂起了 ——
+        parent_id 为空 = 顶层任务，任何 MODIFY_TASK 都无条件升级（§7.2 第 3 条）。
+        """
+        arch = self._arch(decompose_for=lambda g, f: GOOD,
+                          review_for=lambda g, s: (True, []))
+        result = arch.plan(GOAL, template())
+
+        roots = {s.parent_id for s in result.specs}
+        self.assertEqual(len(roots), 1, "所有子任务必须同属一个根")
+        self.assertIsNotNone(roots.pop())
+        self.assertEqual(result.root_id, result.specs[0].parent_id)
+        self.assertIn("root_id", result.to_dict())
+
+    def test_explicit_parent_is_respected(self):
+        arch = self._arch(decompose_for=lambda g, f: GOOD,
+                          review_for=lambda g, s: (True, []))
+        result = arch.plan(GOAL, template(parent_id="task_我自己给的"))
+        self.assertEqual(result.root_id, "task_我自己给的")
+
     def test_clean_first_try_accepts(self):
         arch = self._arch(decompose_for=lambda g, f: GOOD,
                           review_for=lambda g, s: (True, []))

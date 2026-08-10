@@ -170,6 +170,43 @@ def resolve_reviewer(backend: str, reviewer: str) -> str | None:
     return "deepseek" if backend == DEFAULT_REVIEWER else DEFAULT_REVIEWER
 
 
+def available_providers() -> dict[str, str]:
+    """这台机器上真的能用的家 → 那家的 Subagent 模型 id（§10.3.3）。
+
+    判据只有一条：**对应的 key 环境变量非空**。这就是「用户填了哪家的 api 就用哪家」
+    ——不去 ping 端点（慢且会误判网络问题），也不看 `verified`
+    （那记的是「本机验证过模型 id」，是另一件事）。
+
+    `litellm` 不算：它是代理，模型由代理侧决定，`models` 三个位置都是 None，
+    没法给出一个「这家的 Subagent 模型」。
+    """
+    import os
+
+    out: dict[str, str] = {}
+    for name, p in PROVIDERS.items():
+        sub = p["models"][0]
+        if not sub or not p.get("key_env"):
+            continue
+        if os.environ.get(p["key_env"]):
+            out[name] = sub
+    return out
+
+
+def _make_routing_backend(default_kind: str, providers: dict[str, str]):
+    """给每个可用供应商建一个后端，包成路由后端。
+
+    只有一家时**不包**——多一层没有意义，而且 `RoutingBackend` 的名字会出现在
+    日志和记录里，让人以为发生了跨供应商调度。
+    """
+    from .llm.routing import RoutingBackend
+
+    default = _make_backend(default_kind)
+    others = {k: (default if k == default_kind else _make_backend(k)) for k in providers}
+    if len(others) < 2:
+        return default
+    return RoutingBackend(default, others)
+
+
 def _make_backend(kind: str):
     import os
 
@@ -539,15 +576,22 @@ def _plan(args: argparse.Namespace) -> int:
     if not (args.run and result.accepted):
         return 0 if result.accepted else 1
 
-    # 从自然语言目标一路跑到产出：拆解 → 分层 → 并行执行（§12 M7 出口 1）。
+    # 从自然语言目标一路跑到产出：拆解 → 分层 → 选模型 → 并行执行（§12 M7 出口 1）。
     # 复核已经在 plan() 里做过了，所以这里 Scheduler 不再给 root_goal ——
     # 否则同一份拆解会被复核两次，白花一次调用。
     from .scheduler import Scheduler
 
+    # 并行度和分工已经定了，最后一步才轮到「谁来干」（§10.3.3）。
+    # 放在这个位置是有讲究的：拆解定型之前问「用哪家」，人手上没有可判断的依据。
+    providers = available_providers()
+    specs, _profiles = architect.assign_models(result.specs, providers, log=print)
+    exec_backend = _make_routing_backend(args.backend, providers) if len(providers) > 1 \
+        else architect.backend
+
     print("\n" + "=" * 60)
     sched = Scheduler(
-        result.specs,
-        backend=architect.backend,
+        specs,
+        backend=exec_backend,
         store=architect.store,
         human_gate=architect.human_gate,
         log=print,
@@ -559,6 +603,12 @@ def _plan(args: argparse.Namespace) -> int:
               f"中断={r.state.interrupt_count} token={r.state.tokens_used}")
     print(f"\n整体       {'全部完成' if outcome.completed else '未全部完成'}"
           f"   耗时 {outcome.wall_seconds:.1f}s")
+    used = getattr(exec_backend, "used", None)
+    if used:
+        # 跑完要能说清「这次实际是谁在干活」—— 分配是人做的决定，
+        # 而人做过的决定必须看得见结果（§7.3 的同一条理由）
+        print(f"实际分工   {dict(sorted(used.items()))}")
+    _report_cache(exec_backend)
     return 0 if outcome.completed else 1
 
 

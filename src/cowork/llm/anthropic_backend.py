@@ -17,7 +17,7 @@ import os
 from typing import Any
 
 from ..actions import AgentAction, Finish, SoftSignalAction, ToolCall
-from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, Triage
+from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, TaskProfile, Triage
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..signals import SOFT_SIGNALS, SignalType
 from ..types import AgentContext, Signal, TaskSpec
@@ -219,6 +219,21 @@ DECOMPOSE_SYSTEM = """你在把一个目标拆成若干可以独立派发的子�
 如果上面给了你**上一轮复核发现的缺口**，那是必须修掉的东西，不是参考意见。
 针对每一条缺口，要么加子任务，要么加/改验收标准，别原样再交一遍。"""
 
+PROFILE_SYSTEM = """给你一批已经定好的子任务，逐个说清楚**这是什么性质的活儿**。
+
+这份描述是给**人**看的：他要据此决定每个子任务派给哪个供应商的模型。所以：
+
+- `kind` 用一个短标签概括，尽量落在常见的几类里：backend / frontend / data /
+  algorithm / docs / test / infra / other。拿不准就用 other，别硬套。
+- `summary` 一句话，说清这个子任务实际要做什么，不要复述验收标准。
+- `demands` 是**对模型能力的要求**，只写这个任务真的吃紧的那几项，例如：
+  长上下文、严格的结构化输出、中文写作、算法推理、跨文件一致性、
+  熟悉某个具体框架。没有特别吃紧的就给空数组。
+
+**不要推荐用哪家模型**，也不要评价任务好坏。你不知道对方账号里有哪些可用的
+供应商，也不知道他的成本约束 —— 推荐等于猜，而猜出来的东西摆在人面前
+会变成默认答案。只描述任务本身。"""
+
 REVIEW_SYSTEM = """你在复核一个任务拆解，用的方法是**验收标准反推**。
 
 给你：一个原始目标，和拆解出来的若干子任务（每个带自己的验收标准）。
@@ -347,6 +362,62 @@ def _parse_drafts(data: dict[str, Any]) -> list[SubtaskDraft]:
     if not drafts:
         raise ModelCallFailed("拆解产出为空")
     return drafts
+
+
+PROFILE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "profiles": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "demands": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["task_id", "kind", "summary", "demands"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["profiles"],
+    "additionalProperties": False,
+}
+
+
+def _render_profile_context(specs: list[TaskSpec]) -> str:
+    parts = ["# 子任务"]
+    for s in specs:
+        deps = f"（依赖 {', '.join(s.depends_on)}）" if s.depends_on else ""
+        parts.append(
+            f"## {s.id} {deps}\n  目标：{s.goal}\n"
+            f"  产出：{s.scope}\n  类型：{s.task_class.value}"
+        )
+    return "\n\n".join(parts)
+
+
+def _parse_profiles(data: dict[str, Any], specs: list[TaskSpec]) -> list[TaskProfile]:
+    """按 spec 的顺序对齐，模型漏掉的补一条占位。
+
+    **漏一个不能让整批失败**：这一步只是给人做选择题的参考，缺一条描述的代价是
+    那一行不好看，而抛异常的代价是整条链停在这儿 —— 后者显然更贵。
+    """
+    by_id = {p["task_id"]: p for p in data.get("profiles", [])}
+    out: list[TaskProfile] = []
+    for s in specs:
+        raw = by_id.get(s.id)
+        if raw is None:
+            out.append(TaskProfile(s.id, "other", s.goal[:60], []))
+            continue
+        out.append(TaskProfile(
+            task_id=s.id,
+            kind=(raw.get("kind") or "other").strip() or "other",
+            summary=raw.get("summary") or s.goal[:60],
+            demands=[d for d in raw.get("demands", []) if d],
+        ))
+    return out
 
 
 def _render_review_context(root_goal: str, specs: list[TaskSpec]) -> str:
@@ -657,6 +728,17 @@ class AnthropicBackend:
             schema=DECOMPOSE_SCHEMA,
         )
         return _parse_drafts(data), tokens
+
+    def profile_tasks(self, specs: list[TaskSpec]) -> tuple[list[TaskProfile], int]:
+        # 走廉价档：这是描述任务、不是做决策，不值得开深度思考
+        data, tokens = self._call(
+            model=self.triage_model,
+            system=PROFILE_SYSTEM,
+            user=_render_profile_context(specs),
+            schema=PROFILE_SCHEMA,
+            thinking=False,
+        )
+        return _parse_profiles(data, specs), tokens
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]

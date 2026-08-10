@@ -99,6 +99,23 @@ class SubtaskDraft:
 
 
 @dataclass
+class TaskProfile:
+    """一个子任务的「这活儿是什么性质」（§10.3.3）。
+
+    **架构师在这里是顾问，不是决策者** —— 它只描述任务特点，选哪家由人定
+    （`HumanGate.assign_models`）。和复核者的关系完全一样：产出 findings，人拍板。
+
+    刻意不含「建议用哪家」：模型不认识你账号里有哪些 key、也不知道你的成本约束，
+    让它推荐等于让它猜，而猜出来的东西摆在人面前会变成默认答案。
+    """
+
+    task_id: str
+    kind: str            # 一个短标签：backend / frontend / docs / test / data ...
+    summary: str         # 一句话说清这个子任务在干什么
+    demands: list[str]   # 对模型的要求：长上下文 / 严格格式 / 中文写作 / 算法推理…
+
+
+@dataclass
 class ArchitectVerdict:
     """架构师对一次中断的裁决。resume_mode 留空则由 §6.2 规则推导。"""
 
@@ -172,6 +189,17 @@ class Backend(Protocol):
         """
         ...
 
+    def profile_tasks(self, specs: list[TaskSpec]) -> tuple[list[TaskProfile], int]:
+        """一次调用，描述整批子任务各自的性质（§10.3.3）。
+
+        **一次，不是每个任务一次**：拆解已经定了，这一步只是给人做选择题时的
+        参考信息，不值得为它花 N 次调用。而且放在一次调用里，模型能看到彼此的
+        对比（「这个偏前端、那个偏算法」），分类反而更稳。
+
+        返回的是**描述**，不是建议。选哪家由人定 —— 见 `TaskProfile` 的说明。
+        """
+        ...
+
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]
     ) -> tuple[bool, str, int]:
@@ -189,5 +217,5 @@ class Backend(Protocol):
 
 from .scripted import ScriptedBackend  # noqa: E402
 
-__all__ = ["Backend", "Triage", "ArchitectVerdict", "SubtaskDraft", "CacheStats",
-           "ScriptedBackend"]
+__all__ = ["Backend", "Triage", "ArchitectVerdict", "SubtaskDraft", "TaskProfile",
+           "CacheStats", "ScriptedBackend"]

@@ -40,6 +40,7 @@ class ScriptedBackend:
         self.token_cost = token_cost
         self._cursor: dict[int, int] = {}
         self.probe_calls = 0
+        self.profile_calls = 0
         self.review_calls = 0
         self.decompose_calls = 0
         self.decompose_feedback: list[list[str] | None] = []
@@ -110,6 +111,12 @@ class ScriptedBackend:
         if self.decompose_for is None:
             raise NotImplementedError("ScriptedBackend 未提供 decompose_for")
         return self.decompose_for(root_goal, feedback), self.token_cost
+
+    def profile_tasks(self, specs: list[TaskSpec]) -> tuple[list, int]:
+        from ..llm import TaskProfile
+
+        self.profile_calls += 1
+        return [TaskProfile(s.id, "other", s.goal[:40], []) for s in specs], self.token_cost // 5
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Protocol
 
+from .. import ids
 from ..escalation import deterministic_plan_escalation, should_escalate
 from ..llm import ArchitectVerdict, Backend
+from ..llm.routing import assign_providers
 from ..llm.errors import ModelError
 from ..plan import deterministic_review
 from ..policy import Policy
@@ -131,6 +133,8 @@ class DecompositionResult:
 
     status: str                      # ACCEPTED | AWAITING_HUMAN | REJECTED
     specs: list[TaskSpec]
+    # 这批子任务共同的 parent_id —— 界面层要用它当那条复合线程的 id（M6）
+    root_id: str | None = None
     review: DecompositionReview | None = None
     attempts: int = 0
     tokens: int = 0
@@ -146,6 +150,7 @@ class DecompositionResult:
     def to_dict(self) -> dict:
         return {
             "status": self.status,
+            "root_id": self.root_id,
             "attempts": self.attempts,
             "tokens": self.tokens,
             "decider": self.decider,
@@ -159,6 +164,11 @@ class DecompositionResult:
 
 class HumanGate(Protocol):
     """人的介入入口。返回 None 表示人还没答复 -> 任务停在 AWAITING_HUMAN。
+
+    第三个方法 `assign_models(profiles, providers)`（§10.3.3）是可选的：
+    实现了就能在派发前决定每个子任务派给哪家；没实现就全用默认那家。
+    **模型选择归人**，架构师只提供任务特点的描述 —— 它在这里是顾问，
+    和复核者一样没有决定权。
 
     拆解层的入口是**另一个方法** `review_plan`（§12 M7 7.5）：它要看的是一份
     拆解和一组 findings，`review()` 的 (spec, signals, verdict) 装不下。
@@ -196,6 +206,14 @@ class AutoApproveGate:
             accept=True,
             rationale=f"[AutoApproveGate] 升级原因：{reason}；直接采纳当前拆解",
         )
+
+    def assign_models(self, profiles, providers) -> dict[str, str]:
+        """自动放行 = 不挑，全用默认那家（返回空分配）。
+
+        **这里刻意不替人选**：让「自动」去挑供应商，等于把一个人的决定
+        伪装成系统的决定。要挑就用 CliGate 或界面层自己的实现。
+        """
+        return {}
 
 
 class CliGate:
@@ -245,6 +263,27 @@ class CliGate:
         if choice == "a":
             return PlanRuling(accept=False, rationale="人判断这个目标该放弃")
         return None
+
+    def assign_models(self, profiles, providers) -> dict[str, str]:
+        """在终端里逐个任务选供应商（§10.3.3）。
+
+        直接回车 = 用默认那家。**默认值是「你配了哪家 key 就用哪家」**，
+        所以只有一家可用时这个方法根本不会被调到 —— 没得选就不该问。
+        """
+        print("\n" + "=" * 68)
+        print("给每个子任务挑一家模型（直接回车 = 默认）")
+        print(f"可用：{', '.join(providers)}")
+        print("=" * 68)
+        out: dict[str, str] = {}
+        for p in profiles:
+            demands = f"  需要：{', '.join(p.demands)}" if p.demands else ""
+            print(f"\n[{p.kind}] {p.task_id}\n  {p.summary}{demands}")
+            choice = input(f"  用哪家？{'/'.join(providers)} > ").strip().lower()
+            if choice in providers:
+                out[p.task_id] = choice
+            elif choice:
+                print(f"  没有 {choice!r} 这家，按默认处理")
+        return out
 
 
 class Architect:
@@ -570,6 +609,17 @@ class Architect:
         写权始终在这个方法手上：复核者只提供 findings，人只能接受或否决，
         **重新拆的动作永远由生成者做**（§2.3 唯一写入决策点）。
         """
+        # 这批子任务同属一个根目标，必须有共同的 parent_id。**不给的话三处都坏**：
+        #   执行层  parent_id 为空 = 顶层任务，任何 MODIFY_TASK 都无条件升级给人
+        #           （§7.2 第 3 条），于是生成出来的任务集失去自我修复能力 ——
+        #           而「把失败信号变成更清楚的规格」正是这个系统存在的意义。
+        #   界面层  views.thread_list() 按 parent_id 折叠，为空时一次拆解的 N 个
+        #           子任务会各占一行，而不是一条复合线程（M6 §10.3）。
+        #   时间线  Scheduler.root_id 靠共同 parent_id，为空时分层/复核事件无处可挂。
+        # 实测撞到过：4 个子任务里 2 个第一次要改规格就挂起了。
+        if template.parent_id is None:
+            template = replace(template, parent_id=ids.task_id())
+
         history: list[dict] = []
         fingerprints: list[str] = []
         specs: list[TaskSpec] = []
@@ -620,7 +670,8 @@ class Architect:
 
             if review.clean:
                 return DecompositionResult(
-                    status="ACCEPTED", specs=specs, review=review, attempts=attempt,
+                    status="ACCEPTED", specs=specs, root_id=template.parent_id,
+                    review=review, attempts=attempt,
                     tokens=self.tokens_used - tokens_before, history=history,
                     rationale="拆解通过结构检查与验收标准反推",
                 )
@@ -641,20 +692,21 @@ class Architect:
 
         return self._escalate_plan(
             root_goal, specs, review, reason or "未知原因",
-            attempts=attempt, tokens=self.tokens_used - tokens_before, history=history, log=log,
+            attempts=attempt, tokens=self.tokens_used - tokens_before, history=history,
+            log=log, root_id=template.parent_id,
         )
 
     def _escalate_plan(
         self, root_goal: str, specs: list[TaskSpec], review: DecompositionReview | None,
         reason: str, *, attempts: int, tokens: int, history: list[dict],
-        log: Callable[[str], None],
+        log: Callable[[str], None], root_id: str | None = None,
     ) -> DecompositionResult:
         log(f"[PLAN] 升级给人：{reason}")
         gate_review = getattr(self.human_gate, "review_plan", None)
         if gate_review is None:
             # 没有拆解层的入口 -> 挂起，不猜。同 §7.2「LLM 无权覆盖」。
             return DecompositionResult(
-                status="AWAITING_HUMAN", specs=specs, review=review, attempts=attempts,
+                status="AWAITING_HUMAN", specs=specs, root_id=root_id, review=review, attempts=attempts,
                 tokens=tokens, escalation_reason=reason, history=history,
                 rationale="需要人裁决这份拆解，但没有拆解层的介入入口，挂起。",
             )
@@ -662,13 +714,13 @@ class Architect:
         ruling = gate_review(root_goal, specs, review, reason)
         if ruling is None:
             return DecompositionResult(
-                status="AWAITING_HUMAN", specs=specs, review=review, attempts=attempts,
+                status="AWAITING_HUMAN", specs=specs, root_id=root_id, review=review, attempts=attempts,
                 tokens=tokens, escalation_reason=reason, decider="HUMAN", history=history,
                 rationale="人未答复，拆解挂起等待。",
             )
         if not ruling.accept:
             return DecompositionResult(
-                status="REJECTED", specs=specs, review=review, attempts=attempts,
+                status="REJECTED", specs=specs, root_id=root_id, review=review, attempts=attempts,
                 tokens=tokens, escalation_reason=reason, decider="HUMAN", history=history,
                 rationale=ruling.rationale,
             )
@@ -680,15 +732,58 @@ class Architect:
             # 「ACCEPTED，0 个子任务」，一个失败被记成成功。真实模型第一次跑
             # 就撞上了这个。人要救场只能靠 ruling.specs 自己给一份。
             return DecompositionResult(
-                status="AWAITING_HUMAN", specs=[], review=review, attempts=attempts,
+                status="AWAITING_HUMAN", specs=[], root_id=root_id, review=review, attempts=attempts,
                 tokens=tokens, escalation_reason=reason, decider="HUMAN", history=history,
                 rationale=f"{ruling.rationale}（但手上没有任何拆解可以采纳，仍需人给出）",
             )
         return DecompositionResult(
-            status="ACCEPTED", specs=final, review=review, attempts=attempts,
+            status="ACCEPTED", specs=final, root_id=root_id, review=review, attempts=attempts,
             tokens=tokens, escalation_reason=reason, decider="HUMAN", history=history,
             rationale=ruling.rationale,
         )
+
+    # -- 按任务选供应商（§10.3.3）------------------------------------------ #
+
+    def assign_models(
+        self,
+        specs: list[TaskSpec],
+        providers: dict[str, str],
+        *,
+        log: Callable[[str], None] = lambda _m: None,
+    ) -> tuple[list[TaskSpec], list]:
+        """并行度和分工已经定了，最后一步：每个子任务派给哪家。
+
+        流程是**一次架构师调用 + 一次人的决定**：
+
+            profile_tasks()  架构师描述每个子任务是什么性质的活儿（顾问）
+            assign_models()  人按这份描述挑供应商（仲裁）
+            assign_providers() 把结果写进 TaskSpec.model，进存储、进界面
+
+        `providers` 是「这台机器上真的能用的家」→ 那家的 Subagent 模型 id。
+        **只有一家时直接返回，不问也不花那次调用** —— 没得选的时候提问是在
+        浪费人的注意力，而人的注意力是这个系统里最贵的东西（§7.2 的同一条理由）。
+
+        网关没实现 `assign_models` 也直接返回：那表示这个部署里没有「人来挑」
+        这个环节，全用默认那家。
+        """
+        gate_assign = getattr(self.human_gate, "assign_models", None)
+        if len(providers) < 2 or gate_assign is None or not specs:
+            return list(specs), []
+
+        profiles, tokens = self.backend.profile_tasks(specs)
+        self.tokens_used += tokens
+        log(f"[MODEL] 架构师描述了 {len(profiles)} 个子任务的性质（{tokens} token）")
+
+        assignment = gate_assign(profiles, sorted(providers)) or {}
+        # 人可能只挑了一部分 —— 没挑的保持默认，不替他补
+        unknown = {v for v in assignment.values()} - set(providers)
+        if unknown:
+            log(f"[MODEL] 忽略未知供应商 {sorted(unknown)}")
+            assignment = {k: v for k, v in assignment.items() if v in providers}
+        for tid, provider in sorted(assignment.items()):
+            log(f"[MODEL] {tid} -> {provider}")
+
+        return assign_providers(specs, assignment, providers), profiles
 
     # -- PROBE 中间探查（§3.2.1）------------------------------------------- #
 
