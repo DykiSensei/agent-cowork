@@ -31,3 +31,7 @@ def artifact_id() -> str:
 
 def agent_id() -> str:
     return _new("agent")
+
+
+def event_id() -> str:
+    return _new("ev")

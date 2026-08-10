@@ -10,6 +10,7 @@ import unittest
 
 from cowork.store.postgres import DEFAULT_DSN
 from cowork.types import (
+    Action,
     AgentContext,
     Artifact,
     Checkpoint,
@@ -70,6 +71,41 @@ class TestPostgresStore(unittest.TestCase):
         back = self.store.load_checkpoint(cp.id)
         self.assertEqual([a.content_ref for a in back.agent_context.produced], ["a.py"])
         self.assertEqual(len(back.agent_context.reasoning_trace), 1)
+
+    def test_decision_roundtrip_carries_the_m6_fields(self):
+        """两个存储必须写同一份东西 —— M6 §9 的两条缺口在 pg 上也要闭合。"""
+        from cowork.types import Decider, DecisionRecord
+
+        changes = {"added_criteria": [{"id": "c2", "description": "还要处理空行"}]}
+        suggestion = {"action": "ABANDON", "rationale": "没救了",
+                      "complexity_score": 0.8, "spec_changes": {}}
+        self.store.save_decision(DecisionRecord(
+            task_id=self.spec.id, trigger=[], decider=Decider.LLM,
+            action=Action.MODIFY_TASK, rationale="补一条", spec_changes=changes,
+            escalation_reason="顶层 MODIFY_TASK", suggestion=suggestion,
+        ))
+
+        back = self.store.decisions_for(self.spec.id)[0]
+        self.assertEqual(back.spec_changes, changes)
+        self.assertEqual(back.suggestion["action"], "ABANDON")
+
+    def test_event_seq_is_assigned_by_the_db(self):
+        from cowork.types import TaskEvent
+
+        a = self.store.append_event(TaskEvent(task_id=self.spec.id, kind="log", text="一"))
+        b = self.store.append_event(TaskEvent(task_id=self.spec.id, kind="log", text="二"))
+        self.assertEqual((a.seq, b.seq), (1, 2))
+        self.assertEqual([e.text for e in self.store.events_for(self.spec.id)], ["一", "二"])
+        self.assertEqual([e.seq for e in self.store.events_for(self.spec.id, 1)], [2])
+
+    def test_events_go_away_with_their_task(self):
+        """外键 ON DELETE CASCADE：任务删了，时间线不该留成孤儿。"""
+        from cowork.types import TaskEvent
+
+        self.store.append_event(TaskEvent(task_id=self.spec.id, kind="log", text="x"))
+        with self.store.conn.cursor() as cur:
+            cur.execute("DELETE FROM tasks WHERE id=%s", (self.spec.id,))
+        self.assertEqual(self.store.events_for(self.spec.id), [])
 
     def test_db_rejects_flat_context(self):
         """存成一坨扁平消息列表的话，§6 整节都无法实现——所以 DB 层直接拒。"""

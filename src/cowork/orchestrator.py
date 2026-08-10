@@ -31,6 +31,7 @@ from .types import (
     ResumeMode,
     SilencePolicy,
     Signal,
+    TaskEvent,
     TaskSpec,
     TaskState,
     TaskStatus,
@@ -87,11 +88,47 @@ class Orchestrator:
             self.store.save_artifact(a)
         self.ctx.injected.extend(artifacts)
 
+    # -- 时间线（M6 §9 第 4 条）------------------------------------------- #
+
+    def _say(self, msg: str) -> None:
+        """日志同时落一条事件。
+
+        `self.log` 仍然是外部可替换的回调（CLI 打屏、界面层收集），但它是**纯文本
+        且不持久**的。界面的时间线要「按到达序排列的事件流」，那必须来自存储 ——
+        跑完之后再打开界面、或者刷新一次页面，日志就没了。
+        """
+        self.log(msg)
+        self._event("log", text=msg)
+
+    def _event(self, kind: str, *, text: str = "", ref_id: str | None = None,
+               payload: dict | None = None) -> None:
+        """写一条事件。**写不进去不能影响任务本身**。
+
+        事件是给界面看的旁路，存储层没有这张表（老库、别人实现的 Store）
+        不该让一次正常的 run 崩掉。
+        """
+        append = getattr(self.store, "append_event", None)
+        if append is None:
+            return
+        try:
+            append(TaskEvent(task_id=self.spec.id, kind=kind, text=text,
+                             ref_id=ref_id, payload=payload or {}))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _set_status(self, status: TaskStatus) -> None:
+        """改状态 + 落库 + 记一条事件。状态迁移是界面最需要的那条线。"""
+        self.state.status = status
+        self.store.save_task(self.state)
+        self._event("status", payload={"status": status.value})
+
     def intervene(self, instruction: str) -> Signal:
         """人在群聊中介入 -> HUMAN_INTERVENTION 硬信号 -> 下个 step 边界立即抢占。"""
         sig = self.bus.human_intervention(self.spec.id, instruction)
         self.store.save_signal(sig)
         self.log(f"[HUMAN] 介入: {instruction}")
+        # human 与 log 分开：界面要把人说的话渲染成对话气泡，不是一行日志
+        self._event("human", text=instruction, ref_id=sig.id)
         return sig
 
     # ------------------------------------------------------------------ #
@@ -106,7 +143,7 @@ class Orchestrator:
             subagent = Subagent(self.backend)
             self.state.agent_id = subagent.id
             self.store.save_task(self.state)
-            self.log(
+            self._say(
                 f"[RUN ] cycle={cycle} rev={self.ctx.task_spec.revision} "
                 f"agent={subagent.id} step={self.state.current_step}"
             )
@@ -118,7 +155,7 @@ class Orchestrator:
                 for s in outcome.soft_signals:
                     self.store.save_signal(s)
                 escalated = self.architect.consume_soft(outcome.soft_signals)
-                self.log(
+                self._say(
                     f"[SOFT] 消费 {len(outcome.soft_signals)} 条，"
                     f"升级 {len(escalated)} 条"
                 )
@@ -129,13 +166,12 @@ class Orchestrator:
             elif outcome.status is TaskStatus.COMPLETED:
                 passed, reason = self.architect.verify(self.ctx.task_spec, self.ctx)
                 if passed:
-                    self.state.status = TaskStatus.COMPLETED
-                    self.store.save_task(self.state)
-                    self.log(f"[DONE] {reason}")
+                    self._set_status(TaskStatus.COMPLETED)
+                    self._say(f"[DONE] {reason}")
                     return RunResult(self.state, self.ctx, self.decisions, outcome.output)
 
                 # 验收不通过 -> 当作 L0 信号处理（§5 流程图右下角）
-                self.log(f"[FAIL] 架构师验收不通过: {reason}")
+                self._say(f"[FAIL] 架构师验收不通过: {reason}")
                 sig = self.bus.emit_hard(
                     SignalType.VALIDATION_FAILED,
                     self.spec.id,
@@ -148,11 +184,12 @@ class Orchestrator:
                 triggers = list(outcome.preempting_signals)
 
             # ---- INTERRUPTED ----
-            self.state.status = TaskStatus.INTERRUPTED
             self.state.interrupt_count += 1
             self.state.signal_log.extend(s.id for s in triggers)
-            self.store.save_task(self.state)
-            self.log(
+            self._set_status(TaskStatus.INTERRUPTED)
+            for s in triggers:
+                self._event("signal", ref_id=s.id, payload={"type": s.type.value})
+            self._say(
                 f"[STOP] {triggers[0].type.value if triggers else '未知'} "
                 f"@step={self.state.current_step} interrupt_count={self.state.interrupt_count}"
             )
@@ -162,32 +199,30 @@ class Orchestrator:
             except ModelError as exc:
                 # 架构师自己也调不动模型了（典型场景：virtual key 预算耗尽，
                 # Subagent 和架构师用同一把 key）。没有决策者，只能挂起等人。
-                self.state.status = TaskStatus.AWAITING_HUMAN
-                self.store.save_task(self.state)
-                self.log(f"[STOP] 架构师无法决策（{exc.signal_type.value}）: {exc.message[:200]}")
+                self._set_status(TaskStatus.AWAITING_HUMAN)
+                self._say(f"[STOP] 架构师无法决策（{exc.signal_type.value}）: {exc.message[:200]}")
                 return RunResult(self.state, self.ctx, self.decisions)
 
             self.store.save_decision(decision)
             self.decisions.append(decision)
+            self._event("decision", ref_id=decision.id,
+                        payload={"action": decision.action.value})
             self._render(decision)
 
             if decision.action is Action.ABANDON:
-                self.state.status = TaskStatus.ABANDONED
-                self.store.save_task(self.state)
+                self._set_status(TaskStatus.ABANDONED)
                 return RunResult(self.state, self.ctx, self.decisions)
 
             if decision.resume_mode is None or decision.new_spec is None:
-                self.state.status = TaskStatus.AWAITING_HUMAN
-                self.store.save_task(self.state)
+                self._set_status(TaskStatus.AWAITING_HUMAN)
                 return RunResult(self.state, self.ctx, self.decisions)
 
             if decision.resume_mode is ResumeMode.REBASE:
                 self._rebase_count += 1
                 if self._rebase_count > self.policy.max_rebase:
                     # 风险 #5：多次 REBASE 后摘要压缩会累积失真
-                    self.state.status = TaskStatus.AWAITING_HUMAN
-                    self.store.save_task(self.state)
-                    self.log(
+                    self._set_status(TaskStatus.AWAITING_HUMAN)
+                    self._say(
                         f"[STOP] REBASE 次数超过上限 {self.policy.max_rebase}，挂起等人"
                     )
                     return RunResult(self.state, self.ctx, self.decisions)
@@ -202,9 +237,8 @@ class Orchestrator:
             self.loop = StepLoop(bus=self.bus, sandbox=self.sandbox, store=self.store)
             self.store.save_task(self.state)
 
-        self.state.status = TaskStatus.FAILED
-        self.store.save_task(self.state)
-        self.log(f"[STOP] 超过 max_cycles={max_cycles}")
+        self._set_status(TaskStatus.FAILED)
+        self._say(f"[STOP] 超过 max_cycles={max_cycles}")
         return RunResult(self.state, self.ctx, self.decisions)
 
     # ------------------------------------------------------------------ #
@@ -253,7 +287,7 @@ class Orchestrator:
             self.probe_count += 1
             self.probe_tokens += tokens
             self._last_probe = time.monotonic()
-            self.log(
+            self._say(
                 f"[PROBE] #{self.probe_count} @step={self.state.current_step} "
                 f"{'在轨' if on_track else '跑偏'}: {reason[:80]}"
             )
@@ -298,13 +332,13 @@ class Orchestrator:
 
     def _render(self, d: DecisionRecord) -> None:
         """§7.3：每条 DecisionRecord 都渲染出来，LLM 决策与人的决策同等展示。"""
-        self.log(
+        self._say(
             f"[DEC ] decider={d.decider.value} action={d.action.value} "
             f"resume={d.resume_mode.value if d.resume_mode else '-'} "
             f"complexity={d.complexity_score if d.complexity_score is not None else '-'}"
         )
         if d.escalation_reason:
-            self.log(f"       升级原因: {d.escalation_reason}")
-        self.log(f"       理由: {d.rationale}")
+            self._say(f"       升级原因: {d.escalation_reason}")
+        self._say(f"       理由: {d.rationale}")
         if d.new_spec:
-            self.log(f"       新 spec: rev={d.new_spec.revision} goal={d.new_spec.goal[:60]}")
+            self._say(f"       新 spec: rev={d.new_spec.revision} goal={d.new_spec.goal[:60]}")

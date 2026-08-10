@@ -20,6 +20,7 @@ from ..types import (
     DecisionRecord,
     ResumeMode,
     Signal,
+    TaskEvent,
     TaskSpec,
     TaskState,
     TaskStatus,
@@ -72,9 +73,23 @@ CREATE TABLE IF NOT EXISTS decisions (
     escalation_reason  TEXT,
     action             TEXT NOT NULL,
     new_spec_json      TEXT,
+    spec_changes_json  TEXT,
+    suggestion_json    TEXT,
     resume_mode        TEXT,
     rationale          TEXT NOT NULL,
     created_at         REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id           TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    text         TEXT NOT NULL DEFAULT '',
+    ref_id       TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at   REAL NOT NULL,
+    UNIQUE (task_id, seq)
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -89,7 +104,16 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS idx_signals_task ON signals(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_ckpt_task ON checkpoints(task_id, step);
 CREATE INDEX IF NOT EXISTS idx_dec_task ON decisions(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ev_task ON events(task_id, seq);
 """
+
+# 已经存在的库不会被 CREATE TABLE IF NOT EXISTS 补上新列。仓库里到处是历史
+# .sqlite（demo 跑出来的、inspect 要读的），加字段时必须能就地升级，
+# 否则「换个版本再 inspect 老库」就直接炸。
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("decisions", "spec_changes_json", "TEXT"),
+    ("decisions", "suggestion_json", "TEXT"),
+)
 
 
 def _dumps(obj: Any) -> str:
@@ -120,7 +144,17 @@ class SqliteStore:
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self.conn.executescript(DDL)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """给已存在的库补上后加的列。幂等，每次打开都跑一遍。"""
+        for table, column, decl in _MIGRATIONS:
+            cols = {
+                r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     # -- tasks ------------------------------------------------------------- #
 
@@ -263,8 +297,9 @@ class SqliteStore:
         self.conn.execute(
             """INSERT INTO decisions (id, task_id, trigger_signal_ids, decider,
                                       complexity_score, escalation_reason, action,
-                                      new_spec_json, resume_mode, rationale, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                                      new_spec_json, spec_changes_json, suggestion_json,
+                                      resume_mode, rationale, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 dec.id,
                 dec.task_id,
@@ -274,6 +309,8 @@ class SqliteStore:
                 dec.escalation_reason,
                 dec.action.value,
                 _dumps(dec.new_spec.to_dict()) if dec.new_spec else None,
+                _dumps(dec.spec_changes) if dec.spec_changes else None,
+                _dumps(dec.suggestion) if dec.suggestion else None,
                 dec.resume_mode.value if dec.resume_mode else None,
                 dec.rationale,
                 dec.created_at,
@@ -302,12 +339,59 @@ class SqliteStore:
                         if r["new_spec_json"]
                         else None
                     ),
+                    spec_changes=json.loads(r["spec_changes_json"] or "{}"),
+                    suggestion=(
+                        json.loads(r["suggestion_json"]) if r["suggestion_json"] else None
+                    ),
                     resume_mode=ResumeMode(r["resume_mode"]) if r["resume_mode"] else None,
                     rationale=r["rationale"],
                     created_at=r["created_at"],
                 )
             )
         return out
+
+    # -- events（M6 §9 第 4 条）-------------------------------------------- #
+
+    @_synchronized
+    def append_event(self, ev: TaskEvent) -> TaskEvent:
+        """按到达序追加一条事件，seq 在这里分配。
+
+        分配放在锁里而不是交给调用方：并行调度下多个 Orchestrator 会同时写，
+        调用方自己算 seq 必然撞号，而撞号之后前端的追加式渲染就开始错位。
+        """
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS m FROM events WHERE task_id=?",
+            (ev.task_id,),
+        ).fetchone()
+        ev.seq = row["m"] + 1
+        self.conn.execute(
+            """INSERT INTO events (id, task_id, seq, kind, text, ref_id,
+                                   payload_json, created_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                ev.id, ev.task_id, ev.seq, ev.kind, ev.text, ev.ref_id,
+                _dumps(ev.payload), ev.created_at,
+            ),
+        )
+        self.conn.commit()
+        return ev
+
+    @_synchronized
+    def events_for(self, task_id: str, after_seq: int = 0) -> list[TaskEvent]:
+        """按 seq 取事件。`after_seq` 给 SSE 增量推送用：只要比它新的。"""
+        rows = self.conn.execute(
+            "SELECT * FROM events WHERE task_id=? AND seq>? ORDER BY seq",
+            (task_id, after_seq),
+        ).fetchall()
+        return [
+            TaskEvent(
+                id=r["id"], task_id=r["task_id"], seq=r["seq"], kind=r["kind"],
+                text=r["text"], ref_id=r["ref_id"],
+                payload=json.loads(r["payload_json"] or "{}"),
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
 
     # -- artifacts --------------------------------------------------------- #
 

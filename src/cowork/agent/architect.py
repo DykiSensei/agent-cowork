@@ -362,6 +362,17 @@ class Architect:
         action = Action(verdict.action)
         spec_changes = dict(verdict.spec_changes)
 
+        # 挂起时要留下的「系统建议」。下面两条挂起路径的 action/rationale 记的都是
+        # **系统的兜底行为**（挂起），不是模型的意见；模型说了什么必须单独存，
+        # 否则「等你拍板」的卡片只剩一句升级原因，人看不到系统本来想干什么（M6 §9）。
+        suggestion = {
+            "action": verdict.action,
+            "rationale": verdict.rationale,
+            "complexity_score": verdict.complexity_score,
+            # 建议里也带上它想改什么 —— 人要判断的往往正是这个
+            "spec_changes": dict(verdict.spec_changes),
+        }
+
         if reason:
             escalation_reason = reason
             if self.human_gate is None:
@@ -376,6 +387,7 @@ class Architect:
                     rationale=f"需要人决策但无介入入口，任务挂起。{reason}",
                     new_spec=None,
                     resume_mode=None,
+                    suggestion=suggestion,
                 )
             ruling = self.human_gate.review(spec, signals, verdict, reason)
             if ruling is None:
@@ -389,6 +401,7 @@ class Architect:
                     rationale="人未答复，任务挂起等待。",
                     new_spec=None,
                     resume_mode=None,
+                    suggestion=suggestion,
                 )
             decider = Decider.HUMAN
             action = ruling.action
@@ -420,6 +433,12 @@ class Architect:
             escalation_reason=escalation_reason,
             action=action,
             new_spec=new_spec,
+            # 改了哪些字段单独记一份：只有 new_spec 的话，界面层没法说清
+            # 「这次新增的是哪条验收标准」，只能把两版 spec 整份摆出来（M6 §9）
+            spec_changes=spec_changes,
+            # 人接手时也保留模型当时的建议 —— 事后复盘要能对照
+            # 「模型想怎么做 / 人最后怎么定的」
+            suggestion=suggestion if escalation_reason else None,
             resume_mode=resume_mode,
             rationale=rationale,
         )

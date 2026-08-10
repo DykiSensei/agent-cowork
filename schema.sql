@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS decisions (
     action             TEXT  NOT NULL
                        CHECK (action IN ('CONTINUE','MODIFY_TASK','ABANDON','REASSIGN')),
     new_spec_json      JSONB,
+    -- 这次裁决改了哪些字段。只有 new_spec 的话，「哪条验收标准是这次新增的」
+    -- 无法从存储重建（M6-界面层接口.md §9）。
+    spec_changes_json  JSONB,
+    -- 升级给人时 LLM 的建议 {action, rationale, complexity_score}。人还没答复的
+    -- 那条记录里 action/rationale 记的是系统的兜底行为，不是模型的意见。
+    suggestion_json    JSONB,
     resume_mode        TEXT CHECK (resume_mode IN ('RESUME','REBASE','RESTART')),
     rationale          TEXT  NOT NULL,
     created_at         DOUBLE PRECISION NOT NULL
@@ -71,6 +77,26 @@ CREATE TABLE IF NOT EXISTS artifacts (
     created_at  DOUBLE PRECISION NOT NULL
 );
 
+-- 时间线的到达序索引（M6 §9 第 4 条）。**不是内容的第二份拷贝**：
+-- 信号与裁决的正文仍然只在各自的表里，这里只记「第几条、什么类型、指向谁」。
+-- 排序靠 seq 不靠 created_at —— 并行任务的时间戳会撞在同一毫秒上。
+CREATE TABLE IF NOT EXISTS events (
+    id           TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    text         TEXT NOT NULL DEFAULT '',
+    ref_id       TEXT,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at   DOUBLE PRECISION NOT NULL,
+    UNIQUE (task_id, seq)
+);
+
 CREATE INDEX IF NOT EXISTS idx_signals_task ON signals(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_ckpt_task    ON checkpoints(task_id, step);
 CREATE INDEX IF NOT EXISTS idx_dec_task     ON decisions(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ev_task      ON events(task_id, seq);
+
+-- 已有库的就地升级：加列必须幂等，否则换个版本再连老库就炸
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS spec_changes_json JSONB;
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS suggestion_json   JSONB;

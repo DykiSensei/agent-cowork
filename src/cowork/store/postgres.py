@@ -19,6 +19,7 @@ from ..types import (
     DecisionRecord,
     ResumeMode,
     Signal,
+    TaskEvent,
     TaskSpec,
     TaskState,
     TaskStatus,
@@ -29,12 +30,36 @@ DEFAULT_DSN = os.environ.get(
 )
 
 
+# 建表由 docker-compose 的 initdb 跑 schema.sql，但那**只在第一次创建数据卷时执行**。
+# 已经存在的库不会自动拿到后加的列和表 —— 加字段之后连老库，报的是
+# 「column does not exist」，而那时候人已经在跑任务了。
+# 所以连上就跑一遍这几条幂等 DDL，和 SqliteStore._migrate() 是同一个用意。
+_MIGRATIONS = """
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS spec_changes_json JSONB;
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS suggestion_json   JSONB;
+CREATE TABLE IF NOT EXISTS events (
+    id           TEXT PRIMARY KEY,
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    text         TEXT NOT NULL DEFAULT '',
+    ref_id       TEXT,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at   DOUBLE PRECISION NOT NULL,
+    UNIQUE (task_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_ev_task ON events(task_id, seq);
+"""
+
+
 class PostgresStore:
     def __init__(self, dsn: str = DEFAULT_DSN) -> None:
         import psycopg  # 延迟导入：没装 psycopg 也能用 SqliteStore
         from psycopg.rows import dict_row
 
         self.conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        with self.conn.cursor() as cur:
+            cur.execute(_MIGRATIONS)
 
     # -- tasks ------------------------------------------------------------- #
 
@@ -184,8 +209,9 @@ class PostgresStore:
             cur.execute(
                 """INSERT INTO decisions (id, task_id, trigger_signal_ids, decider,
                                           complexity_score, escalation_reason, action,
-                                          new_spec_json, resume_mode, rationale, created_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                          new_spec_json, spec_changes_json, suggestion_json,
+                                          resume_mode, rationale, created_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     dec.id,
                     dec.task_id,
@@ -195,6 +221,8 @@ class PostgresStore:
                     dec.escalation_reason,
                     dec.action.value,
                     json.dumps(dec.new_spec.to_dict()) if dec.new_spec else None,
+                    json.dumps(dec.spec_changes) if dec.spec_changes else None,
+                    json.dumps(dec.suggestion) if dec.suggestion else None,
                     dec.resume_mode.value if dec.resume_mode else None,
                     dec.rationale,
                     dec.created_at,
@@ -217,8 +245,47 @@ class PostgresStore:
                 escalation_reason=r["escalation_reason"],
                 action=Action(r["action"]),
                 new_spec=TaskSpec.from_dict(r["new_spec_json"]) if r["new_spec_json"] else None,
+                spec_changes=r["spec_changes_json"] or {},
+                suggestion=r["suggestion_json"],
                 resume_mode=ResumeMode(r["resume_mode"]) if r["resume_mode"] else None,
                 rationale=r["rationale"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    # -- events（M6 §9 第 4 条）-------------------------------------------- #
+
+    def append_event(self, ev: TaskEvent) -> TaskEvent:
+        """seq 在库里分配：并行调度下多个 Orchestrator 同时写，调用方自己算必然撞号。"""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS m FROM events WHERE task_id=%s",
+                (ev.task_id,),
+            )
+            ev.seq = cur.fetchone()["m"] + 1
+            cur.execute(
+                """INSERT INTO events (id, task_id, seq, kind, text, ref_id,
+                                       payload_json, created_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    ev.id, ev.task_id, ev.seq, ev.kind, ev.text, ev.ref_id,
+                    json.dumps(ev.payload), ev.created_at,
+                ),
+            )
+        return ev
+
+    def events_for(self, task_id: str, after_seq: int = 0) -> list[TaskEvent]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM events WHERE task_id=%s AND seq>%s ORDER BY seq",
+                (task_id, after_seq),
+            )
+            rows = cur.fetchall()
+        return [
+            TaskEvent(
+                id=r["id"], task_id=r["task_id"], seq=r["seq"], kind=r["kind"],
+                text=r["text"], ref_id=r["ref_id"], payload=r["payload_json"] or {},
                 created_at=r["created_at"],
             )
             for r in rows

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..types import Artifact, Checkpoint, DecisionRecord, Signal, TaskState
+from ..types import Artifact, Checkpoint, DecisionRecord, Signal, TaskEvent, TaskState
 
 
 class Store(Protocol):
@@ -28,6 +28,10 @@ class Store(Protocol):
 
     def save_decision(self, dec: DecisionRecord) -> None: ...
     def decisions_for(self, task_id: str) -> list[DecisionRecord]: ...
+
+    # 时间线的到达序索引（M6 §9）。seq 由实现分配，调用方不要自己算。
+    def append_event(self, ev: TaskEvent) -> TaskEvent: ...
+    def events_for(self, task_id: str, after_seq: int = 0) -> list[TaskEvent]: ...
 
     def save_artifact(self, art: Artifact) -> None: ...
     def load_artifact(self, artifact_id: str) -> Artifact | None: ...

@@ -364,6 +364,54 @@ class Checkpoint:
 
 
 @dataclass
+class TaskEvent:
+    """时间线上的一条事件（M6 §9 第 4 条）。
+
+    **它是到达顺序的索引，不是内容的第二份拷贝。** 信号和裁决的正文仍然只存在
+    signals / decisions 两张表里，这里只记「第几条、什么类型、指向谁」——
+    否则同一件事有两个真相来源，改一处忘一处就开始对不上。
+
+    `seq` 由 Store 在写入时分配，任务内单调递增。界面层要的「按到达序排列」
+    靠它，不靠 `created_at`：并行任务的时间戳会撞在同一毫秒上，而排序一旦
+    不稳定，前端的追加式渲染就会错位。
+    """
+
+    task_id: str
+    kind: str                       # log | signal | decision | status
+    seq: int = 0                    # Store 分配；0 表示还没落库
+    text: str = ""                  # kind=log 的正文
+    ref_id: str | None = None       # kind=signal/decision 时指向那条记录
+    payload: dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=ids.event_id)
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "task_id": self.task_id,
+            "seq": self.seq,
+            "kind": self.kind,
+            "text": self.text,
+            "ref_id": self.ref_id,
+            "payload": self.payload,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TaskEvent:
+        return cls(
+            id=d["id"],
+            task_id=d["task_id"],
+            seq=d.get("seq", 0),
+            kind=d["kind"],
+            text=d.get("text", ""),
+            ref_id=d.get("ref_id"),
+            payload=d.get("payload", {}),
+            created_at=d["created_at"],
+        )
+
+
+@dataclass
 class TaskState:
     spec: TaskSpec
     status: TaskStatus = TaskStatus.PENDING
@@ -413,6 +461,14 @@ class DecisionRecord:
     escalation_reason: str | None = None
     new_spec: TaskSpec | None = None
     resume_mode: ResumeMode | None = None
+    # 这次裁决**改了哪些字段**。只存 new_spec 的话，「哪条验收标准是这次新增的」
+    # 就无法从存储重建 —— 界面层只能整份列出两版 spec 让人自己找（M6 §9）。
+    spec_changes: dict[str, Any] = field(default_factory=dict)
+    # 升级给人时 LLM 的建议：{action, rationale, complexity_score}。
+    # 人还没答复的那条记录里，`action` / `rationale` 记的是**系统的兜底行为**
+    # （挂起），不是模型的意见 —— 两者混在一个字段里，「等你拍板」的卡片就没法
+    # 展示「系统建议怎么做」。所以单独存一份（M6 §9）。
+    suggestion: dict[str, Any] | None = None
     id: str = field(default_factory=ids.decision_id)
     created_at: float = field(default_factory=time.time)
 
@@ -426,6 +482,8 @@ class DecisionRecord:
             "escalation_reason": self.escalation_reason,
             "action": self.action.value,
             "new_spec": self.new_spec.to_dict() if self.new_spec else None,
+            "spec_changes": dict(self.spec_changes),
+            "suggestion": dict(self.suggestion) if self.suggestion else None,
             "resume_mode": self.resume_mode.value if self.resume_mode else None,
             "rationale": self.rationale,
             "created_at": self.created_at,

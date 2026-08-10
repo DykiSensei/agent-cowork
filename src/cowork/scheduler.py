@@ -35,7 +35,7 @@ from .plan import Plan, build_plan
 from .policy import DEFAULT_POLICY, Policy
 from .runtime.bus import SignalBus
 from .signals import SignalType
-from .types import Signal, TaskSpec, TaskStatus
+from .types import Signal, TaskEvent, TaskSpec, TaskStatus
 
 
 @dataclass
@@ -101,6 +101,11 @@ class Scheduler:
         self.max_parallel = max_parallel
         self.log = log
         self.plan = build_plan(self.specs)
+        # 复合任务在界面上是**一条线程**，而它的时间线（分层、复核、冲突）不属于
+        # 任何一个子任务。子任务共同的 parent_id 就是那条线程的 id；
+        # 没有共同父 id 时（一组互不相干的 spec）就没有这条线程，事件也无处可挂。
+        roots = {s.parent_id for s in self.specs if s.parent_id}
+        self.root_id = roots.pop() if len(roots) == 1 else None
         self.bus = SignalBus()
         # 仲裁用的架构师是**同一个实例语义**：跨任务信息只经它流转（§2.3）。
         # 各任务的 Orchestrator 内部各有自己的 Architect 做本任务决策，
@@ -112,31 +117,56 @@ class Scheduler:
             reviewer_backend=reviewer_backend,
         )
 
+    # -- 时间线（M6 §9 第 4 条）------------------------------------------- #
+
+    def _say(self, msg: str) -> None:
+        """调度器自己的日志也要落成事件，挂在复合线程上。
+
+        子任务的事件由各自的 Orchestrator 写，这里写的是**层与层之间**发生的事：
+        分层结果、拆解复核、冲突仲裁 —— 那些在任何一个子任务里都看不到。
+        """
+        self.log(msg)
+        self._event("log", text=msg)
+
+    def _event(self, kind: str, *, text: str = "", ref_id: str | None = None,
+               payload: dict | None = None) -> None:
+        append = getattr(self.store, "append_event", None)
+        if append is None or self.root_id is None:
+            return
+        try:
+            append(TaskEvent(task_id=self.root_id, kind=kind, text=text,
+                             ref_id=ref_id, payload=payload or {}))
+        except Exception:  # noqa: BLE001 - 事件是旁路，写不进去不该影响调度
+            pass
+
     # ------------------------------------------------------------------ #
 
     def run(self, *, max_cycles: int = 8) -> CompositeResult:
         started = time.monotonic()
         result = CompositeResult(plan=self.plan)
 
+        # 分层结果单独发一条结构化事件：界面要画的是那张分层图，不是日志文本
+        self._event("plan", payload=self.plan.to_dict())
         for issue in self.plan.issues:
-            self.log(f"[PLAN] {issue.kind}: {issue.detail} {list(issue.tasks)}")
+            self._say(f"[PLAN] {issue.kind}: {issue.detail} {list(issue.tasks)}")
 
         # 拆解复核放在**派发之前**：拆错了就不该开跑，跑完再发现就白烧了。
         if self.root_goal:
             self.review = self.architect.review_decomposition(self.root_goal, self.specs)
             result.review = self.review
+            self._event("review", payload=self.review.to_dict())
             for i in self.review.structural:
-                self.log(f"[REVIEW] 结构 {i.kind}: {i.detail} {list(i.tasks)}")
+                self._say(f"[REVIEW] 结构 {i.kind}: {i.detail} {list(i.tasks)}")
             who = "独立复核者" if self.review.independent else "拆解者自己"
-            self.log(f"[REVIEW] 复核者 {self.review.reviewer}（{who}）")
+            self._say(f"[REVIEW] 复核者 {self.review.reviewer}（{who}）")
             if self.review.sufficient:
-                self.log("[REVIEW] 验收标准反推：覆盖完整")
+                self._say("[REVIEW] 验收标准反推：覆盖完整")
             else:
                 for m in self.review.missing:
-                    self.log(f"[REVIEW] 可能遗漏: {m}")
+                    self._say(f"[REVIEW] 可能遗漏: {m}")
 
         for i, layer in enumerate(self.plan.layers, start=1):
-            self.log(
+            self._say(
                 f"[LAYER] {i}/{len(self.plan.layers)} "
                 f"并行 {len(layer)}: {[t.id for t in layer]}"
             )
@@ -240,7 +270,7 @@ class Scheduler:
                 evidence=f"产出 {resource} 被 {len(tids)} 个任务写过: {sorted(tids)}",
             )
             self.store.save_signal(sig)
-            self.log(f"[CONFLICT] {resource} <- {sorted(tids)}（归属 {owner}）")
+            self._say(f"[CONFLICT] {resource} <- {sorted(tids)}（归属 {owner}）")
             out.append(sig)
         return out
 
