@@ -52,9 +52,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **循环还是那一个**：决策 → 复核 → 重做 ≤ `max_regenerate` → 升级给人。
   意见走 `decide_interrupt(review_feedback=...)` 喂回去，**和 `history` 分开传** ——
   history 参与「同一指纹连续出现」的计数，被驳回的草稿混进去会把计数搞脏。
-- **默认关闭是刻意的**。M7 的 J 0.98 是在**拆解**上测的，输入形状和判断类型都不一样。
-  §11.13 已有先例：判据移植到新一层之后没有可判之物。跑 `bench-decide` 出
-  TPR/FPR/J 之前不要默认开。
+- **默认仍关着，但已经有数据了**（§11.19，单臂 deepseek 55 次）：
+  J 0.686 / FPR 0.000。**别看聚合 TPR，看用例级** —— 那 0.686 实际是
+  「vague / goal_loosened / non_responsive / contradicts 四种满分，
+  `limit_raised` 1/5、`scope_widened` 3/5 发抖，`e1_invented_evidence` 0/5 全瞎」。
+- **盲区的机制值得记**：证据为空时，「改完之后失败证据指的问题会被挡住吗」
+  这个判据**没有可判之物** —— 架构师编个因果再据此改松目标，复核者手上没东西对质。
+  这是第三次遇到同一形状（`soft_queue_threshold` / 拆解层指纹重复 / 这里）：
+  **给一个判据换输入分布之前，先问它在新分布上判什么。**
+- 四种满分的形态都只需要「改动 vs 证据」的文本比对；两种发抖的需要**推断**
+  （「步数不够就加步数」局部合理，要判错得先从证据里读出那是死循环）。
+- **FPR=0 别读成「没有误报风险」**：负例按用例表纪律只用 `added_criteria`，
+  构造偏易；n=20 的上界还有约 14%。要改提示词补盲区的话，
+  `decide_ab.jsonl` 就是基线，两侧都要重测（§11.9c）。
 - **缺陷形态要按 `_apply_changes` 真正允许的来写**：acceptance 只能追加不能删改，
   所以「偷偷删掉一条标准」根本发生不了。可达的放松手法只有四种（改 goal /
   加一条挡不住任何东西的标准 / 调大上限 / 扩 scope），其中 **`goal_loosened` 最危险 ——
@@ -129,7 +139,7 @@ PYTHONPATH=src python ui/mock/make_fixtures.py  # 重生成 ui/fixtures（在仓
 | `review_ab_positives_v2.jsonl` / `review_ab_negatives_v2.jsonl` | 返工后的正例 90 次 / 负例 30 次 |
 | `review_ab_v1.jsonl` | 用例表返工**前**的 120 次。别删 —— 它是「负例必须真的完整」那条坑的证据 |
 | `plan_ab.jsonl` | M7 7.4 的 37 次拆解（§11.13）：提示词两臂 × 6 目标，`max_regenerate` 的依据 |
-| `decide_ab.jsonl` | **还不存在** —— M8 8.4 的写入侧复核对照没跑过。跑 `bench-decide` 才有 |
+| `decide_ab.jsonl` | M8 8.4 的写入侧复核 55 次（§11.19）：单臂 deepseek，J 0.686 / FPR 0.000。改复核提示词时拿它做基线 |
 
 M5a 那四个文件是「改提示词必须两侧都测」的现成对照组，改停止判据时拿它做基线。
 `review_ab*` 同理，改复核提示词或换复核模型时拿它做基线；

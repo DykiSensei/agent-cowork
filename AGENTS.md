@@ -13,8 +13,10 @@ Subagent 是薄执行层，Runtime 是完全确定性的（不含任何 LLM 调�
 另有 `M6-界面层接口.md`：给界面层的对外接口约定 —— 改动 `to_dict()` 的形状、
 `HumanGate` 的签名或信号类型时，那份文档必须同步改。
 
-当前进度：M0–M7 全部完成；M8（写入侧复核，改 TaskSpec 前让复核者看一眼）代码完成
-但**默认关闭** —— 判别力还没实测，跑 `cli bench-decide` 出 TPR/FPR/J 之前不要默认开。**M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
+当前进度：M0–M7 全部完成；M8（写入侧复核，改 TaskSpec 前让复核者看一眼）代码完成、
+判别力已实测（J 0.686 / FPR 0.000，§11.19），**默认仍关着**（`review_writes=True` 启用）。
+看那个数时**别看聚合 TPR，看用例级**：四种缺陷形态满分，但「证据为空时编个因果再
+改松目标」0/5 全瞎 —— 判据在那类输入上没有可判之物。**M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
 Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAPI，
 `python -m cowork.cli serve` 起服务，含 AWAITING_HUMAN 的 restore 路径）。
 `CLAUDE.md` 是给 Claude Code 的同类指南，内容更细，两者应保持一致。
