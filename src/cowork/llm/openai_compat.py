@@ -26,6 +26,7 @@ from typing import Any
 
 from ..actions import AgentAction
 from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, Triage
+from ..llm.effort import resolve
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..runtime.detectors import validate_schema
 from ..types import AgentContext, Signal, TaskSpec
@@ -83,6 +84,10 @@ class OpenAICompatBackend:
         repair_rounds: int = 1,
         decompose_system: str | None = None,
         cache_key_supported: bool = False,
+        effort_profile: str | None = None,
+        architect_effort: str = "high",
+        subagent_effort: str = "medium",
+        cheap_effort: str = "off",
     ) -> None:
         import openai  # 延迟导入：跑脚本后端时不需要
 
@@ -109,6 +114,15 @@ class OpenAICompatBackend:
         # 覆盖入口 —— 能换就会有人换，而没有对照组的提示词改动是没法验证的。
         self.decompose_system = decompose_system or DECOMPOSE_SYSTEM
         self.cache_key_supported = cache_key_supported
+        # 推理挡位（§10.3.2）。三档分工对应三个角色：架构师要想清楚、Subagent
+        # 干活、分诊/探查/摘要只判方向。**只有声明过挡位能力的供应商才会真的下发**，
+        # 见 llm/effort.py —— 不认识的字段发出去要么 400、要么被静默忽略。
+        self.effort_profile = effort_profile
+        self.architect_effort = architect_effort
+        self.subagent_effort = subagent_effort
+        self.cheap_effort = cheap_effort
+        # 最近一次解析的说明（「没有 medium 档，取整到 high」这类），CLI 会打出来
+        self.effort_notes: list[str] = []
         # 缓存记账（§11.14）。**先有度量再谈优化** —— 在这之前
         # 「命中率高不高」在这个项目里是没有答案的，任何调整都是猜。
         self.cache_stats = CacheStats()
@@ -120,7 +134,7 @@ class OpenAICompatBackend:
 
     def _call(
         self, *, model: str, system: str, user: str, schema: dict[str, Any],
-        max_tokens: int | None = None,
+        max_tokens: int | None = None, effort: str | None = None,
     ) -> tuple[dict[str, Any], int]:
         import openai
 
@@ -145,6 +159,16 @@ class OpenAICompatBackend:
             "max_tokens": max_tokens or self.max_tokens,
             "messages": messages,
         }
+        if effort is not None:
+            resolved = resolve(self.effort_profile, effort)
+            kwargs.update(resolved.body)
+            if resolved.extra_body:
+                # OpenAI SDK 的非标字段走 extra_body，它会原样并进请求体
+                kwargs["extra_body"] = {**kwargs.get("extra_body", {}),
+                                        **resolved.extra_body}
+            if resolved.note and resolved.note not in self.effort_notes:
+                self.effort_notes.append(resolved.note)
+
         if self.cache_key_supported:
             # 把同一种调用路由到同一个缓存分片。key **从 sys_prompt 自己算**：
             # 它标识的正好就是那段可缓存前缀，改了提示词 key 自动跟着变，
@@ -226,6 +250,7 @@ class OpenAICompatBackend:
             system=SUBAGENT_SYSTEM,
             user=_render_subagent_context(ctx),
             schema=ACTION_SCHEMA,
+            effort=self.subagent_effort,
         )
         return _parse_action(data), tokens
 
@@ -243,6 +268,7 @@ class OpenAICompatBackend:
             system=TRIAGE_SYSTEM,
             user=f"软信号队列：\n{listing}",
             schema=TRIAGE_SCHEMA,
+            effort=self.cheap_effort,
         )
         return (
             [Triage(v["signal_id"], v["verdict"], v.get("reason", "")) for v in data["verdicts"]],
@@ -263,6 +289,7 @@ class OpenAICompatBackend:
             system=ARCHITECT_SYSTEM,
             user=user,
             schema=VERDICT_SCHEMA,
+            effort=self.architect_effort,
         )
         changes: dict[str, Any] = {}
         if data.get("new_goal"):
@@ -291,6 +318,7 @@ class OpenAICompatBackend:
                 "required": ["summary"],
                 "additionalProperties": False,
             },
+            effort=self.cheap_effort,
         )
         return data["summary"], tokens
 
@@ -316,6 +344,7 @@ class OpenAICompatBackend:
                 "required": ["passed", "reason"],
                 "additionalProperties": False,
             },
+            effort=self.architect_effort,
         )
         return data["passed"], data["reason"], tokens
 
@@ -328,6 +357,7 @@ class OpenAICompatBackend:
             user=_render_review_context(root_goal, specs),
             schema=REVIEW_SCHEMA,
             max_tokens=REVIEW_MAX_TOKENS,
+            effort=self.architect_effort,
         )
         return data["sufficient"], list(data["missing"]), tokens
 
@@ -342,6 +372,7 @@ class OpenAICompatBackend:
             # 拆解是这里最长的一次输出：6 个子任务 × 若干条带命令的验收标准，
             # 加上推理型模型自己要烧掉的那部分，4096 实测不够（见 §11.12）。
             max_tokens=DECOMPOSE_MAX_TOKENS,
+            effort=self.architect_effort,
         )
         return _parse_drafts(data), tokens
 
@@ -354,6 +385,7 @@ class OpenAICompatBackend:
             system=PROBE_SYSTEM,
             user=_render_probe_context(spec, ctx, excerpts),
             schema=PROBE_SCHEMA,
+            effort=self.cheap_effort,
         )
         return data["on_track"], data["reason"], tokens
 

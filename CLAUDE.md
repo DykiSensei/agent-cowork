@@ -8,7 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `HumanGate` 的签名、或信号类型时，那份文档也要跟着改** —— 它是对外承诺。
 
 当前：M2–M5 完成，**M7（拆解三角色）收口**，四条出口标准全部达成
-（§11.11 / §11.12 / §11.13）。**下一步 M6（群聊界面层）**。
+（§11.11 / §11.12 / §11.13）。**M6 界面层前端已完成**（`ui/`：React + TS +
+Vite 双模式界面，mock API 驱动，细节见 `ui/README.md`）；**前端发现的四条后端缺口
+已补**（`M6-界面层接口.md` §10）：裁决里的 `suggestion` / `spec_changes`、
+`events` 表、以及 `views.py` 的列表与详情投影。
+**下一步是 M6 服务层**：FastAPI 路由（只剩「调 `cowork.views` + 序列化」）
++ `AWAITING_HUMAN` 的 restore 路径 —— 后者仍未实现，但现场已经落库
+（`views.pending_ruling()` 一次取出 checkpoint / 建议 / 升级原因）。
 
 `policy.py` 的参数全部有实测依据（§11.6 / §11.7 / §11.9 / §11.13），
 改它们之前先跑 `bench` 或 `bench-plan`，别凭感觉调。
@@ -42,7 +48,7 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 264 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 287 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -54,6 +60,8 @@ python -m cowork.cli demo --store pg --docker   # Postgres + Docker 沙箱
 python -m cowork.cli demo --backend deepseek    # 真实模型，9 家见 cli.PROVIDERS
 python -m cowork.cli demo --json                # 每行一条 JSON，末尾一份完整结果
 python -m cowork.cli inspect <db.sqlite>        # 导出某个库的任务与 DecisionRecord
+python -m cowork.cli threads <db.sqlite>        # 按界面层契约导出线程列表（M6）
+python -m cowork.cli threads <db> <task_id>     # 某条线程的详情，含时间线
 python -m cowork.cli composite                  # M4 复合任务：并行 + 冲突检测
 python -m cowork.cli composite --reviewer none  # 退回同模型复核（默认已是 kimi 独立复核）
 
@@ -108,6 +116,7 @@ Bash 工具的控制台会乱码。
 | `COWORK_PG_DSN` | Postgres 连接串，默认 `postgresql://cowork:cowork@localhost:5433/cowork` |
 | `COWORK_LLM_BASE_URL` / `COWORK_LLM_API_KEY` | 指向 LiteLLM 或任意 OpenAI 兼容端点 |
 | `COWORK_ARCHITECT_MODEL` / `COWORK_SUBAGENT_MODEL` / `COWORK_TRIAGE_MODEL` | 覆盖 `cli.py` 的 `PROVIDERS` 默认分工 |
+| `COWORK_ARCHITECT_EFFORT` / `COWORK_SUBAGENT_EFFORT` / `COWORK_CHEAP_EFFORT` | 推理挡位 off/low/medium/high/max，默认 high / medium / off（§11.15） |
 | `COWORK_ENV_FILE` | 换一份 `.env` |
 
 ## 四条架构不变量 —— 改动不能破坏
@@ -250,6 +259,13 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   正文 0 字符。三件事都要做：额度给够（拆解 16000）、**把截断单独认出来**
   （截断的 JSON 报出来是「不是合法 JSON」，照着查会查错方向）、
   **截断后原样重掷而不是带残文修复**（残文回灌只会让它接着写半截 JSON）。
+- **推理挡位是「按文档接上了」，不是「测出来有用」**（§11.15）。统一词表落到各家
+  要取整（deepseek/kimi 没有 medium、gemini/xai 没有 max），取整必须报出来。
+  实测 n=8 只有两格可观测：**deepseek 的关闭**（reasoning 恒 0）和 **kimi 的 max**
+  （区间完全分离）。中间档位区分不出来 —— 别指望调 medium 就一定省钱。
+- **小样本上「区间不重叠」很容易是碰巧**。挡位那组 n=3 时 low 和 high 看着分开了，
+  n=8 就塌了。reasoning 用量本身方差极大（§11.12 量过 2093~12000），
+  这类比较至少要 n=8 才敢说话。
 - **提示词的拼装顺序就是缓存命中率**，而且它是条沉默的不变量：静态（角色提示词 +
   输出约束 + schema）在前、可变（目标 / 上下文 / 执行记录）在后。把 schema 挪进
   user、或在 system 里插个任务 id，**功能测试全绿、命中率直接归零，账单下个月才
@@ -264,6 +280,14 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
 - **`PROVIDERS` 表会无声地过期**：模型下线时端点还在、key 还有效，只有那个 id 没了。
   别读文档判断，跑 `python -m cowork.cli models`。表里 `verified` 记的是
   「本机用真 key 打通过」—— 没打通过不等于错，等于没验证，两者不能混。
+- **事件表是到达序的索引，不是内容的第二份拷贝**。信号和裁决的正文只在各自的
+  表里，`events` 只记「第几条、什么类型、指向谁」。内联正文 = 同一件事两个真相来源。
+  排序靠 `seq`（Store 写入时分配）不靠 `created_at` —— 并行任务的时间戳会撞在
+  同一毫秒上，而顺序一旦不稳定，前端的追加式渲染就错位。
+- **「系统建议」和「系统做了什么」是两个字段**。挂起那条裁决里 `action`/`rationale`
+  记的是兜底行为（挂起），模型的意见在 `suggestion` 里；同理 `spec_changes` 是
+  **已生效的改动**、`suggestion.spec_changes` 是**提议但没被采纳的**。混成一个，
+  界面就分不清「这条验收标准已经加上了」和「系统建议加一条」。
 - **改一处 token 额度时，问一句同一条链上还有谁的输入变长了**。M7 把拆解调用提到
   16000，复核调用留在 4096 —— 而复核要读完整份拆解再推理，实测被吃满、正文 0 字符。
 - **两侧的失败要走同一条路**。`plan()` 第一版只接住生成者的 `ModelError`，
@@ -301,16 +325,19 @@ orchestrator.py §5 状态机 + PROBE 分段（M3）
 plan.py         §12 M4 拓扑分层 / 可分解性 / 静态 scope 冲突 + M5b 结构性复核
                 + M7 isolated_dependency —— 全确定性
 scheduler.py    §12 M4 并行调度 + 产出层冲突检测 + 仲裁
+views.py        M6 的投影层：Store → 界面层契约的形状。无业务逻辑，只有取数拼装
 config.py       .env 加载（环境变量优先，空值=未设置）+ redact，不引 python-dotenv
 demo*.py        M1 单任务 / M4 复合任务的验证场景 —— 「隐藏要求」写在这里
 runtime/        确定性层：bus / sandbox / detectors / loop —— 这里不许出现 LLM 调用
 agent/          architect（唯一写入决策点：中断决策 + 拆解生成 plan()/decompose()；
                 reviewer_backend = 无写权的复核者）/ subagent（薄绑定层）
-llm/            __init__ 是后端协议本身：Backend Protocol + ArchitectVerdict /
+llm/            effort.py 是推理挡位的映射层：统一词表 → 各家参数，不认识就不发
+                __init__ 是后端协议本身：Backend Protocol + ArchitectVerdict /
                 Triage / CacheStats，
                 **给模型加一种能力从这里改**；scripted（确定性测试用）/
                 anthropic_backend / openai_compat / errors
-store/          sqlite（默认）/ postgres（正式）
+store/          sqlite（默认）/ postgres（正式）。两边都在连接时跑幂等 DDL，
+                加字段之后老库能就地升级 —— 仓库里到处是历史 .sqlite
 bench/          §12 M2/M3/M5 实测 —— 只包装不改被测对象，不参与生产链路
                 review_ab.py 是 M7 7.2：12 个带标准答案的拆解 + TPR/FPR/J
                 plan_ab.py  是 M7 7.4：提示词两臂 + 生成-复核循环的指标

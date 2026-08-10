@@ -1,8 +1,11 @@
-# 多 Agent 协作系统 — 开发文档 v0.13
+# 多 Agent 协作系统 — 开发文档 v0.16
 
-> 状态：**M7 完成**；供应商面扩到 9 家、提示词缓存开始记账。下一步 **M6（群聊界面层）**
+> 状态：**M7 完成**；**M6 界面层前端完成**（双模式 UI + mock API，未接真实执行层）。下一步是 M6 的服务层（FastAPI + restore 路径）。
 > 日期：2026-08-10
 >
+> **v0.16 变更**：新增 §11.15 推理挡位 —— 统一词表 off/low/medium/high/max + 各家映射（`llm/effort.py`），架构师 / Subagent / 廉价角色三档可调（`COWORK_*_EFFORT`）；实测只有 deepseek 的关闭与 kimi 的 max 可观测，中间档位区分不出来。
+> **v0.15 变更**：补上 M6 前端发现的四条后端缺口 —— `DecisionRecord` 新增 `suggestion` / `spec_changes`、新增 `events` 表（到达序索引，非内容拷贝）、新增 `views.py` 投影层（`thread_list` / `task_detail` / `pending_ruling`）与 `cli threads`；两个 Store 都加了幂等 DDL，老库能就地升级。
+> **v0.14 变更**：M6 前端落地（`ui/`）：React + TS + Vite 双模式界面（简洁版默认 / 专业版），mock API 以 `demo --json` / `composite --json` 真实输出为数据骨架；§12 M6 四项任务里 6.1 / 6.2 / 6.3（界面侧）完成，6.4 与 restore 路径待服务层；前端新发现的后端缺口补进 `M6-界面层接口.md` §9（挂起时 verdict 未持久化、`spec_changes` 未持久化、缺 `GET /tasks`、日志不落库）。
 > **v0.13 变更**：新增 §11.14 —— `cli.PROVIDERS` 扩到 9 家 + `models` 自检命令；提示词缓存记账（三种字段形状）、Anthropic 显式 `cache_control` 断点、OpenAI `prompt_cache_key`；实测 DeepSeek 命中 74%。
 > **v0.12 变更**：补上 §11.13（生成-复核循环的真实样本 + 拆解提示词对照，37 次拆解 / 0.77M token），风险 #17 关闭、新增 #18；`max_regenerate` 第一次有实测依据；发现「指纹重复」判据在拆解层几乎是死的；修掉复核者失败抛穿 `plan()`、以及复核调用被 4096 截断两个问题。
 > **v0.11 变更**：M7 7.3 / 7.4 / 7.5 收口，新增 §11.12（生成侧实测，5 个目标）；`Backend` 新增 `decompose`，`Architect` 新增 `decompose` / `plan`，`HumanGate` 新增 `review_plan`；`plan.deterministic_review()` 新增 `isolated_dependency` 检查；`policy` 新增 `max_regenerate`；§9 风险 #14 关闭、新增 #16 / #17；DeepSeek 预设换到 v4-flash。
@@ -770,9 +773,10 @@ artifacts    (id, task_id, kind, content_ref, summary)
 | §12 M7 7.4 对照实测 | `bench/plan_ab.py`（提示词两臂 + 循环指标） | ✅ 37 次拆解（§11.13） |
 | §12 M7 7.5 拆解层人的入口 | `HumanGate.review_plan()` + `CliGate` / `AutoApproveGate` | ✅ |
 | §10.3 多供应商（9 家） | `cli.PROVIDERS` + `cli.models` 自检命令 | ⚠️ 2 家本机验证，7 家照文档抄（§11.14） |
-| §12 M6 界面层接口 | `TaskState.to_dict()` + `M6-界面层接口.md` | ⚠️ 契约在，服务层未做 |
+| §12 M6 界面层接口 | `TaskState.to_dict()` + `views.py` + `M6-界面层接口.md` | ⚠️ 前端已落地（`ui/`）、四条缺口已补，**服务层与 restore 未做** |
+| §12 M6 时间线 | `events` 表 + `Orchestrator._event()` / `Scheduler._event()` | ✅ |
 
-264 个测试。不起 Docker / Postgres / LiteLLM 时依赖它们的 14 个 skip，其余照常跑。
+287 个测试。不起 Docker / Postgres / LiteLLM 时依赖它们的 14 个 skip，其余照常跑。
 
 ### 11.2 四条架构不变量已有测试守护
 
@@ -1394,6 +1398,62 @@ token 中位那栏是**没控变量的**，两臂的重生成轮数分布不同�
 
 ---
 
+### 11.15 推理挡位（§10.3.2）
+
+**先说结论：接线按各家文档做完了，但实测只证明了两格。**
+
+#### 各家的参数长得不一样
+
+统一词表 `off / low / medium / high / max`，每家自己取整（`llm/effort.py`）：
+
+| 供应商 | 参数 | 值域 | 能不能关 |
+|---|---|---|---|
+| OpenAI | `reasoning_effort` | none / low / medium / high / xhigh / max | 能 |
+| DeepSeek | `reasoning_effort` | low / high / max（默认 high） | 能，但走 `extra_body.thinking.type=disabled` |
+| Kimi k3 | `reasoning_effort` | low / high / max（默认 max） | **不能** |
+| Gemini | `reasoning_effort` | low / medium / high | 不能 |
+| xAI | `reasoning_effort` | low / medium / high（默认 high） | **不能** |
+| 豆包 | `reasoning_effort` | minimal / low / medium / high | 能（minimal） |
+| 通义 | `enable_thinking` + `thinking_budget` | bool + int，走 extra_body | 能 |
+| 智谱 | `thinking.type` | enabled / disabled | 能 |
+| Anthropic | `output_config.effort` + `thinking` | 自成一套，无 max | 能 |
+
+三条因此必须显式处理，都写进了 `effort.py` 并有测试钉着：
+
+1. **没有统一的中间档**。DeepSeek / Kimi 没有 medium，Gemini / xAI 没有 max。取整**必须看得见** —— `resolve()` 会把「没有 medium 档，取整到 high」这句话报出来，不能让人以为设了 medium 就真是 medium。
+2. **有的家关不掉**。Kimi k3 和 xAI 无论如何都会思考，`off` 在那里如实回落到最低档，不假装关掉了。
+3. **不认识的字段不能发**。没声明挡位能力的供应商（`litellm` 代理）一个字段都不下发 —— 严格端点上是 400，宽松端点上是静默忽略，后者更糟。
+
+角色分工：架构师 `high`、Subagent `medium`、分诊/探查/摘要 `off`（后三个本来就归廉价档，§3.4 / §3.2.1）。三个都能用 `COWORK_ARCHITECT_EFFORT` / `COWORK_SUBAGENT_EFFORT` / `COWORK_CHEAP_EFFORT` 覆盖。
+
+#### 实测：只有两格能观测到效果
+
+同一个提示词 × 各挡位 × n=8，量 `completion_tokens_details.reasoning_tokens`：
+
+| | low | high | max |
+|---|---|---|---|
+| deepseek-v4-flash | 中位 261，区间 [95, 1032] | 389，[59, 637] | 411，[186, 908] |
+| kimi-k3 | 42，[12, 184] | 56，[13, 196] | **432，[319, 642]** |
+
+加上单独测的关闭档：**deepseek 发 `thinking.type=disabled` 后 reasoning 恒为 0（3/3）**。
+
+所以能站住的只有两条：
+
+- **deepseek 的「关」确定生效**（3/3 = 0）；
+- **kimi 的 max 确定生效**（区间 [319,642] 与 low/high 的 [12,196] 完全不重叠）。
+
+**其余档位在这个任务上区分不出来** —— deepseek 的 low/high/max 三个区间大幅重叠，kimi 的 low 和 high 几乎完全重叠。参数被接受（不报错），但对 reasoning 用量没有可测的影响。
+
+这里有一个方法论上的教训值得单记：**n=3 时我以为 low 和 high 分开了**（43–191 vs 430–921，区间不重叠），加到 n=8 就塌了。同一个提示词上 reasoning 用量的方差本来就大（§11.12 已经量过：2093~12000），**「区间不重叠」在小样本上是很容易碰巧出现的**。
+
+#### 这条结论能用到哪
+
+- **不能说这个旋钮坏了**：映射按官方文档做的，参数被接受，off / max 两格可观测。
+- **也不能说它在起作用**：中间档位没有证据。**别指望把架构师从 high 调到 medium 就一定省钱**。
+- **reasoning token 是代理指标**，不等于「想得深不深」；而且只测了一个提示词。要判断挡位对**产出质量**的影响，得跑 §11.13 那种带标准答案的对照 —— 那是另一笔钱。
+
+---
+
 ### 11.14 多供应商与提示词缓存
 
 #### 支持面：一张表 + 一个自检命令
@@ -1714,18 +1774,41 @@ M1.3 实测给这个前置加了两条硬要求（§11.5a / §11.5d）：
 
 **目标**：把 CLI + 结构化日志换成 §2 图里的 ChatSurface。
 
-| # | 任务 | 说明 |
-|---|---|---|
-| 6.1 | 每个 TaskSpec 一个 thread | §7.3 第 1 条 |
-| 6.2 | `DecisionRecord` 渲染为消息 | §7.3 第 2 条，**不折叠、不静默** |
-| 6.3 | 人的介入入口 | 产生 `HUMAN_INTERVENTION` 硬信号，走既有抢占通道 |
-| 6.4 | 执行层 → 界面层的状态同步 | 风险 #6 的正题 |
+| # | 任务 | 说明 | 进度 |
+|---|---|---|---|
+| 6.1 | 每个 TaskSpec 一个 thread | §7.3 第 1 条 | ✅（界面侧） |
+| 6.2 | `DecisionRecord` 渲染为消息 | §7.3 第 2 条，**不折叠、不静默** | ✅（界面侧） |
+| 6.3 | 人的介入入口 | 产生 `HUMAN_INTERVENTION` 硬信号，走既有抢占通道 | ✅（界面侧，mock 202） |
+| 6.4 | 执行层 → 界面层的状态同步 | 风险 #6 的正题 | ⬜ 待服务层 |
 
 **里程碑出口**：人能在界面上看到一次完整的中断-改任务-恢复过程，并能主动打断。
+—— **mock 数据下已达成**：`ui/` 的 React 应用渲染了完整的中断-改任务-恢复叙事
+（含挂起等待的裁决表单），介入与裁决走 `POST /api/tasks/:id/intervene|ruling`
+（mock 返回 202）。接真实执行层还差服务层。
+
+**界面层形态（v0.14 落地）**：React 18 + TS + Vite，**双模式** —— 简洁版（默认，
+亮色、只保留叙事线、术语全部翻译成人话，映射表集中在 `ui/src/copy.ts`）与专业版
+（暗色、全量信息、四档消息重量）。mock API（`ui/mock/plugin.ts`）按 §6 建议契约
+实现，数据骨架是 `demo --json` / `composite --json` 的真实输出。设计定稿依据是
+`ui/prototype.html`（静态视觉稿，先评审后开工的那版）。
 
 **技术提示**：6.3 几乎是免费的——`bus.emit_hard(HUMAN_INTERVENTION)` 已经打通，界面层只需调用。6.4 才是真工作量：需要决定是轮询、SSE 还是 Postgres 的 `LISTEN/NOTIFY`（后者与已有存储层最贴合，无新组件）。
+前端落地时把这个决定推进了一步：单进程服务 + 进程内事件（写入处发事件、
+先落库后发事件、轮询可回源对账），LISTEN/NOTIFY 留到「服务与 runner 分进程」
+时再说。最终定论归服务层。
 
-**接口约定在 `M6-界面层接口.md`**（单独一份，因为读它的人不需要读这份文档的设计论证）。那份文档里有三件这里没有的东西：可用对象的 JSON 形状、界面层不许做的四件事（都是会让架构不变量失效的）、以及**后端还欠什么**——其中最实质的一条是：`AWAITING_HUMAN` 之后人答复了，**谁来重新驱动这个任务目前没有实现**，这大概率是 M6 要补的后端逻辑而不是前端逻辑。
+**接口约定在 `M6-界面层接口.md`**（单独一份，因为读它的人不需要读这份文档的设计论证）。那份文档里有三件这里没有的东西：可用对象的 JSON 形状、界面层不许做的四件事（都是会让架构不变量失效的）、以及**后端还欠什么**——其中最实质的一条是：`AWAITING_HUMAN` 之后人答复了，**谁来重新驱动这个任务目前没有实现**，这大概率是 M6 要补的后端逻辑而不是前端逻辑。前端落地时又新发现四条缺口（挂起时 verdict 未持久化、`spec_changes` 未持久化、缺 `GET /tasks` 列表端点、日志不落库），**现已全部补上**，补法见那份文档的 §10：
+
+| 缺口 | 补法 |
+|---|---|
+| 挂起时 LLM 的建议没落库，「等你拍板」卡片只剩一句升级原因 | `DecisionRecord.suggestion`。挂起那条记录里 `action`/`rationale` 记的是**系统的兜底行为**（挂起），模型的意见必须单独存 |
+| 只存 `new_spec`，spec diff 重建不出来 | `DecisionRecord.spec_changes`；它是**已生效的改动**，与 `suggestion.spec_changes`（提议但未采纳）分开 |
+| 没有列表端点 | `views.thread_list()`。子任务折进父任务；父任务不存在时按 `parent_id` 合成一条 —— 否则复合任务在列表里整个消失 |
+| 日志不落库，时间线无法重建 | `events` 表 + `views.task_detail()` |
+
+`events` 有一个设计选择值得单记：**它是到达顺序的索引，不是内容的第二份拷贝**。信号与裁决的正文仍然只在各自的表里，事件只记「第几条、什么类型、指向谁」——内联正文等于同一件事有两个真相来源。排序靠 `seq`（Store 写入时分配）而不是 `created_at`：并行任务的时间戳会撞在同一毫秒上，顺序一旦不稳定，前端的追加式渲染就会错位。
+
+**这四条都是「界面真写出来才发现」的** —— 契约文档写得再细，也要等有人照着它写一遍才知道哪里不够用。restore 路径仍未实现，但它的前提现在齐了：挂起现场（checkpoint + 建议 + 升级原因）落了库，`views.pending_ruling()` 一次取得出来。
 
 `TaskState.to_dict()` 是为 6.4 的轮询加的：它只放状态、进度、成本和 id，**不内联信号与裁决的正文**——那些会一直变长，而这个对象要能被高频拉取。
 

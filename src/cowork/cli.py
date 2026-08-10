@@ -39,6 +39,7 @@ PROVIDERS: dict[str, dict] = {
         # 的实测数据都出自 deepseek-reasoner，换档后不能直接外推。
         "models": ("deepseek-v4-flash",) * 3,
         "verified": True,
+        "effort": "deepseek",
         "cache": "automatic",   # 命中在 usage.prompt_cache_hit_tokens
     },
     "kimi": {
@@ -46,6 +47,7 @@ PROVIDERS: dict[str, dict] = {
         "key_env": "MOONSHOT_API_KEY",
         "models": ("kimi-k3",) * 3,
         "verified": True,
+        "effort": "kimi",
         "cache": "automatic",
     },
     "anthropic": {
@@ -54,6 +56,7 @@ PROVIDERS: dict[str, dict] = {
         "key_env": "ANTHROPIC_API_KEY",
         "models": ("claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5-20251001"),
         "verified": False,
+        "effort": "anthropic",
         # Anthropic 的缓存是**显式**的：不打 cache_control 断点就一次都不命中
         "cache": "explicit",
     },
@@ -63,6 +66,7 @@ PROVIDERS: dict[str, dict] = {
         # gpt-5.6 三档：sol 旗舰 / terra 均衡 / luna 廉价（官方 models 文档）
         "models": ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"),
         "verified": False,
+        "effort": "openai",
         # 自动，≥1024 token 的前缀才进缓存；支持 prompt_cache_key 稳定路由
         "cache": "automatic",
         "cache_key": True,
@@ -73,6 +77,7 @@ PROVIDERS: dict[str, dict] = {
         "key_env": "GEMINI_API_KEY",
         "models": ("gemini-3.6-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"),
         "verified": False,
+        "effort": "gemini",
         "cache": "automatic",
     },
     "qwen": {
@@ -85,6 +90,7 @@ PROVIDERS: dict[str, dict] = {
         # 对预设来说这比钉死 qwen3.8-max 这种带版本号的更耐放。
         "models": ("qwen-plus", "qwen-max", "qwen-turbo"),
         "verified": False,
+        "effort": "qwen",
         "cache": "automatic",
     },
     "zhipu": {
@@ -92,6 +98,7 @@ PROVIDERS: dict[str, dict] = {
         "key_env": "ZHIPUAI_API_KEY",
         "models": ("glm-5", "glm-5", "glm-5-turbo"),
         "verified": False,
+        "effort": "zhipu",
         "cache": "automatic",
     },
     "xai": {
@@ -99,6 +106,7 @@ PROVIDERS: dict[str, dict] = {
         "key_env": "XAI_API_KEY",
         "models": ("grok-4.5",) * 3,
         "verified": False,
+        "effort": "xai",
         "cache": "automatic",
     },
     "doubao": {
@@ -109,6 +117,7 @@ PROVIDERS: dict[str, dict] = {
         "key_env": "ARK_API_KEY",
         "models": ("doubao-seed-2.0-lite", "doubao-seed-2.0-pro", "doubao-seed-2.0-lite"),
         "verified": False,
+        "effort": "doubao",
         "cache": "automatic",
     },
     "litellm": {
@@ -171,12 +180,20 @@ def _make_backend(kind: str):
 
     p = PROVIDERS[kind]
     sub, arch, triage = p["models"]
+    # 挡位（§10.3.2）。默认「架构师 high / Subagent medium / 廉价三件套 off」——
+    # 这个分工不是拍的：架构师那几次调用决定整条链的走向，Subagent 是在干活，
+    # 而分诊、探查、摘要只判方向（§3.4 / §3.2.1 早就把它们归为廉价档）。
+    arch_effort = os.environ.get("COWORK_ARCHITECT_EFFORT", "high")
+    sub_effort = os.environ.get("COWORK_SUBAGENT_EFFORT", "medium")
+    cheap_effort = os.environ.get("COWORK_CHEAP_EFFORT", "off")
     if kind == "anthropic":
         from .llm.anthropic_backend import AnthropicBackend
 
         return AnthropicBackend(
             architect_model=os.environ.get("COWORK_ARCHITECT_MODEL", arch),
             triage_model=os.environ.get("COWORK_TRIAGE_MODEL", triage),
+            effort=arch_effort,
+            subagent_effort=sub_effort,
         )
 
     from .llm.openai_compat import OpenAICompatBackend
@@ -192,6 +209,12 @@ def _make_backend(kind: str):
         # 只有明确支持的一家才带 prompt_cache_key：不认识的字段在严格端点上
         # 会 400，为了一点点路由收益把整条链打挂不划算
         cache_key_supported=bool(p.get("cache_key")),
+        # 没声明 effort 方案的（litellm 这种代理）不下发任何思考参数 ——
+        # 代理后面是谁不知道，发过去可能 400 也可能被静默吃掉
+        effort_profile=p.get("effort"),
+        architect_effort=arch_effort,
+        subagent_effort=sub_effort,
+        cheap_effort=cheap_effort,
     )
 
 
@@ -362,6 +385,35 @@ def _bench(args: argparse.Namespace) -> int:
     )
     print(f"\n记录写入 {out}", file=sys.stderr)
     return _bench_report(argparse.Namespace(records=str(out), json=False))
+
+
+def _threads(args: argparse.Namespace) -> int:
+    """把某个库里的线程按界面层契约导出（M6 §9 第 3 / 4 条）。
+
+    存在的理由：界面层的 mock 数据现在是手写的，而手写的 mock 会和真实形状
+    慢慢分叉。这个命令直接吐 `views.thread_list()` / `views.task_detail()`
+    的结果 —— 拿它生成 fixtures，形状就永远是对的。
+    """
+    from . import views
+    from .store import SqliteStore
+
+    store = SqliteStore(args.db)
+    if args.task_id:
+        detail = views.task_detail(store, args.task_id)
+        if detail is None:
+            print(f"没有这个任务: {args.task_id}", file=sys.stderr)
+            return 1
+        print(json.dumps(detail, ensure_ascii=False, indent=2))
+        return 0
+
+    rows = views.thread_list(store)
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    for r in rows:
+        mark = "复合" if r["composite"] else "单任务"
+        print(f"{r['status']:<15}{mark:<6}{r['task_id']:<22}{r['title']}")
+    return 0
 
 
 def _models(args: argparse.Namespace) -> int:
@@ -687,6 +739,13 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("provider", nargs="?", choices=PROVIDER_NAMES, default=None)
     m.add_argument("--timeout", type=float, default=15.0)
     m.set_defaults(func=_models)
+
+    th = sub.add_parser("threads", help="按界面层契约导出线程（M6）")
+    th.add_argument("db", help="SQLite 库路径")
+    th.add_argument("task_id", nargs="?", default=None,
+                    help="给了就出这条线程的详情（含时间线），不给就出列表")
+    th.add_argument("--json", action="store_true", help="列表也用 JSON")
+    th.set_defaults(func=_threads)
 
     i = sub.add_parser("inspect", help="导出某个 SQLite 库里的任务与决策")
     i.add_argument("db")

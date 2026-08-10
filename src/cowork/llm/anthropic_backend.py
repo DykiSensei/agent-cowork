@@ -424,6 +424,12 @@ def _render_probe_context(spec: TaskSpec, ctx: AgentContext, excerpts: dict[str,
     return "\n\n".join(parts)
 
 
+# 统一词表 → Anthropic 的 output_config.effort。
+# max 这一档 Anthropic 没有，向下并到 high —— 与 effort.py 的「够不着就取最近的」
+# 同一个原则，只是这里方向相反（它没有更高的可取）。
+_ANTHROPIC_EFFORT = {"low": "low", "medium": "medium", "high": "high", "max": "high"}
+
+
 class AnthropicBackend:
     name = "anthropic"
 
@@ -432,7 +438,12 @@ class AnthropicBackend:
         *,
         architect_model: str = "claude-opus-5",
         triage_model: str = "claude-haiku-4-5",
+        # 挡位用统一词表（off/low/medium/high/max，见 llm/effort.py），
+        # 在 _call 里翻成 Anthropic 自己的 output_config.effort。
+        # 分成两个是因为**两个角色的需求本来就不同**：架构师要想清楚，
+        # Subagent 是在干活 —— 让它们共用一个挡位等于承认这件事无所谓。
         effort: str = "high",
+        subagent_effort: str = "medium",
         max_tokens: int = 16000,
         base_url: str | None = None,
         api_key: str | None = None,
@@ -450,6 +461,7 @@ class AnthropicBackend:
         self.architect_model = architect_model
         self.triage_model = triage_model
         self.effort = effort
+        self.subagent_effort = subagent_effort
         self.max_tokens = max_tokens
         self.cache_stats = CacheStats()
 
@@ -482,9 +494,13 @@ class AnthropicBackend:
             "messages": [{"role": "user", "content": user}],
             "output_config": {"format": {"type": "json_schema", "schema": schema}},
         }
-        if thinking:
+        # 统一词表里的 off 在这里就是「不发 thinking」；其余原样落到
+        # output_config.effort —— Anthropic 的档位名和我们的词表恰好同名，
+        # 但**这是巧合不是约定**，所以仍然经过一次显式映射。
+        level = effort or self.effort
+        if thinking and level != "off":
             kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["output_config"]["effort"] = effort or self.effort
+            kwargs["output_config"]["effort"] = _ANTHROPIC_EFFORT.get(level, level)
 
         import anthropic
 
@@ -520,7 +536,7 @@ class AnthropicBackend:
             system=SUBAGENT_SYSTEM,
             user=_render_subagent_context(ctx),
             schema=ACTION_SCHEMA,
-            effort="medium",
+            effort=self.subagent_effort,
         )
         return _parse_action(data), tokens
 
