@@ -13,8 +13,11 @@
 > 停在 step 边界、**不问架构师**、产出保留，终局 `ABANDONED` 并留 `decider=HUMAN` 的裁决。
 > ③`serve` 绑定地址**硬拦**（`server/bind.py`）：非回环直接拒绝启动，要过必须
 > `--i-know-its-exposed`。④补上接口文档 §9 欠的两条：人的原话落成 root 线程第一条
-> `human` 事件，`views` 增 `root_goal`、复合行标题改用它。⑤删掉死参数
-> `step_soft_deadline_s`（从未有代码读它，bench 却在给它出建议值）。
+> `human` 事件，`views` 增 `root_goal`、复合行标题改用它。⑤删掉**三个死参数**：
+> `step_soft_deadline_s`（从无代码读它，bench 却在给它出建议值）、
+> `soft_queue_threshold` / `soft_interval_s`（有读者 `should_consume_soft()`，
+> 但那个方法本身没有任何调用方 —— 连方法一起删）。**测量全部保留在
+> `bench/analyze.py`：删参数不删证据。**
 > ⑥README 增「这个原型不适合做什么」。测试 335 → 348。
 > **v0.20 变更**：新增 §11.17（服务层与 restore 的设计记录）；§11.1 对照表、路线图、风险 #6 三处状态同步为「M6 已收口」；修掉设置页写 `.env` 的换行注入（一次 PUT 能写任意环境变量，含把 base_url 指向别处）。
 > **v0.19 变更**：M6 服务层 —— `src/cowork/server/`（FastAPI，单进程，runner 在线程里）；**restore 路径实现**：`Orchestrator.restore()` + `resume_with_ruling()` + `Architect.apply_human_ruling()`（人的裁决仍走架构师那扇门）+ `prime_history()`（指纹连续计数跨 restore 存活，从存储重算）；run() 拆出 `_drive()` 供两条路径共用；`Scheduler` 加 registry（活 Orchestrator 注册表，介入路由用）；状态同步定为「`TapStore` 写入处发事件 + SSE 通知 + 前端回源重拉」；设置页端点落地 .env（key 只写不读）；`cowork serve` 子命令；测试 335 个（新增 `test_server` 5 个，含 restore 端到端：挂起 → HTTP 裁决 → 恢复 → COMPLETED）。
@@ -933,7 +936,7 @@ python -m cowork.cli bench-report bench_runs.jsonl
 | `max_rebase` | 3 | **2** | 完成率 REBASE 2 次 41%、3 次 33%、4 次 0%。第 4 次 REBASE 没救回过任何一次运行 |
 | `budget_escalation_ratio` | 0.8 | **0.6** | 0.8 越线后中位只剩 0 token 就到终局，等于事后通知；0.6 提前约 4.8k token，误升级只多 1 次 |
 | ~~`step_soft_deadline_s`~~ | 60 | **已删除** | 当时定到 30s（step 耗时 p50 1.65s / p95 3.11s / p99 5.90s / max 10.79s，n=651）。但 `loop.py` 从未实现切段，这个值一天都没生效过 —— v0.20 删掉参数，保留测量（`analyze.interrupt_latency()`）|
-| `soft_queue_threshold` / `soft_interval_s` | 5 / 30s | **测不出来** | 见下 |
+| ~~`soft_queue_threshold` / `soft_interval_s`~~ | 5 / 30s | **已删除** | 测不出来，因为调用路径上是死的（见下）。v0.21 连同那个没人叫的方法一起删 |
 
 **最重要的结论不是这些数字，是三件比数字更硬的事**：
 
@@ -1709,9 +1712,15 @@ store 级的（不跑复合任务）、异常被合理地吞掉了。
 参数更坏** —— 读的人会以为切段是有的。参数删除，测量保留为
 `analyze.interrupt_latency()`（它证伪了风险 #1，仍然有用）。
 
-同类还剩 `soft_queue_threshold` / `soft_interval_s`：它们有读者
+同类的 `soft_queue_threshold` / `soft_interval_s` **一并删除**：它们有读者
 （`Architect.should_consume_soft()`），但那个方法没有任何调用方 —— orchestrator
 在每个检查点无条件消费。**「有代码读它」不等于「它在起作用」，要一路问到调用链的头。**
+这一条比前一条更值得记：`step_soft_deadline_s` 一 grep 就知道是死的，而这两个
+grep 出来有引用、看着是活的，要再走一跳才发现那个方法自己没人叫。
+
+三处删的都只是**参数**，测量全部保留在 `bench/analyze.py`（`interrupt_latency()` /
+`soft_signal_economics()`）。**删参数不删证据** —— 那些数仍然回答着「要不要做
+soft deadline 切段」「软信号值不值得批处理」，只是不再假装已经有人在用它们。
 
 ---
 

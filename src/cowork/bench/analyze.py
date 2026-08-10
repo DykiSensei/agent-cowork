@@ -240,7 +240,10 @@ def rebase_drift(recs: list[dict]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# 4. soft_queue_threshold / soft_interval_s
+# 4. 软信号与分诊的经济性
+#    原来这一节是给 soft_queue_threshold / soft_interval_s 出建议值的，
+#    那两个参数已删（唯一的读者没有调用方）。测量留着：它回答的是
+#    「软信号值不值得做批处理」，而结论恰恰是不值得。
 # --------------------------------------------------------------------------- #
 
 
@@ -248,7 +251,7 @@ def soft_signal_economics(recs: list[dict]) -> dict[str, Any]:
     """分诊调用频次 × 单次成本。
 
     软信号由 Subagent 自报（L1），真实模型愿不愿意报是个经验问题 ——
-    如果实测里根本没有软信号，这两个参数就无从标定，结论只能是「样本不足」，
+    如果实测里根本没有软信号，批处理就无从谈起，结论只能是「样本不足」，
     不能编一个数出来。
     """
     triage = [c for r in recs for c in r["calls"] if c["kind"] == "triage"]
@@ -265,10 +268,6 @@ def soft_signal_economics(recs: list[dict]) -> dict[str, Any]:
         "triage_calls": len(triage),
         "triage_tokens": _dist([c["tokens"] for c in triage]),
         "triage_batch_sizes": sorted(c.get("batch", 0) for c in triage),
-        "current": {
-            "soft_queue_threshold": DEFAULT_POLICY.soft_queue_threshold,
-            "soft_interval_s": DEFAULT_POLICY.soft_interval_s,
-        },
     }
 
 
@@ -555,7 +554,7 @@ def render(summary: dict[str, Any]) -> str:
     w(f"  当前值 {r['current']}")
 
     sf = summary["soft_signals"]
-    w("\n## soft_queue_threshold / soft_interval_s")
+    w("\n## 软信号与分诊的经济性")
     w(f"  {sf['runs_with_soft_signal']}/{sf['runs']} 次运行出现过软信号，"
       f"共 {sf['soft_signals_total']} 条 {sf['by_type']}")
     w(f"  分诊调用 {sf['triage_calls']} 次，批大小 {sf['triage_batch_sizes']}，"

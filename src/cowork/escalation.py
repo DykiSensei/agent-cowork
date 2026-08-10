@@ -127,7 +127,8 @@ def deterministic_plan_escalation(
     # 原因是结构性的 —— 执行层的指纹看的是「同一个失败信号原样重现」，
     # 而这里复核者每轮看到的是**一份不同的拆解**，措辞必然变。
     # 要让它有判别力得先把 findings 归一化成语义键，那是另一件事；
-    # 在那之前别把它当主力（同 §11.6c 对 soft_queue_threshold 的处置）。
+    # 在那之前别把它当主力（同 §11.6c 对软信号批处理阈值的处置：测不出来就
+    # 别编一个数，最后那两个参数直接删了）。
     streak = 1
     for past in reversed(fingerprints[:-1]):
         if past != fingerprints[-1]:

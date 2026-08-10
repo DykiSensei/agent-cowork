@@ -310,8 +310,10 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   **不调 `decide()`**。边界两条：在飞的 step 会跑完、产出保留（停的是循环不是回滚）。
   `ruling(ABANDON)` 管挂起的、`cancel` 管在跑的，合起来才覆盖「我要它停」。
 - **「有代码读它」不等于「它在起作用」**。死参数要一路问到调用链的头：
-  `step_soft_deadline_s` 无人读（已删），而 `soft_queue_threshold` / `soft_interval_s`
-  有读者 `Architect.should_consume_soft()` —— 但那个方法没有任何调用方。
+  `step_soft_deadline_s` 一 grep 就知道没人读，而 `soft_queue_threshold` /
+  `soft_interval_s` grep 出来**有**引用（`Architect.should_consume_soft()`），
+  再走一跳才发现那个方法自己没有调用方。三个已全部删除（§11.18），
+  但**测量都留在 `bench/analyze.py`** —— 删参数不删证据。
 - **事件表是到达序的索引，不是内容的第二份拷贝**。信号和裁决的正文只在各自的
   表里，`events` 只记「第几条、什么类型、指向谁」。内联正文 = 同一件事两个真相来源。
   排序靠 `seq`（Store 写入时分配）不靠 `created_at` —— 并行任务的时间戳会撞在

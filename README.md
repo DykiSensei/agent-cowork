@@ -211,7 +211,7 @@ Kimi（`kimi-k3`）都跑通了完整链路，产出的 `solution.py` 经独立�
 且唯一无人复核的组件是同一个 —— 这让 M5 更紧迫。
 
 **3. 实测的一半价值是告诉你哪些参数不该存在。**
-`soft_queue_threshold` / `soft_interval_s` 在当前调用路径上是死的：
+`soft_queue_threshold` / `soft_interval_s` 在当前调用路径上是死的（**v0.21 已删**）：
 `Architect.should_consume_soft()` 没有任何调用方，而且软信号极稀疏
 （75 次运行 20 条，队列深度最大 2，阈值 5 永远达不到）。`step_soft_deadline_s`
 同样没有代码读它。结论是「接上或删掉」，不是编一个数 ——
@@ -595,6 +595,6 @@ MAST 数据里 42% 的失败来自规格不清，恰好发生在这一层 ——
 | 拆解质量没有无偏度量 | 风险 #18：「复核一轮放行率」会被拆解粒度带偏，要真比质量得看派发执行后的产出（§11.13） |
 | 7 家供应商未验证 | 只有 `deepseek` / `kimi` 在本机用真 key 打通过（`PROVIDERS` 表里 `verified=True` 记的就是这件事）。`openai` / `gemini` / `qwen` / `zhipu` / `xai` / `doubao` / `anthropic` 的预设是照文档抄的 —— **没验证不等于错，等于没验证**。有 key 就跑 `cowork.cli models` 对一遍（§11.14）。注意模型下线时端点还在、key 还有效，只有那个 id 没了，所以别读文档判断 |
 | 界面上没接的三处 | 选中 `MODIFY_TASK` 时的 spec 编辑区、子任务 thread 跳转、复合任务介入时路由到哪个子任务（`ProStream.tsx` 里都标着） |
-| M2 的遗留 | `step_soft_deadline_s` 已删（v0.20）。还剩 `soft_queue_threshold` / `soft_interval_s`：它们只被 `Architect.should_consume_soft()` 读，而那个方法没有任何调用方（orchestrator 在每个检查点无条件消费）—— 同样是接上还是删掉 |
+| ~~M2 的遗留~~ | **已了结**：三个死参数全部删除（v0.21）。`step_soft_deadline_s` 无人读；`soft_queue_threshold` / `soft_interval_s` 有读者但那个方法没有调用方。三处的测量都保留在 `bench/analyze.py` 里 —— 删的是参数，不是证据 |
 | PROBE 的收益 | 27 次探查 0 次命中。要标定收益，需要一个会可靠漂移的 `GENERATIVE` 任务 |
 | `e3_scope_bait` 任务 | 没按设计触发 `SCOPE_VIOLATION`，需重新设计（开发文档 §11.6g） |

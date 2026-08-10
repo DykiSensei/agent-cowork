@@ -305,7 +305,6 @@ class Architect:
         # §2.3 的「唯一写入决策点」因此不变。给它写权 = 两个写入点 = 不变量破了。
         self.reviewer_backend = reviewer_backend
         self.tokens_used = 0
-        self._last_soft_consume = time.monotonic()
         # 每个任务试过什么。M2 归因发现架构师**每次都在「第一次见到这个问题」的
         # 状态下决策** —— decide_interrupt 的输入里既没有前几轮的裁决，也没有
         # interrupt_count。这直接解释了实测里的 CONTINUE → CONTINUE → CONTINUE
@@ -313,19 +312,16 @@ class Architect:
         self._history: dict[str, list[dict]] = {}
 
     # -- 软信号消费（§3.4）-------------------------------------------------- #
-
-    def should_consume_soft(self, queue_depth: int, step_boundary: bool) -> bool:
-        if queue_depth == 0:
-            return False
-        return (
-            step_boundary
-            or queue_depth >= self.policy.soft_queue_threshold
-            or time.monotonic() - self._last_soft_consume > self.policy.soft_interval_s
-        )
+    #
+    # 这里曾有 `should_consume_soft(queue_depth, step_boundary)`：按队列深度或时间
+    # 间隔决定「攒够了再批量分诊」。**已删除** —— 它从来没有任何调用方，
+    # orchestrator 在每个检查点无条件调 `consume_soft()`。
+    # M2 实测也说明不值得接上：软信号极稀疏（75 次运行 13 次出现、共 20 条、
+    # 队列深度最大 2，阈值 5 永远达不到），分诊总成本占 0.3%。为 0.3% 做批处理
+    # 优化，省下的还不够写它的代码。真要做批处理时从 §11.6c 那组数起步。
 
     def consume_soft(self, signals: list[Signal]) -> list[Signal]:
         """批量廉价评估，返回需要升级到主模型的那些。"""
-        self._last_soft_consume = time.monotonic()
         if not signals:
             return []
 

@@ -10,7 +10,7 @@ Runtime、Orchestrator、Architect 一行都不动。理由在包的 __init__ �
     checkpoint_seconds  -> checkpoint 写入开销占比（证伪了风险 #1 的前提）
     decisions[].score   -> complexity_threshold（ROC）
     rebase_count/intent -> max_rebase（连续 REBASE 后的偏离度）
-    architect_calls     -> soft_queue_threshold / soft_interval_s（分诊频次 × 单次成本）
+    architect_calls     -> 分诊频次 × 单次成本（软信号值不值得做批处理）
     interrupts/status   -> max_interrupts（中断次数 vs 成功率）
     task_trace          -> budget_escalation_ratio（触发点距实际超支的距离）
 """
