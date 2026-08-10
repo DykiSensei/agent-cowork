@@ -69,6 +69,36 @@ class TestDeterministicReview(unittest.TestCase):
         )
         self.assertIn("invalid_graph", {i.kind for i in issues})
 
+    def test_dependency_across_isolated_directories_is_flagged(self):
+        """一人一个目录能满足「scope 不相交」，代价是运行时 import 不到（§11.12）。"""
+        issues = deterministic_review(GOAL, [
+            spec("a", scope=("subtask1/parser.py",)),
+            spec("b", scope=("subtask2/cli.py",), deps=["a"]),
+        ])
+        self.assertIn("isolated_dependency", {i.kind for i in issues})
+
+    def test_same_directory_dependency_is_fine(self):
+        issues = deterministic_review(GOAL, [
+            spec("a", scope=("src/parser.py",)),
+            spec("b", scope=("src/cli.py",), deps=["a"]),
+        ])
+        self.assertNotIn("isolated_dependency", {i.kind for i in issues})
+
+    def test_root_level_outputs_are_not_flagged(self):
+        """产出在根目录时依赖方 import 得到 —— 判据要窄，宁可漏报也别乱报。"""
+        issues = deterministic_review(GOAL, [
+            spec("a", scope=("parser.py",)),
+            spec("b", scope=("cli.py",), deps=["a"]),
+        ])
+        self.assertNotIn("isolated_dependency", {i.kind for i in issues})
+
+    def test_mixed_scope_is_not_flagged(self):
+        issues = deterministic_review(GOAL, [
+            spec("a", scope=("pkg/parser.py", "setup.py")),
+            spec("b", scope=("other/cli.py",), deps=["a"]),
+        ])
+        self.assertNotIn("isolated_dependency", {i.kind for i in issues})
+
     def test_pure_chain_is_flagged(self):
         """拆了等于没拆 —— §1.4 第三条，顺序依赖强时多 agent 最差 −70%。"""
         issues = deterministic_review(
@@ -115,6 +145,93 @@ class TestReviewWiring(unittest.TestCase):
         self.assertFalse(result.sufficient)
         self.assertEqual(result.missing, ["没有人负责格式化"])
         self.assertFalse(result.clean)
+
+
+class TestIndependentReviewer(unittest.TestCase):
+    """复核者换一个后端（§12 M7 7.1）。
+
+    这些用例钉的是**权限边界和记账**，不是判别力 —— 后者只能用真实模型测，
+    见 `cowork.bench.review_ab` 和 §11.11。
+    """
+
+    def setUp(self):
+        self.store = SqliteStore()
+        self.specs = [spec("a", scope=("a.py",)), spec("b", scope=("b.py",))]
+
+    def test_reviewer_backend_is_the_one_asked(self):
+        base = ScriptedBackend({}, review_for=lambda g, s: (True, []))
+        reviewer = ScriptedBackend({}, review_for=lambda g, s: (False, ["缺了格式化"]))
+        arch = Architect(base, self.store, policy=Policy(), reviewer_backend=reviewer)
+
+        result = arch.review_decomposition(GOAL, self.specs)
+
+        self.assertEqual(base.review_calls, 0, "拆解者不该再自己复核一遍")
+        self.assertEqual(reviewer.review_calls, 1)
+        self.assertFalse(result.sufficient)
+        self.assertTrue(result.independent)
+
+    def test_without_reviewer_backend_it_is_the_generator_itself(self):
+        """默认路径不变 —— M5b 的形态就是同模型复核。"""
+        base = ScriptedBackend({}, review_for=lambda g, s: (True, []))
+        arch = Architect(base, self.store, policy=Policy())
+
+        result = arch.review_decomposition(GOAL, self.specs)
+
+        self.assertEqual(base.review_calls, 1)
+        self.assertFalse(result.independent)
+        self.assertEqual(result.reviewer, base.name)
+
+    def test_reviewer_has_no_write_path(self):
+        """复核者只在复核里被问；中断决策仍然只走 backend（§2.3 唯一写入决策点）。
+
+        复核者能改 spec 的那一刻就有两个写入点了，M7 的角色表也就不成立。
+        """
+        from cowork.llm import ArchitectVerdict
+        from cowork.types import AgentContext, TaskState
+
+        base = ScriptedBackend(
+            {},
+            verdict_for=lambda s, sig: ArchitectVerdict(
+                action="CONTINUE", rationale="base 决定的", complexity_score=0.1
+            ),
+        )
+        reviewer = ScriptedBackend({}, review_for=lambda g, s: (False, ["x"]))
+        arch = Architect(base, self.store, policy=Policy(), reviewer_backend=reviewer)
+
+        target = self.specs[0]
+        state = TaskState(spec=target)
+        record = arch.decide(state, [], AgentContext(task_spec=target))
+
+        self.assertEqual(record.rationale, "base 决定的")
+        self.assertEqual(reviewer.review_calls, 0, "复核者不该参与中断决策")
+
+    def test_structural_failure_still_skips_the_paid_review(self):
+        """结构坏了，换谁复核都不该花那次调用。"""
+        reviewer = ScriptedBackend({}, review_for=lambda g, s: (True, []))
+        arch = Architect(
+            ScriptedBackend({}), self.store, policy=Policy(), reviewer_backend=reviewer
+        )
+
+        result = arch.review_decomposition(GOAL, [spec("a", deps=["ghost"])])
+
+        self.assertEqual(reviewer.review_calls, 0)
+        self.assertEqual(result.reviewer, "deterministic")
+        self.assertTrue(result.independent, "独立与否是配置事实，不因跳过而改变")
+
+    def test_scheduler_passes_the_reviewer_through(self):
+        base = demo_composite.ScriptedComposite(review_for=lambda g, s: (True, []))
+        reviewer = ScriptedBackend({}, review_for=lambda g, s: (False, ["缺了校验"]))
+        sched, ws = demo_composite.build(
+            backend=base, reviewer_backend=reviewer, log=lambda _m: None
+        )
+        self.addCleanup(shutil.rmtree, ws, True)
+
+        sched.run(max_cycles=2)
+
+        self.assertEqual(base.review_calls, 0)
+        self.assertEqual(reviewer.review_calls, 1)
+        self.assertTrue(sched.review.independent)
+        self.assertIn("independent", sched.review.to_dict())
 
 
 class TestReviewInScheduler(unittest.TestCase):

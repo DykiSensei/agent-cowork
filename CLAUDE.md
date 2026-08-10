@@ -5,24 +5,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 多 Agent 协作系统原型。**设计文档是主线，代码是它的实现** —— 动代码前先看
 `多Agent协作系统-开发文档.md`，动完之后回去更新它。
 
-当前：M2–M5 已完成，**下一步 M7（拆解三角色：生成者 / 复核者 / 人）**，方案已定稿在文档 §12 M7。
-`policy.py` 的参数已有实测依据（§11.6 / §11.7 / §11.9），改它们之前先跑 `bench`，别凭感觉调。
+当前：M2–M5 完成，**M7（拆解三角色）7.1–7.5 全部实现**（§11.11 / §11.12）。
+**下一步 M6（群聊界面层）**，或先补风险 #17 的样本。
 
-M7 的三条要点，动手前先看 §12 M7 全文：
+`policy.py` 的参数已有实测依据（§11.6 / §11.7 / §11.9），改它们之前先跑 `bench`，别凭感觉调。
+唯一没有实测依据的是 `max_regenerate`（结构性地跟 `max_rebase` 取同值）。
+
+拆解这一层的要点，动代码前先看 §12 M7 / §11.11 / §11.12：
 
 - **只有生成者有写权**。复核者是顾问、人是仲裁者 —— §2.3 的「唯一写入决策点」不变。
-  给复核者驳回或改写 spec 的能力 = 两个写入点 = 不变量破了。
-- **拆解层和执行层的循环同构**（生成→复核→重生成≤N→升级给人 ≙ 派发→验收→REBASE→超上限→升级给人）。
-  复用 `escalation.py` / `policy.py`，**发现自己在写平行逻辑就是方向错了**。
-- **先做 7.1+7.2（跨模型复核对照）再建生成侧**：它验证整个阶段的前提「独立复核有没有用」。
-  前提不成立的话生成侧要换设计。
+  给复核者驳回或改写 spec 的能力 = 两个写入点 = 不变量破了（`test_decompose` 钉着）。
+- **拆解层和执行层的循环同构**，判据因此放在 `escalation.deterministic_plan_escalation()`
+  而不是架构师内部：生成→复核→重生成≤N→升级给人 ≙ 派发→验收→REBASE→超上限→升级给人。
+  **发现自己在写平行逻辑就是方向错了。**
+- **模型只填它有权决定的字段**：goal / 验收标准 / scope / 依赖。sandbox、工具白名单、
+  各类上限走 `SpecTemplate` —— 让被隔离方给自己配隔离边界是没有意义的。
+- **两层复核都不问「拆出来的东西合起来能不能跑」**（风险 #16）。结构层查交集与环，
+  语义层查覆盖。真实生成的拆解已经栽过一次：模型用「一人一个子目录」满足 scope 不相交，
+  依赖方 import 不到被依赖方。`isolated_dependency` 只堵了这一种形态。
+- **重生成路径没有真实样本**（风险 #17）：5 个目标全部一轮通过复核。
+  循环、上限、意见回喂只有脚本后端测试覆盖。**「测试全绿」和「这条路径被真实跑过」是两件事。**
+- 复核者默认 `kimi`（`cli.DEFAULT_REVIEWER`）：§11.11 实测 J 0.98 vs deepseek 0.66，
+  且后者在同一份输入上会翻面。`--reviewer none` 退回同模型复核。
 
 ## 命令
 
 ```bash
 docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
-                                          # 不起的话 14 个测试会 skip（不是失败）
-python -m unittest discover -s tests -t . # 174 个测试。项目用 unittest，没引 pytest
+                                          # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
+                                          # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
+                                          # 与这两个容器无关 —— 三样都缺就是 14 个 skip
+python -m unittest discover -s tests -t . # 233 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -34,13 +47,40 @@ python -m cowork.cli demo --backend deepseek    # 真实模型（也可 kimi / a
 python -m cowork.cli demo --json                # 每行一条 JSON，末尾一份完整结果
 python -m cowork.cli inspect <db.sqlite>        # 导出某个库的任务与 DecisionRecord
 python -m cowork.cli composite                  # M4 复合任务：并行 + 冲突检测
+python -m cowork.cli composite --reviewer none  # 退回同模型复核（默认已是 kimi 独立复核）
+
+python -m cowork.cli plan "<一句话目标>"          # M7：拆解 + 复核，不执行（约 10-35k token）
+python -m cowork.cli plan "<目标>" --run          # 一路跑到产出：拆解 → 分层 → 并行执行
+python -m cowork.cli plan "<目标>" --gate cli     # 升级给人时自己在终端拍板
 
 python -m cowork.cli bench --backend deepseek --repeat 5  # M2 跑批，约 25 分钟 / 1.6M token
 python -m cowork.cli bench --tasks PROBE_AB --repeat 5    # M3 的 PROBE vs TRUST 对照
 python -m cowork.cli bench-report bench_runs.jsonl        # 只出报告，不重跑
+
+python -m cowork.cli bench-review --repeat 5              # M7 7.2 跨模型复核，约 25 分钟 / 0.2M token
+python -m cowork.cli bench-review --cases complete        # 只跑负例（id / 家族名 / 缺陷形态都收）
+python -m cowork.cli bench-review-report review_ab.jsonl  # 只出报告，不重跑
 ```
 
 `bench` 要花真钱和 25 分钟，跑之前先用 `--tasks p1_word_count --repeat 1` 冒烟。
+`--tasks` 收任务 id 或**类别**（`bench/tasks.py` 的 `default_tasks()`）：
+`PASS` / `ONE_REBASE` / `MULTI_REBASE` / `ESCALATE` 是 M2 的四类，`PROBE_AB` 是 M3 的。
+
+仓库根的 `*.jsonl` 是历次跑批的原始记录 —— `policy.py` 的参数依据全在里面，
+`bench-report <文件>` 随时能重出报告，**不用重跑也不用再花钱**：
+
+| 文件 | 是什么 |
+|---|---|
+| `bench_runs.jsonl` | M2 全量 75 次（四类 × 5 次），§11.6 的底稿 |
+| `probe_runs.jsonl` | M3 的 PROBE vs TRUST 三 arm 各 5 次（§11.7） |
+| `m5a_after.jsonl` / `m5a_regression.jsonl` | M5a **第一版**提示词的不可解侧 / 可解侧 —— 就是「无差别放弃」那次回归 |
+| `m5a_v2_escalate.jsonl` / `m5a_v2_solvable.jsonl` | 重写后同口径的两侧（§11.9c，Youden J 0.60） |
+| `review_ab.jsonl` | M7 7.2 的**最终**数据（§11.11），= 下面两个 v2 文件合并 |
+| `review_ab_positives_v2.jsonl` / `review_ab_negatives_v2.jsonl` | 返工后的正例 90 次 / 负例 30 次 |
+| `review_ab_v1.jsonl` | 用例表返工**前**的 120 次。别删 —— 它是「负例必须真的完整」那条坑的证据 |
+
+M5a 那四个文件是「改提示词必须两侧都测」的现成对照组，改停止判据时拿它做基线。
+`review_ab*` 同理，改复核提示词或换复核模型时拿它做基线。
 
 测试不需要 `PYTHONPATH` —— `tests/__init__.py` 负责挂 `src/` 并载入 `.env`
 （所以打真实供应商的用例能自己拿到 key）。CLI 未 `pip install -e .` 时才需要
@@ -106,6 +146,13 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   `VALIDATION_FAILED` + `payload.origin="architect_probe"`，汇进上面那条既有链路。
 - **复合任务多一层**：`Scheduler` 按 `plan.build_plan()` 分层，层内并行跑多个
   `Orchestrator`。冲突检测在层与层之间做，仲裁仍然走 `Architect.decide()`。
+  开跑前还有一道拆解复核（M5b，见上面 M7 那节）：没给 `root_goal` 就只做结构检查，
+  跳过要花钱的语义那半。
+- **上面这条链的入口现在还可以再往前一步**（M7）：`Architect.plan(root_goal, template)`
+  跑「生成 → 复核 → 重生成 ≤ `max_regenerate` → 升级给人」，产出的 specs 直接交给
+  `Scheduler`。终局同样是三种、同样都不是异常：
+  `ACCEPTED` / `AWAITING_HUMAN`（含模型调不动、没有人的入口）/ `REJECTED`。
+  `cli plan --run` 就是把这两段接起来。
 
 ## 约定
 
@@ -167,6 +214,36 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
 - **确定性护栏是兜底不是主力**。停滞判据在「无差别放弃」那版只命中 1 次，
   在平衡版命中 17 次 —— 提示词走极端时护栏根本没机会触发。别拿护栏的命中数
   当改动生效的证据。
+- **对照实验的负例最容易是自己写错**。M7 7.2 第一轮两个 arm 在同一个「完整」拆解上
+  10/10 全报缺口，看着是假阳性爆表；读原文发现原始目标里的「一页」根本没有验收标准
+  管它 —— **复核者是对的，用例表是错的**。写负例的方法因此定死：把目标里的限定词
+  逐个划出来，每个都要指得到一条判据。反过来也提醒：**返工用例表之后，共用子任务的
+  正例也要重跑**，两轮数据不能混着算。
+- **但也不能改到 FPR 归零**。v2 里还剩一条争议性的报缺口，我们决定不修 ——
+  继续改用例直到指标好看，就是拿模型输出拟合测试集，测出来的只是改了几轮。
+- **模型的空回复不能原样回灌进修复轮**。`openai_compat` 在 JSON 不合规时会带着原文
+  再问一轮，而空串做 assistant 消息会被端点判 400（`must not be empty`），
+  一次可恢复的解析失败就此升级成硬失败。120 次调用栽了 2 次。
+- **子进程输出不能按系统编码解码**。中文 Windows 上 `text=True` 走 GBK，被测程序吐一个
+  非 GBK 字节，解码在 `subprocess` 的读取线程里炸掉、`proc.stdout` 变 `None`，
+  一直到 `loop.py` 拼证据时才以 `TypeError` 现形。现在固定
+  `encoding="utf-8", errors="replace"`：证据宁可花几个字符，不能丢整条链路。
+- **同一份输入上会翻面的模型是弱证据**。`deepseek-reasoner` 在一个一字未改的用例上
+  两轮报出率 4/5 → 1/5，kimi 是 9/9。选复核模型时稳定性和 J 值一样重要 ——
+  复核结果要驱动「重生成还是升级给人」，它自己抖动等于把噪声接进控制流。
+- **推理型模型的 thinking 计在 `max_tokens` 里，而且方差极大**。同一个拆解请求
+  `deepseek-v4-flash` 的 reasoning 落在 2093~12000，有一次把 12000 全烧在思考上、
+  正文 0 字符。三件事都要做：额度给够（拆解 16000）、**把截断单独认出来**
+  （截断的 JSON 报出来是「不是合法 JSON」，照着查会查错方向）、
+  **截断后原样重掷而不是带残文修复**（残文回灌只会让它接着写半截 JSON）。
+- **空产出不能被「同意」**。生成者调不动模型时手上是空列表，而 `AutoApproveGate`
+  对什么都点头 —— 于是「拆解失败」被记成「ACCEPTED，0 个子任务」。
+  **这个洞在脚本后端上永远暴露不了**，因为脚本后端不会调用失败。
+  凡是「网关点头就通过」的地方，都要先问一句「手上真的有东西可以通过吗」。
+- **模型会用「一人一个子目录」来满足 scope 不相交**。三个子任务分别产出
+  `subtask1/`、`subtask2/`、`subtask3/`，而第三个 import 前两个 —— scope 确实不相交，
+  代价是运行时 import 不到。结构层和语义层都看不见它：那是第三个问题
+  「合起来能不能跑」。`plan.isolated_dependency` 只堵了这一种形态。
 
 ## 密钥
 
@@ -182,16 +259,24 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
 
 ```
 types.py        §4 数据结构，TaskSpec 的硬约束在 __post_init__
+actions.py      Subagent 每 step 只能产出这三种：ToolCall / Finish / SoftSignalAction
 signals.py      §3 信号协议 + task_class → 硬信号覆盖面
 policy.py       §9 待验证参数
-escalation.py   §7.2 不经 LLM 的确定性升级下限
+escalation.py   §7.2 确定性升级下限 —— 执行层与拆解层（M7 7.4）共用这一个模块
 resume.py       §6 RESUME / REBASE / RESTART
 orchestrator.py §5 状态机 + PROBE 分段（M3）
-plan.py         §12 M4 拓扑分层 / 可分解性 / 静态 scope 冲突 —— 全确定性
+plan.py         §12 M4 拓扑分层 / 可分解性 / 静态 scope 冲突 + M5b 结构性复核
+                + M7 isolated_dependency —— 全确定性
 scheduler.py    §12 M4 并行调度 + 产出层冲突检测 + 仲裁
+config.py       .env 加载（环境变量优先，空值=未设置）+ redact，不引 python-dotenv
+demo*.py        M1 单任务 / M4 复合任务的验证场景 —— 「隐藏要求」写在这里
 runtime/        确定性层：bus / sandbox / detectors / loop —— 这里不许出现 LLM 调用
-agent/          architect（唯一写入决策点）/ subagent（薄绑定层）
-llm/            scripted（确定性测试用）/ anthropic_backend / openai_compat / errors
+agent/          architect（唯一写入决策点：中断决策 + 拆解生成 plan()/decompose()；
+                reviewer_backend = 无写权的复核者）/ subagent（薄绑定层）
+llm/            __init__ 是后端协议本身：Backend Protocol + ArchitectVerdict / Triage，
+                **给模型加一种能力从这里改**；scripted（确定性测试用）/
+                anthropic_backend / openai_compat / errors
 store/          sqlite（默认）/ postgres（正式）
-bench/          §12 M2/M3 实测 —— 只包装不改被测对象，不参与生产链路
+bench/          §12 M2/M3/M5 实测 —— 只包装不改被测对象，不参与生产链路
+                review_ab.py 是 M7 7.2：12 个带标准答案的拆解 + TPR/FPR/J
 ```

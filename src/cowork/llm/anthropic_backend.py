@@ -17,7 +17,7 @@ import os
 from typing import Any
 
 from ..actions import AgentAction, Finish, SoftSignalAction, ToolCall
-from ..llm import ArchitectVerdict, Triage
+from ..llm import ArchitectVerdict, SubtaskDraft, Triage
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..signals import SOFT_SIGNALS, SignalType
 from ..types import AgentContext, Signal, TaskSpec
@@ -190,6 +190,35 @@ PROBE_SYSTEM = """你在做中途探查（PROBE），不是验收。
 内容与 goal 无关。**不要**因为「还没写完」「篇幅不够」「不够完善」判 off_track，
 那是验收的事，不是探查的事。拿不准就判在轨——误报的代价是白打断一次。"""
 
+DECOMPOSE_SYSTEM = """你在把一个目标拆成若干可以独立派发的子任务。
+
+**先做一件事：把原始目标里的限定词逐个划出来**——产物、格式、边界情况、性能、
+篇幅、兼容性、"必须/不得"这类约束。每一个限定词都要能指到某个子任务的某一条
+验收标准。这是 §11.11 实测出来的方法：拆解出问题时，漏掉的几乎总是限定词，
+而不是主干功能。主干谁都不会忘，限定词天天被忘。
+
+验收标准的写法决定这个拆解有没有用：
+
+- 写**行为**，不写存在性。「format_row(('a',1)) 返回 'a = 1'」是判据，
+  「formatter.py 存在且能 import」不是 —— 后者随便写点什么都能通过。
+- 能用一条命令判定就给 command（例如 ["python", "verify_x.py"]），
+  Runtime 会自己跑它并在失败时产生硬信号；判不了就留空，交给人或模型判。
+- **子任务之间的衔接也要有人验收**。每个部件各自正确、拼起来不工作，
+  是这类拆解最常见的失败。
+
+结构上的硬要求：
+
+1. 每个子任务必须有 scope（它被允许写的文件），**两个子任务的 scope 不能相交**——
+   相交会被调度器判定为冲突并强制串行，拆了等于没拆；
+2. depends_on 只能引用本次拆解里的其它 id，不能有环；
+3. **至少要有两个子任务能同时开跑**（即存在两个互不依赖的任务）。做不到就说明
+   这个目标是顺序依赖的，那时候宁可只拆成 1 个子任务，也不要拆成一条链 ——
+   顺序依赖强的任务用多 agent 最差会掉 70% 的效果。
+4. 粒度：2~6 个子任务。拆到 10 个以上说明你在拆步骤，不是拆任务。
+
+如果上面给了你**上一轮复核发现的缺口**，那是必须修掉的东西，不是参考意见。
+针对每一条缺口，要么加子任务，要么加/改验收标准，别原样再交一遍。"""
+
 REVIEW_SYSTEM = """你在复核一个任务拆解，用的方法是**验收标准反推**。
 
 给你：一个原始目标，和拆解出来的若干子任务（每个带自己的验收标准）。
@@ -213,6 +242,107 @@ REVIEW_SCHEMA: dict[str, Any] = {
     "required": ["sufficient", "missing"],
     "additionalProperties": False,
 }
+
+
+# 拆解的输出比其它调用长一个量级（子任务 × 带命令的验收标准），而**推理型模型的
+# thinking 也计在这个额度里**：deepseek-v4-flash 实测同一个目标 completion
+# 2544（reasoning 2093）~ 9643（reasoning 8840），kimi-k3 6823（reasoning 5854）。
+# 4096 必然截断，12000 也见过一次烧光在 reasoning 上、正文 0 字符（§11.12）。
+DECOMPOSE_MAX_TOKENS = 16_000
+
+DECOMPOSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "subtasks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "task_class": {
+                        "type": "string",
+                        "enum": ["CODE", "TOOL_CALL", "GENERATIVE"],
+                    },
+                    "scope": {"type": "array", "items": {"type": "string"}},
+                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                    "acceptance": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "description": {"type": "string"},
+                                # 空数组 = 这条判不了命令，交给人或模型判
+                                "command": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["id", "description", "command"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["id", "goal", "task_class", "scope", "depends_on", "acceptance"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["subtasks"],
+    "additionalProperties": False,
+}
+
+
+def _render_decompose_context(root_goal: str, feedback: list[str] | None) -> str:
+    parts = [f"# 原始目标\n{root_goal}"]
+    if feedback:
+        # 复核缺口放在最后：模型对上下文末尾的要求执行得更实在，而这一段是
+        # 「必须修掉的东西」。同 _render_architect_context 里裁决历史的处理。
+        parts.append(
+            "# 上一轮复核发现的缺口（必须逐条修掉）\n"
+            + "\n".join(f"- {x}" for x in feedback)
+        )
+    return "\n\n".join(parts)
+
+
+def _parse_drafts(data: dict[str, Any]) -> list[SubtaskDraft]:
+    """把模型返回的拆解 JSON 变成 SubtaskDraft。
+
+    失败抛 ModelCallFailed，理由同 `_parse_action`（§11.3c）：schema 校验通过不
+    等于语义有效 —— acceptance 可以是空数组、id 可以是空串，两者都会在下游
+    以更难懂的方式炸掉。TaskSpec 的硬约束在这里先挡一道。
+    """
+    drafts: list[SubtaskDraft] = []
+    seen: set[str] = set()
+    for raw in data["subtasks"]:
+        tid = (raw["id"] or "").strip()
+        if not tid:
+            raise ModelCallFailed("拆解里有子任务没有 id")
+        if tid in seen:
+            raise ModelCallFailed(f"拆解里 id 重复: {tid!r}")
+        seen.add(tid)
+        if not (raw["goal"] or "").strip():
+            raise ModelCallFailed(f"子任务 {tid} 的 goal 为空")
+        if not raw["acceptance"]:
+            raise ModelCallFailed(f"子任务 {tid} 没有验收标准（§4.1 硬约束）")
+        drafts.append(
+            SubtaskDraft(
+                id=tid,
+                goal=raw["goal"],
+                acceptance=[
+                    {
+                        "id": c["id"] or f"c{i}",
+                        "description": c["description"],
+                        "command": list(c.get("command") or []) or None,
+                    }
+                    for i, c in enumerate(raw["acceptance"], start=1)
+                ],
+                scope=list(raw["scope"]),
+                depends_on=list(raw["depends_on"]),
+                task_class=raw["task_class"],
+            )
+        )
+    if not drafts:
+        raise ModelCallFailed("拆解产出为空")
+    return drafts
 
 
 def _render_review_context(root_goal: str, specs: list[TaskSpec]) -> str:
@@ -475,6 +605,18 @@ class AnthropicBackend:
             schema=REVIEW_SCHEMA,
         )
         return data["sufficient"], list(data["missing"]), tokens
+
+    def decompose(
+        self, root_goal: str, *, feedback: list[str] | None = None
+    ) -> tuple[list[SubtaskDraft], int]:
+        # 用架构师主模型：拆解是这个系统里最有杠杆的一次判断，拆错了后面全白干。
+        data, tokens = self._call(
+            model=self.architect_model,
+            system=DECOMPOSE_SYSTEM,
+            user=_render_decompose_context(root_goal, feedback),
+            schema=DECOMPOSE_SCHEMA,
+        )
+        return _parse_drafts(data), tokens
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]

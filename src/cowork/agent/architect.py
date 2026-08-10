@@ -6,12 +6,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Callable, Protocol
 
-from ..escalation import should_escalate
+from ..escalation import deterministic_plan_escalation, should_escalate
 from ..llm import ArchitectVerdict, Backend
+from ..llm.errors import ModelError
 from ..plan import deterministic_review
 from ..policy import Policy
 from ..resume import choose_resume_mode
@@ -24,10 +26,24 @@ from ..types import (
     DecisionRecord,
     Disposition,
     ResumeMode,
+    SandboxProfile,
     Signal,
+    TaskClass,
     TaskSpec,
     TaskState,
 )
+
+
+def _findings_fingerprint(review: "DecompositionReview") -> str:
+    """复核结论的指纹 —— 拆解层的「同样的信号又来了一遍」。
+
+    只取**结论**（结构问题的种类 + 缺口原文），不取子任务 id：换一批 id 重拆
+    但复核意见一字不变，恰恰就是「重生成没有改变现实」，指纹必须相同才抓得住。
+    """
+    payload = "|".join(
+        [*sorted(i.kind for i in review.structural), *sorted(review.missing)]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -39,16 +55,22 @@ class HumanRuling:
 
 @dataclass
 class DecompositionReview:
-    """拆解复核的结果（§12 M5b）。
+    """拆解复核的结果（§12 M5b / M7 7.1）。
 
     两半分开放是刻意的：`structural` 免费且不会漏判自己，`missing` 来自模型、
     可能有假阳性也可能有假阴性。**混成一个布尔值会把两种可信度不同的证据抹平。**
+
+    `reviewer` / `independent` 是 M7 7.1 加的：同一个 `sufficient=false`，出自
+    拆解者自己还是出自另一个供应商，可信度不是一回事 —— 记录里必须能分开读，
+    否则 7.2 的两侧对照无从算起。
     """
 
     structural: list
     sufficient: bool
     missing: list[str]
     tokens: int = 0
+    reviewer: str = ""
+    independent: bool = False
 
     @property
     def clean(self) -> bool:
@@ -63,11 +85,86 @@ class DecompositionReview:
             "sufficient": self.sufficient,
             "missing": list(self.missing),
             "tokens": self.tokens,
+            "reviewer": self.reviewer,
+            "independent": self.independent,
+        }
+
+
+@dataclass(frozen=True)
+class SpecTemplate:
+    """`SubtaskDraft` → `TaskSpec` 的补全模板（§12 M7 7.3）。
+
+    **模型不填这里的任何字段**。沙箱、工具白名单、各类上限属于隔离边界与成本
+    边界，让被隔离方给自己配边界是没有意义的；模型只决定 goal / 验收标准 /
+    scope / 依赖 —— 即「做什么」，不是「能用什么做」。
+    """
+
+    sandbox: SandboxProfile
+    parent_id: str | None = None
+    tools: tuple[str, ...] = ("write_file", "read_file", "list_files", "run")
+    model: str = "claude-opus-5"
+    max_steps: int = 12
+    deadline_s: float = 300.0
+    token_budget: int = 60_000
+    probe_interval_s: float | None = None
+
+
+@dataclass
+class PlanRuling:
+    """人对一份拆解的裁决（§12 M7 7.5）。
+
+    `specs` 非空表示人直接给了一份替代拆解 —— 人有写权（§2.4），这是它的体现。
+    """
+
+    accept: bool
+    rationale: str
+    specs: list[TaskSpec] | None = None
+
+
+@dataclass
+class DecompositionResult:
+    """一次「生成 → 复核 → 重生成」的终局（§12 M7 7.4）。
+
+    三种终局与执行层同构：ACCEPTED ≙ COMPLETED，AWAITING_HUMAN ≙ AWAITING_HUMAN，
+    REJECTED ≙ ABANDONED（人看过了并且不要它）。**都不是异常。**
+    """
+
+    status: str                      # ACCEPTED | AWAITING_HUMAN | REJECTED
+    specs: list[TaskSpec]
+    review: DecompositionReview | None = None
+    attempts: int = 0
+    tokens: int = 0
+    escalation_reason: str | None = None
+    decider: str = "LLM"             # LLM | HUMAN
+    rationale: str = ""
+    history: list[dict] = field(default_factory=list)
+
+    @property
+    def accepted(self) -> bool:
+        return self.status == "ACCEPTED"
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "attempts": self.attempts,
+            "tokens": self.tokens,
+            "decider": self.decider,
+            "escalation_reason": self.escalation_reason,
+            "rationale": self.rationale,
+            "specs": [s.to_dict() for s in self.specs],
+            "review": self.review.to_dict() if self.review else None,
+            "history": self.history,
         }
 
 
 class HumanGate(Protocol):
-    """人的介入入口。返回 None 表示人还没答复 -> 任务停在 AWAITING_HUMAN。"""
+    """人的介入入口。返回 None 表示人还没答复 -> 任务停在 AWAITING_HUMAN。
+
+    拆解层的入口是**另一个方法** `review_plan`（§12 M7 7.5）：它要看的是一份
+    拆解和一组 findings，`review()` 的 (spec, signals, verdict) 装不下。
+    没实现 `review_plan` 的网关会被当成「拆解层没有人的入口」，拆解因此停在
+    AWAITING_HUMAN —— 不猜，同 §7.2「LLM 无权覆盖」。
+    """
 
     def review(
         self,
@@ -90,6 +187,14 @@ class AutoApproveGate:
             action=Action(verdict.action),
             rationale=f"[AutoApproveGate] 升级原因：{reason}；采纳 LLM 裁决：{verdict.rationale}",
             spec_changes=verdict.spec_changes,
+        )
+
+    def review_plan(self, root_goal, specs, review, reason) -> PlanRuling:
+        # 拆解层同样是「有人配置了自动放行」：收下当前这份拆解接着跑。
+        # 它并没有引入人的判断 —— 生产环境不要用。
+        return PlanRuling(
+            accept=True,
+            rationale=f"[AutoApproveGate] 升级原因：{reason}；直接采纳当前拆解",
         )
 
 
@@ -116,6 +221,31 @@ class CliGate:
             return HumanRuling(Action.CONTINUE, "人判断可原样重试")
         return None
 
+    def review_plan(self, root_goal, specs, review, reason) -> PlanRuling | None:
+        print("\n" + "=" * 68)
+        print("需要人裁决一份拆解")
+        print(f"原始目标    {root_goal}")
+        print(f"升级原因    {reason}")
+        for s in specs:
+            deps = f" ← {', '.join(s.depends_on)}" if s.depends_on else ""
+            print(f"  - {s.id}{deps}  scope={s.scope}")
+            print(f"    {s.goal}")
+            for c in s.acceptance:
+                mark = "✓cmd" if c.machine_checkable else "  人判"
+                print(f"      [{mark}] {c.description}")
+        if review:
+            for i in review.structural:
+                print(f"结构问题    {i.kind}: {i.detail}")
+            for m in review.missing:
+                print(f"复核缺口    {m}")
+        print("=" * 68)
+        choice = input("就按这份拆解跑(y) / 放弃这个目标(a) / 挂起(其它): ").strip().lower()
+        if choice == "y":
+            return PlanRuling(accept=True, rationale="人确认按当前拆解执行")
+        if choice == "a":
+            return PlanRuling(accept=False, rationale="人判断这个目标该放弃")
+        return None
+
 
 class Architect:
     def __init__(
@@ -125,11 +255,16 @@ class Architect:
         *,
         policy: Policy,
         human_gate: HumanGate | None = None,
+        reviewer_backend: Backend | None = None,
     ) -> None:
         self.backend = backend
         self.store = store
         self.policy = policy
         self.human_gate = human_gate
+        # 复核者（§12 M7 7.1）。**它没有写权** —— 只在 review_decomposition 里被问一次，
+        # 产出 findings，改不了任何 spec。写权仍然只在 decide()/_apply_changes() 这条路上，
+        # §2.3 的「唯一写入决策点」因此不变。给它写权 = 两个写入点 = 不变量破了。
+        self.reviewer_backend = reviewer_backend
         self.tokens_used = 0
         self._last_soft_consume = time.monotonic()
         # 每个任务试过什么。M2 归因发现架构师**每次都在「第一次见到这个问题」的
@@ -327,19 +462,204 @@ class Architect:
         风险 #3 的第一个防护。它防的是「架构师是唯一没被验证的环节」里
         **拆解**那一半 —— 中断决策那一半由 §7.2 的确定性下限和 M5a 的停滞判据管。
 
-        必须说清楚的局限：**复核者和拆解者是同一个模型**。这只是「同一个脑子换个
-        问法再想一遍」，不是独立复核。真正的独立需要另一个供应商或人（§11.10）。
+        `reviewer_backend` 为 None 时复核者就是拆解者自己（M5b 的形态）：
+        「同一个脑子换个问法再想一遍」，不是独立复核。给了另一个供应商才谈得上独立
+        （§12 M7 7.1）。**独立不等于更准** —— 复核者不共享拆解者的上下文，多出一种
+        同模型没有的失败形态：对本来没问题的拆解报缺口。所以 7.2 必须两侧都测。
         """
         issues = deterministic_review(root_goal, specs)
+        reviewer = self.reviewer_backend or self.backend
+        independent = self.reviewer_backend is not None
+        name = getattr(reviewer, "name", "?")
         if any(i.kind in ("empty", "invalid_graph", "no_scope", "no_acceptance") for i in issues):
             # 结构就是坏的，语义复核没有意义，也不该为它花 token
             return DecompositionReview(structural=issues, sufficient=False,
-                                       missing=["结构性缺陷未修复，跳过语义复核"], tokens=0)
+                                       missing=["结构性缺陷未修复，跳过语义复核"], tokens=0,
+                                       reviewer="deterministic", independent=independent)
 
-        sufficient, missing, tokens = self.backend.review_decomposition(root_goal, specs)
+        sufficient, missing, tokens = reviewer.review_decomposition(root_goal, specs)
         self.tokens_used += tokens
         return DecompositionReview(
-            structural=issues, sufficient=sufficient, missing=missing, tokens=tokens
+            structural=issues, sufficient=sufficient, missing=missing, tokens=tokens,
+            reviewer=name, independent=independent,
+        )
+
+    # -- 拆解生成（§12 M7 7.3 / 7.4）---------------------------------------- #
+
+    def decompose(
+        self,
+        root_goal: str,
+        template: SpecTemplate,
+        *,
+        feedback: list[str] | None = None,
+    ) -> list[TaskSpec]:
+        """让模型拆一次，把结果补全成可派发的 TaskSpec。
+
+        风险 #14 的正题：在这之前架构师从来没有真的拆解过任务，
+        `Orchestrator` / `Scheduler` 拿到的都是现成的 spec。
+
+        补全在这里做而不是在提示词里要求，是因为 sandbox / tools / 上限
+        属于隔离与成本边界 —— 见 `SpecTemplate` 的说明。
+        """
+        drafts, tokens = self.backend.decompose(root_goal, feedback=feedback)
+        self.tokens_used += tokens
+        return [self._assemble(d, template) for d in drafts]
+
+    def _assemble(self, draft, template: SpecTemplate) -> TaskSpec:
+        task_class = TaskClass(draft.task_class)
+        # GENERATIVE 强制 PROBE，而 PROBE 必须有间隔，否则 TaskSpec 直接拒收（§4.1）。
+        # 这个间隔不能让模型定 —— 它是成本参数，依据在 policy 里（§11.7）。
+        probe_interval = template.probe_interval_s or self.policy.default_probe_interval_s
+        return TaskSpec(
+            id=draft.id,
+            parent_id=template.parent_id,
+            goal=draft.goal,
+            acceptance=[
+                Criterion(id=c["id"], description=c["description"], command=c.get("command"))
+                for c in draft.acceptance
+            ],
+            task_class=task_class,
+            sandbox=template.sandbox,
+            scope=list(draft.scope),
+            depends_on=list(draft.depends_on),
+            tools=list(template.tools),
+            model=template.model,
+            max_steps=template.max_steps,
+            deadline_s=template.deadline_s,
+            token_budget=template.token_budget,
+            probe_interval_s=probe_interval if task_class is TaskClass.GENERATIVE else None,
+        )
+
+    def plan(
+        self,
+        root_goal: str,
+        template: SpecTemplate,
+        *,
+        log: Callable[[str], None] = lambda _m: None,
+    ) -> DecompositionResult:
+        """生成 → 复核 → 重生成 ≤N 次 → 升级给人（§12 M7 7.4）。
+
+        **和执行层那条循环是同构的**：
+
+            派发 → 验收 → REBASE   → 超 max_rebase     → 升级给人
+            生成 → 复核 → 重生成   → 超 max_regenerate → 升级给人
+
+        所以确定性判据复用 `escalation.deterministic_plan_escalation()`，
+        上限复用 `policy`，人的入口复用 `HumanGate`（多一个方法）。这里**没有**
+        新的中断/恢复机制 —— 有的话就是方向错了。
+
+        写权始终在这个方法手上：复核者只提供 findings，人只能接受或否决，
+        **重新拆的动作永远由生成者做**（§2.3 唯一写入决策点）。
+        """
+        history: list[dict] = []
+        fingerprints: list[str] = []
+        specs: list[TaskSpec] = []
+        review: DecompositionReview | None = None
+        tokens_before = self.tokens_used
+        feedback: list[str] | None = None
+        attempt = 0
+        reason: str | None = None
+
+        while True:
+            attempt += 1
+            try:
+                specs = self.decompose(root_goal, template, feedback=feedback)
+            except ModelError as exc:
+                # 模型调不动或产出不合规 —— 和执行层同一条路：不抛出去，
+                # 变成「需要人」的终局。架构师连拆解都拆不出来时不该猜一个。
+                reason = f"生成者无法产出合规拆解：{exc}"
+                log(f"[PLAN] 第 {attempt} 轮生成失败：{exc}")
+                review = None
+                break
+
+            review = self.review_decomposition(root_goal, specs)
+            fp = _findings_fingerprint(review)
+            fingerprints.append(fp)
+            history.append(
+                {
+                    "attempt": attempt,
+                    "subtasks": [s.id for s in specs],
+                    "fingerprint": fp,
+                    "structural": [i.kind for i in review.structural],
+                    "missing": list(review.missing),
+                    "clean": review.clean,
+                }
+            )
+            log(
+                f"[PLAN] 第 {attempt} 轮：{len(specs)} 个子任务，"
+                + ("复核通过" if review.clean else f"复核报了 {len(review.missing)} 条缺口")
+            )
+
+            if review.clean:
+                return DecompositionResult(
+                    status="ACCEPTED", specs=specs, review=review, attempts=attempt,
+                    tokens=self.tokens_used - tokens_before, history=history,
+                    rationale="拆解通过结构检查与验收标准反推",
+                )
+
+            # attempt = 已经生成过几轮。max_regenerate=2 时总共生成 3 次
+            # （1 次初拆 + 2 次重生成），第 3 次仍不过就交给人。
+            reason = deterministic_plan_escalation(
+                self.policy, attempt=attempt, fingerprints=fingerprints
+            )
+            if reason:
+                break
+
+            # 复核意见喂回给生成者 —— 没有这一步，重生成就是「再抽一次」
+            feedback = [
+                *(f"{i.kind}: {i.detail}" for i in review.structural),
+                *review.missing,
+            ]
+
+        return self._escalate_plan(
+            root_goal, specs, review, reason or "未知原因",
+            attempts=attempt, tokens=self.tokens_used - tokens_before, history=history, log=log,
+        )
+
+    def _escalate_plan(
+        self, root_goal: str, specs: list[TaskSpec], review: DecompositionReview | None,
+        reason: str, *, attempts: int, tokens: int, history: list[dict],
+        log: Callable[[str], None],
+    ) -> DecompositionResult:
+        log(f"[PLAN] 升级给人：{reason}")
+        gate_review = getattr(self.human_gate, "review_plan", None)
+        if gate_review is None:
+            # 没有拆解层的入口 -> 挂起，不猜。同 §7.2「LLM 无权覆盖」。
+            return DecompositionResult(
+                status="AWAITING_HUMAN", specs=specs, review=review, attempts=attempts,
+                tokens=tokens, escalation_reason=reason, history=history,
+                rationale="需要人裁决这份拆解，但没有拆解层的介入入口，挂起。",
+            )
+
+        ruling = gate_review(root_goal, specs, review, reason)
+        if ruling is None:
+            return DecompositionResult(
+                status="AWAITING_HUMAN", specs=specs, review=review, attempts=attempts,
+                tokens=tokens, escalation_reason=reason, decider="HUMAN", history=history,
+                rationale="人未答复，拆解挂起等待。",
+            )
+        if not ruling.accept:
+            return DecompositionResult(
+                status="REJECTED", specs=specs, review=review, attempts=attempts,
+                tokens=tokens, escalation_reason=reason, decider="HUMAN", history=history,
+                rationale=ruling.rationale,
+            )
+
+        final = ruling.specs or specs
+        if not final:
+            # **空拆解不能被「同意」**。生成者一次都没产出时手上是空列表，
+            # 而 AutoApproveGate 对什么都点头 —— 于是「模型调不动」会变成
+            # 「ACCEPTED，0 个子任务」，一个失败被记成成功。真实模型第一次跑
+            # 就撞上了这个。人要救场只能靠 ruling.specs 自己给一份。
+            return DecompositionResult(
+                status="AWAITING_HUMAN", specs=[], review=review, attempts=attempts,
+                tokens=tokens, escalation_reason=reason, decider="HUMAN", history=history,
+                rationale=f"{ruling.rationale}（但手上没有任何拆解可以采纳，仍需人给出）",
+            )
+        return DecompositionResult(
+            status="ACCEPTED", specs=final, review=review, attempts=attempts,
+            tokens=tokens, escalation_reason=reason, decider="HUMAN", history=history,
+            rationale=ruling.rationale,
         )
 
     # -- PROBE 中间探查（§3.2.1）------------------------------------------- #

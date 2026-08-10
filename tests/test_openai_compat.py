@@ -161,13 +161,136 @@ class TestProviderResolution(unittest.TestCase):
         self.assertIn("localhost:4000", str(b.client.base_url))
         self.assertEqual(b.client.api_key, "sk-virtual-key")
 
-    def test_architect_uses_reasoning_model(self):
-        """§4.1「不同模型干擅长的事」：架构师和 Subagent 不该是同一档。"""
+    def test_deepseek_preset_uses_a_currently_served_model(self):
+        """DeepSeek v4 起只暴露 flash / pro 两个 id，chat / reasoner 只剩别名。
+
+        这条钉的是「预设里写的是当前真的存在的 model id」，不是分工 ——
+        三个角色现在统一 flash，§4.1 的「架构师用推理档」要靠
+        COWORK_ARCHITECT_MODEL=deepseek-v4-pro 显式拿回来。
+        """
         from cowork.cli import _make_backend
 
         ds = _make_backend("deepseek")
-        self.assertEqual(ds.architect_model, "deepseek-reasoner")
-        self.assertEqual(ds.subagent_model, "deepseek-chat")
+        self.assertEqual(ds.architect_model, "deepseek-v4-flash")
+        self.assertEqual(ds.subagent_model, "deepseek-v4-flash")
+
+    def test_architect_model_can_be_lifted_back_to_the_reasoning_tier(self):
+        from cowork.cli import _make_backend
+
+        os.environ["COWORK_ARCHITECT_MODEL"] = "deepseek-v4-pro"
+        self.addCleanup(os.environ.pop, "COWORK_ARCHITECT_MODEL", None)
+        self.assertEqual(_make_backend("deepseek").architect_model, "deepseek-v4-pro")
+
+
+class TestReviewerResolution(unittest.TestCase):
+    """--reviewer auto 的意图只有一条：复核者尽量不是拆解者自己（§11.11）。"""
+
+    def test_auto_picks_the_default_reviewer_for_real_backends(self):
+        from cowork.cli import DEFAULT_REVIEWER, resolve_reviewer
+
+        self.assertEqual(resolve_reviewer("deepseek", "auto"), DEFAULT_REVIEWER)
+
+    def test_auto_swaps_direction_when_the_generator_is_already_the_reviewer(self):
+        from cowork.cli import DEFAULT_REVIEWER, resolve_reviewer
+
+        self.assertEqual(resolve_reviewer(DEFAULT_REVIEWER, "auto"), "deepseek")
+
+    def test_scripted_backend_does_not_pay_for_a_review(self):
+        from cowork.cli import resolve_reviewer
+
+        self.assertIsNone(resolve_reviewer("scripted", "auto"))
+
+    def test_none_falls_back_to_same_model_review(self):
+        from cowork.cli import resolve_reviewer
+
+        self.assertIsNone(resolve_reviewer("deepseek", "none"))
+
+    def test_explicit_choice_wins(self):
+        from cowork.cli import resolve_reviewer
+
+        self.assertEqual(resolve_reviewer("deepseek", "anthropic"), "anthropic")
+
+
+class TestRepairRound(unittest.TestCase):
+    """回归：空回复不能被原样回灌进修复轮。
+
+    OpenAI 兼容端点拒绝 content 为空的 assistant 消息（400 "must not be empty"），
+    于是修复轮的**请求本身**非法 —— 一次可恢复的解析失败被升级成硬失败，
+    重试机会白白吃掉。M7 7.2 的 120 次复核调用里有 2 次栽在这（§11.11）。
+    """
+
+    def _backend(self, replies):
+        from cowork.llm.openai_compat import OpenAICompatBackend
+
+        b = OpenAICompatBackend(base_url="http://localhost:1/v1", api_key="sk-fake")
+        b.client = _FakeClient(replies)
+        return b
+
+    def test_empty_reply_does_not_produce_an_empty_assistant_turn(self):
+        b = self._backend(["", '{"sufficient": true, "missing": []}'])
+        sufficient, missing, _ = b.review_decomposition("目标", [])
+
+        self.assertTrue(sufficient)
+        self.assertEqual(missing, [])
+        second = b.client.calls[1]["messages"]
+        self.assertTrue(
+            all(m["content"].strip() for m in second),
+            f"修复轮里出现了空消息：{second}",
+        )
+
+    def test_truncated_reply_is_retried_clean_not_repaired(self):
+        """截断是掷骰子（thinking 吃掉了额度），把残文回灌只会让它接着写半截 JSON。"""
+        b = self._backend([])
+        b.client = _FakeClient(
+            ['{"sufficient": tr', '{"sufficient": true, "missing": []}'],
+            finish_reasons=["length", "stop"],
+        )
+        sufficient, _, _ = b.review_decomposition("目标", [])
+
+        self.assertTrue(sufficient)
+        self.assertEqual(
+            b.client.calls[1]["messages"], b.client.calls[0]["messages"],
+            "截断重试应原样重发，不带残文",
+        )
+
+    def test_truncation_says_so_instead_of_blaming_the_json(self):
+        b = self._backend([])
+        b.client = _FakeClient(["", ""], finish_reasons=["length", "length"])
+        with self.assertRaises(ModelError) as caught:
+            b.review_decomposition("目标", [])
+        self.assertIn("截断", str(caught.exception))
+
+    def test_non_empty_bad_reply_is_still_echoed_back(self):
+        """有内容的坏输出要原样回灌 —— 模型得看见自己写错了什么。"""
+        b = self._backend(["这不是 JSON", '{"sufficient": false, "missing": ["x"]}'])
+        sufficient, missing, _ = b.review_decomposition("目标", [])
+
+        self.assertFalse(sufficient)
+        self.assertEqual(missing, ["x"])
+        roles = [m["role"] for m in b.client.calls[1]["messages"]]
+        self.assertIn("assistant", roles)
+
+
+class _FakeClient:
+    """按脚本依次返回 content 的假 client，记录每轮请求。"""
+
+    def __init__(self, replies, finish_reasons=None):
+        self.replies = list(replies)
+        self.finish_reasons = list(finish_reasons or [])
+        self.calls = []
+        self.chat = self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        text = self.replies.pop(0) if self.replies else ""
+        reason = self.finish_reasons.pop(0) if self.finish_reasons else "stop"
+        msg = type("M", (), {"content": text})()
+        choice = type("C", (), {"message": msg, "finish_reason": reason})()
+        return type("R", (), {"choices": [choice], "usage": None})()
 
 
 class TestBackendWiring(unittest.TestCase):

@@ -28,6 +28,7 @@ class ScriptedBackend:
         triage_for: Callable[[Signal], str] | None = None,
         probe_for: Callable[[TaskSpec, AgentContext], tuple[bool, str]] | None = None,
         review_for: Callable[[str, list], tuple[bool, list[str]]] | None = None,
+        decompose_for: Callable[[str, list[str] | None], list] | None = None,
         token_cost: int = 500,
     ) -> None:
         self.steps = steps
@@ -35,10 +36,13 @@ class ScriptedBackend:
         self.triage_for = triage_for or (lambda s: "escalate")
         self.probe_for = probe_for
         self.review_for = review_for
+        self.decompose_for = decompose_for
         self.token_cost = token_cost
         self._cursor: dict[int, int] = {}
         self.probe_calls = 0
         self.review_calls = 0
+        self.decompose_calls = 0
+        self.decompose_feedback: list[list[str] | None] = []
         self.decide_history: list[dict] = []
 
     # -- Subagent ---------------------------------------------------------- #
@@ -95,6 +99,17 @@ class ScriptedBackend:
             return True, [], self.token_cost // 5
         sufficient, missing = self.review_for(root_goal, specs)
         return sufficient, list(missing), self.token_cost // 5
+
+    def decompose(
+        self, root_goal: str, *, feedback: list[str] | None = None
+    ) -> tuple[list, int]:
+        # 记下每一轮拿到的 feedback：生成-复核循环要断言「复核意见真的喂回去了」，
+        # 那是 7.4 与「每轮都从零开始重拆」的唯一区别。
+        self.decompose_calls += 1
+        self.decompose_feedback.append(list(feedback) if feedback else None)
+        if self.decompose_for is None:
+            raise NotImplementedError("ScriptedBackend 未提供 decompose_for")
+        return self.decompose_for(root_goal, feedback), self.token_cost
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]

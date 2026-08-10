@@ -24,13 +24,16 @@ import re
 from typing import Any
 
 from ..actions import AgentAction
-from ..llm import ArchitectVerdict, Triage
+from ..llm import ArchitectVerdict, SubtaskDraft, Triage
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..runtime.detectors import validate_schema
 from ..types import AgentContext, Signal, TaskSpec
 from .anthropic_backend import (
     ACTION_SCHEMA,
     ARCHITECT_SYSTEM,
+    DECOMPOSE_MAX_TOKENS,
+    DECOMPOSE_SCHEMA,
+    DECOMPOSE_SYSTEM,
     PROBE_SCHEMA,
     PROBE_SYSTEM,
     REVIEW_SCHEMA,
@@ -40,7 +43,9 @@ from .anthropic_backend import (
     TRIAGE_SYSTEM,
     VERDICT_SCHEMA,
     _parse_action,
+    _parse_drafts,
     _render_architect_context,
+    _render_decompose_context,
     _render_probe_context,
     _render_review_context,
     _render_subagent_context,
@@ -94,11 +99,15 @@ class OpenAICompatBackend:
         self.triage_model = triage_model or architect_model
         self.max_tokens = max_tokens
         self.repair_rounds = repair_rounds
+        # 实例级覆盖类属性：跨模型对照里两个 arm 都是这个类，只报类名等于没记
+        # （§12 M7 7.2 的记录要能区分是谁复核的）。用架构师模型 —— 复核走的就是它。
+        self.name = f"openai-compat:{self.architect_model}"
 
     # ------------------------------------------------------------------ #
 
     def _call(
-        self, *, model: str, system: str, user: str, schema: dict[str, Any]
+        self, *, model: str, system: str, user: str, schema: dict[str, Any],
+        max_tokens: int | None = None,
     ) -> tuple[dict[str, Any], int]:
         import openai
 
@@ -115,7 +124,7 @@ class OpenAICompatBackend:
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "messages": messages,
         }
         if not any(m in model for m in _NO_JSON_MODE):
@@ -137,22 +146,46 @@ class OpenAICompatBackend:
                 tokens += (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
 
             text = (resp.choices[0].message.content or "").strip()
+
+            # 截断必须单独认出来，而且**要原样重试而不是带着残文去修复**。
+            # 推理型模型的 thinking 计在同一个额度里，且用量方差极大 —— 同一个
+            # 拆解请求实测 reasoning 2093 ~ 12000 token，其中一次把 12000 全烧在
+            # 思考上、正文 0 字符（§11.12）。这种失败是掷骰子，不是格式问题：
+            # 把残文回灌只会让模型接着写它的半截 JSON，重掷一次反而更可能成。
+            # 报错也必须说清是截断 —— 截断的 JSON 报出来是「不是合法 JSON」，
+            # 照着那个错误去查提示词会查错方向。
+            if getattr(resp.choices[0], "finish_reason", None) == "length":
+                errors = [
+                    f"输出被 max_tokens={kwargs['max_tokens']} 截断"
+                    f"（正文 {len(text)} 字符，模型的 thinking 也计在这个额度里）"
+                ]
+                if attempt >= self.repair_rounds:
+                    break
+                kwargs["messages"] = messages  # 原样重掷，不带残文
+                continue
+
             data, errors = _parse_and_validate(text, schema)
             if data is not None:
                 return data, tokens
 
             if attempt >= self.repair_rounds:
                 break
-            # 带着具体错误再问一轮
+            # 带着具体错误再问一轮。
+            # **空回复不能原样回灌**：OpenAI 兼容端点会拒绝 content 为空的 assistant 消息
+            # （"must not be empty"，400），于是修复轮的请求本身就非法 —— 一次可恢复的
+            # 解析失败被升级成硬失败，重试机会白白吃掉。M7 7.2 跑批里 120 次有 2 次栽在这。
+            echo = (
+                [{"role": "assistant", "content": text[:4000]}] if text.strip() else []
+            )
+            complaint = (
+                "上面的输出不合格：\n" + "\n".join(errors)
+                if echo
+                else "上一轮没有返回任何内容。"
+            )
             kwargs["messages"] = [
                 *messages,
-                {"role": "assistant", "content": text[:4000]},
-                {
-                    "role": "user",
-                    "content": "上面的输出不合格：\n"
-                    + "\n".join(errors)
-                    + "\n只重新输出修正后的 JSON 对象。",
-                },
+                *echo,
+                {"role": "user", "content": complaint + "\n只重新输出修正后的 JSON 对象。"},
             ]
 
         raise ModelCallFailed(
@@ -270,6 +303,20 @@ class OpenAICompatBackend:
             schema=REVIEW_SCHEMA,
         )
         return data["sufficient"], list(data["missing"]), tokens
+
+    def decompose(
+        self, root_goal: str, *, feedback: list[str] | None = None
+    ) -> tuple[list[SubtaskDraft], int]:
+        data, tokens = self._call(
+            model=self.architect_model,
+            system=DECOMPOSE_SYSTEM,
+            user=_render_decompose_context(root_goal, feedback),
+            schema=DECOMPOSE_SCHEMA,
+            # 拆解是这里最长的一次输出：6 个子任务 × 若干条带命令的验收标准，
+            # 加上推理型模型自己要烧掉的那部分，4096 实测不够（见 §11.12）。
+            max_tokens=DECOMPOSE_MAX_TOKENS,
+        )
+        return _parse_drafts(data), tokens
 
     def probe(
         self, spec: TaskSpec, ctx: AgentContext, excerpts: dict[str, str]

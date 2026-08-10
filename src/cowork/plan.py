@@ -139,6 +139,8 @@ def deterministic_review(root_goal: str, specs: list[TaskSpec]) -> list[PlanIssu
         if not s.goal.strip():
             issues.append(PlanIssue("empty_goal", f"子任务 {s.id} 的 goal 为空", (s.id,)))
 
+    issues.extend(_isolated_dependencies(specs))
+
     try:
         plan = build_plan(specs)
     except PlanError as exc:
@@ -147,6 +149,56 @@ def deterministic_review(root_goal: str, specs: list[TaskSpec]) -> list[PlanIssu
 
     issues.extend(plan.issues)
     return issues
+
+
+def _isolated_dependencies(specs: list[TaskSpec]) -> list[PlanIssue]:
+    """有依赖关系、产出却各在各的目录 —— 拼起来大概率 import 不到（§12 M7 7.3）。
+
+    这条是被真实生成的拆解逼出来的（§11.12）：模型知道「scope 不能相交」是硬要求，
+    于是用**一人一个目录**来满足它 —— `subtask1/csv_parser.py`、
+    `subtask2/markdown_renderer.py`、`subtask3/cli.py`，而 cli 依赖前两个。
+    scope 确实不相交了，`python subtask3/cli.py` 也确实 import 不到那两个模块。
+
+    两层复核都看不见它：结构层只查交集与环，语义层问的是「验收标准合起来等不等于
+    原始目标」。**它属于第三个问题 —— 拆出来的东西合起来能不能跑。**
+
+    判据刻意收窄，只报「A 依赖 B，且两边的产出全部落在各自不同的子目录里」：
+    根目录、共享目录、一方在根一方在子目录都不报 —— 那些都有正常的组织方式。
+    """
+    by_id = {s.id: s for s in specs}
+    out: list[PlanIssue] = []
+    for spec in specs:
+        mine = _sole_dir(spec)
+        if mine is None:
+            continue
+        for dep_id in spec.depends_on:
+            dep = by_id.get(dep_id)
+            if dep is None:
+                continue  # 悬空依赖归 invalid_graph 管
+            theirs = _sole_dir(dep)
+            if theirs is not None and theirs != mine:
+                out.append(
+                    PlanIssue(
+                        kind="isolated_dependency",
+                        detail=(
+                            f"{spec.id} 依赖 {dep.id}，但产出分别在 {mine}/ 和 {theirs}/ —— "
+                            "各自一个目录能满足 scope 不相交，代价是运行时互相 import 不到"
+                        ),
+                        tasks=(spec.id, dep.id),
+                    )
+                )
+    return out
+
+
+def _sole_dir(spec: TaskSpec) -> str | None:
+    """这个任务的产出是不是全关在同一个子目录里；否则 None。
+
+    有任何一个产出在根目录，就不算 —— 那时候依赖方从根目录 import 得到。
+    """
+    if not spec.scope or not all("/" in p.replace("\\", "/") for p in spec.scope):
+        return None
+    dirs = {p.replace("\\", "/").rsplit("/", 1)[0] for p in spec.scope}
+    return next(iter(dirs)) if len(dirs) == 1 else None
 
 
 def build_plan(specs: list[TaskSpec]) -> Plan:

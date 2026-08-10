@@ -86,6 +86,7 @@ class Scheduler:
         human_gate: HumanGate | None = None,
         max_parallel: int = 4,
         root_goal: str | None = None,
+        reviewer_backend: Backend | None = None,
         log: Callable[[str], None] = print,
     ) -> None:
         self.specs = list(specs)
@@ -104,7 +105,12 @@ class Scheduler:
         # 仲裁用的架构师是**同一个实例语义**：跨任务信息只经它流转（§2.3）。
         # 各任务的 Orchestrator 内部各有自己的 Architect 做本任务决策，
         # 但冲突这种跨任务视野只能在这一层看到。
-        self.architect = Architect(backend, store, policy=policy, human_gate=human_gate)
+        # reviewer_backend 只影响拆解复核那一次调用：仲裁、中断决策仍然走 backend。
+        # 复核者是顾问，不参与任何写入（§12 M7 的角色表）。
+        self.architect = Architect(
+            backend, store, policy=policy, human_gate=human_gate,
+            reviewer_backend=reviewer_backend,
+        )
 
     # ------------------------------------------------------------------ #
 
@@ -121,6 +127,8 @@ class Scheduler:
             result.review = self.review
             for i in self.review.structural:
                 self.log(f"[REVIEW] 结构 {i.kind}: {i.detail} {list(i.tasks)}")
+            who = "独立复核者" if self.review.independent else "拆解者自己"
+            self.log(f"[REVIEW] 复核者 {self.review.reviewer}（{who}）")
             if self.review.sufficient:
                 self.log("[REVIEW] 验收标准反推：覆盖完整")
             else:

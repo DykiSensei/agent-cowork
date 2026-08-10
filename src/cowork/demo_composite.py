@@ -225,6 +225,7 @@ def build(
     *,
     store=None,
     backend=None,
+    reviewer_backend=None,
     log=print,
     drop: str | None = None,
 ):
@@ -246,6 +247,7 @@ def build(
         store=store or SqliteStore(),
         human_gate=AutoApproveGate(),
         root_goal=ROOT_GOAL,
+        reviewer_backend=reviewer_backend,
         log=log,
     )
     return sched, ws

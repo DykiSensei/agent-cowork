@@ -121,6 +121,13 @@ class Sandbox:
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,
+                # 不能让 text=True 去用系统本地编码：中文 Windows 上是 GBK，
+                # 被测程序吐一个非 GBK 字节，解码就在 subprocess 的读取线程里炸掉，
+                # proc.stdout 变成 None，然后在 loop.py 拼证据时才以 TypeError 现形 ——
+                # 一个工具输出的编码问题被放大成整个 run 崩掉。errors="replace"：
+                # 证据宁可花掉几个字符，也不能丢掉整条链路。
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:

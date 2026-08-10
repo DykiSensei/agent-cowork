@@ -25,6 +25,23 @@ class Triage:
 
 
 @dataclass
+class SubtaskDraft:
+    """生成者产出的一个子任务（§12 M7 7.3）。
+
+    **这不是 TaskSpec**，是它的一部分：只有模型有权决定的那些字段。
+    sandbox / tools / token 上限由 `SpecTemplate` 填，模型碰不到 ——
+    让被隔离方给自己配隔离边界是没有意义的。
+    """
+
+    id: str
+    goal: str
+    acceptance: list[dict]          # {id, description, command?}
+    scope: list[str]
+    depends_on: list[str] = field(default_factory=list)
+    task_class: str = "CODE"
+
+
+@dataclass
 class ArchitectVerdict:
     """架构师对一次中断的裁决。resume_mode 留空则由 §6.2 规则推导。"""
 
@@ -78,8 +95,23 @@ class Backend(Protocol):
         这个方向是刻意的 —— 正向问「这个拆解好不好」得到的是复述，
         反推问「按这些标准验收完，还缺什么」才逼出遗漏。
 
-        返回 (是否充分, 缺失项列表, token)。**复核者不能是拆解者本身**的问题
-        在这里没有解决：当前实现用同一个 backend 的另一次调用（§11.10 的局限）。
+        返回 (是否充分, 缺失项列表, token)。复核者可以换独立供应商
+        （M7 7.1 的 `Architect(reviewer_backend=...)`），实测见 §11.11。
+        """
+        ...
+
+    def decompose(
+        self, root_goal: str, *, feedback: list[str] | None = None
+    ) -> tuple[list[SubtaskDraft], int]:
+        """把一个自然语言目标拆成子任务（§12 M7 7.3）。
+
+        `feedback` 是**上一轮复核报出的缺口**，重生成时喂回去。它和
+        `decide_interrupt(history=...)` 是同一个设计：没有它，生成者每一轮都在
+        「第一次看到这个目标」的状态下重拆，复核意见等于没提（§11.9b 的教训）。
+
+        模型只填**它有权决定的字段**：goal / acceptance / scope / depends_on /
+        task_class。sandbox、tools、各类上限由调用方的模板决定 ——
+        让模型给自己配沙箱和工具白名单，等于把隔离边界交给被隔离方。
         """
         ...
 
@@ -100,4 +132,4 @@ class Backend(Protocol):
 
 from .scripted import ScriptedBackend  # noqa: E402
 
-__all__ = ["Backend", "Triage", "ArchitectVerdict", "ScriptedBackend"]
+__all__ = ["Backend", "Triage", "ArchitectVerdict", "SubtaskDraft", "ScriptedBackend"]

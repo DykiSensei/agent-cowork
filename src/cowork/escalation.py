@@ -102,6 +102,45 @@ def _irreversible_marker(
     return None
 
 
+def deterministic_plan_escalation(
+    policy: Policy,
+    *,
+    attempt: int,
+    fingerprints: list[str],
+) -> str | None:
+    """拆解层的确定性升级下限（§12 M7 7.4）。
+
+    **和上面那套是同一组判据，只是换了一层**：执行层「同样的信号又原样出现」
+    对应拆解层「同样的复核结论又原样出现」，执行层的 `max_rebase` 对应拆解层的
+    `max_regenerate`。所以它放在这个模块里，而不是在 architect 里另起一套 ——
+    §12 M7 明写「发现自己在写平行逻辑就是方向错了」。
+
+    attempt：已经生成了第几轮（含本轮）。
+    fingerprints：每轮复核结论的指纹，按时间顺序。
+    """
+    # 1. 重生成没有改变现实：复核结论一字不变地又来一遍。
+    # 与 §7.2 第 1b 条同源 —— 那条管「改了规格但信号照旧」，这条管
+    # 「按复核意见重拆了，复核意见照旧」。都是「上一次决策没有奏效」。
+    streak = 1
+    for past in reversed(fingerprints[:-1]):
+        if past != fingerprints[-1]:
+            break
+        streak += 1
+    if len(fingerprints) >= 2 and streak >= policy.max_identical_interrupts:
+        return (
+            f"连续 {streak} 轮复核结论完全相同"
+            f"（阈值 {policy.max_identical_interrupts}），重生成没有改变现实"
+        )
+
+    # 2. 重生成次数用尽。上限本身的取值理由见 policy.max_regenerate。
+    if attempt > policy.max_regenerate:
+        return (
+            f"已重生成 {attempt - 1} 次仍未通过复核"
+            f"（阈值 max_regenerate={policy.max_regenerate}）"
+        )
+    return None
+
+
 def should_escalate(
     policy: Policy,
     spec: TaskSpec,
