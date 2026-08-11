@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import type { ActionResult } from "../../api";
 import {
   LITE_ACTION,
   LITE_ACTION_SUGGEST,
@@ -79,9 +80,13 @@ function WaitCard({
   onSubmit,
 }: {
   pending: PendingRuling;
-  onSubmit: (action: string) => Promise<boolean>;
+  onSubmit: (action: string) => Promise<ActionResult>;
 }) {
   const [done, setDone] = useState<string | null>(null);
+  // 服务端可能不收这条裁决（任务已经不在挂起、并发答复过了）。
+  // 那时候必须说出来 —— 显示「已告诉系统」而实际没记下，比报错难查得多。
+  const [failed, setFailed] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const suggestion = pending.suggestion;
 
   if (done) {
@@ -117,12 +122,23 @@ function WaitCard({
           <button
             key={a}
             className={suggestion?.action === a ? "primary" : undefined}
-            onClick={() => void onSubmit(a).then(() => setDone(LITE_ACTION[a]))}
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              setFailed(null);
+              void onSubmit(a)
+                .then((r) => {
+                  if (r.ok) setDone(LITE_ACTION[a]);
+                  else setFailed(r.error ?? "没能提交");
+                })
+                .finally(() => setBusy(false));
+            }}
           >
             {LITE_ACTION[a]}
           </button>
         ))}
       </div>
+      {failed && <div className="l-fail">没能提交：{failed}</div>}
       <div className="l-note">
         放弃后任务就停了，不可恢复。也可以先不理会 —— 挂着不花一分钱。
       </div>
@@ -212,11 +228,15 @@ export default function LiteStream({
 }: {
   taskId: string;
   detail: TaskDetail;
-  onIntervene: (taskId: string, text: string) => Promise<boolean>;
-  onCancel: (taskId: string, reason: string) => Promise<boolean>;
-  onRuling: (taskId: string, action: string, rationale: string) => Promise<boolean>;
+  onIntervene: (taskId: string, text: string) => Promise<ActionResult>;
+  onCancel: (taskId: string, reason: string) => Promise<ActionResult>;
+  onRuling: (taskId: string, action: string, rationale: string) => Promise<ActionResult>;
 }) {
   const [bar, setBar] = useState(false);
+  // 介入 / 取消都可能被服务端拒（最常见的是 409「任务不在运行中」）。
+  // 原来这里 `.then()` 一律当成功：清空输入框 + 弹「已告诉它」，
+  // 而那条指令其实哪儿都没到。
+  const [failed, setFailed] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const events = useMemo(() => translate(detail), [detail]);
 
@@ -229,7 +249,12 @@ export default function LiteStream({
   const submitCancel = () => {
     if (stopping) return;
     setStopping(true);
-    void onCancel(taskId, "").finally(() => setStopping(false));
+    setFailed(null);
+    void onCancel(taskId, "")
+      .then((r) => {
+        if (!r.ok) setFailed(r.error ?? "没能停下来");
+      })
+      .finally(() => setStopping(false));
   };
 
   const submitIntervene = (e: FormEvent<HTMLFormElement>) => {
@@ -237,7 +262,13 @@ export default function LiteStream({
     const input = e.currentTarget.querySelector("input")!;
     const text = input.value.trim();
     if (!text) return;
-    void onIntervene(taskId, text).then(() => {
+    setFailed(null);
+    void onIntervene(taskId, text).then((r) => {
+      if (!r.ok) {
+        // **不清空输入框**：那句话还没送到，人可能想改改再发一次
+        setFailed(r.error ?? "没能送出去");
+        return;
+      }
       input.value = "";
       setBar(true);
       setTimeout(() => setBar(false), 4000);
@@ -300,6 +331,7 @@ export default function LiteStream({
         <div className={`l-sysbar${bar ? " show" : ""}`}>
           已告诉它，等它做完手头这一小步就照你说的办。
         </div>
+        {failed && <div className="l-fail">{failed}</div>}
         <div className="row">
           <form className="row" style={{ display: "contents" }} onSubmit={submitIntervene}>
             <input placeholder="插一句话，改变它接下来的做法…" autoComplete="off" />

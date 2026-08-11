@@ -277,3 +277,48 @@
   .meta .note.amber{color:var(--amber-hi)}
   .mode-btn{cursor:pointer;background:rgba(88,166,255,.1);color:var(--blue);
             border-color:rgba(88,166,255,.4)}
+
+  /* ---------------- 失败反馈 ---------------- */
+  .sysbar.bad{color:var(--red);border-color:rgba(248,81,73,.4);
+              background:rgba(248,81,73,.08)}
+  .f-fail{margin-top:8px;color:var(--red);font-size:11.5px}
+
+  /* ---------------- 发布任务（pro）---------------- */
+  #pro .nt-open{margin-left:auto;font-size:11px;color:var(--blue);cursor:pointer;
+                background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.4);
+                border-radius:10px;padding:2px 9px}
+  #pro .nt-host{overflow-y:auto;padding:24px 0}
+  #pro .nt{max-width:700px;margin:0 auto;background:var(--panel);
+           border:1px solid var(--border);border-radius:10px;padding:18px 20px}
+  #pro .nt-hd{font-size:13px;font-weight:600;margin-bottom:10px}
+  #pro .nt-goal{font-size:12.5px;background:var(--inset);border-radius:8px;
+                padding:9px 11px;margin-bottom:10px;color:var(--text)}
+  #pro .nt-input{width:100%;border:1px solid var(--border);border-radius:8px;
+                 background:var(--inset);padding:9px 11px;color:var(--text);
+                 font:13px/1.55 var(--sans);resize:vertical}
+  #pro .nt-input:focus{outline:none;border-color:var(--blue)}
+  #pro .nt-line{font-size:11.5px;color:var(--dim);margin:9px 0}
+  #pro .nt-line.good{color:var(--green)}
+  #pro .nt-line.warn{color:var(--amber-hi)}
+  #pro .nt-line.bad{color:var(--red)}
+  #pro .nt-review{border:1px solid rgba(210,153,34,.4);background:rgba(210,153,34,.08);
+                  border-radius:8px;padding:9px 11px;margin:9px 0;font-size:11.5px}
+  #pro .nt-review-hd{color:var(--amber-hi);margin-bottom:4px}
+  #pro .nt-review ul{margin:0;padding-left:17px}
+  #pro .nt-specs{margin-top:9px;display:flex;flex-direction:column;gap:7px}
+  #pro .nt-spec{border:1px solid var(--border-soft);border-radius:8px;padding:9px 11px}
+  #pro .nt-spec-hd{display:flex;gap:8px;align-items:center;font-size:11px;
+                   color:var(--faint);margin-bottom:3px}
+  #pro .nt-spec-hd .mono{color:var(--dim)}
+  #pro .nt-scope{margin-left:auto;font-family:var(--mono);font-size:10.5px}
+  #pro .nt-spec-goal{font-size:12.5px}
+  #pro .nt-crit{margin:5px 0 0;padding-left:17px;font-size:11.5px;color:var(--dim)}
+  #pro .nt-cmd{color:var(--green);font-size:10.5px}
+  #pro .nt-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+  #pro .nt-primary{border:1px solid rgba(88,166,255,.4);border-radius:6px;
+                   background:rgba(88,166,255,.12);color:var(--blue);
+                   padding:6px 14px;font-size:12px;cursor:pointer}
+  #pro .nt-primary:disabled{opacity:.5;cursor:default}
+  #pro .nt-ghost{border:1px solid var(--border);border-radius:6px;background:transparent;
+                 color:var(--dim);padding:6px 12px;font-size:12px;cursor:pointer}
+  #pro .nt-note{margin-top:9px;font-size:11px;color:var(--faint)}

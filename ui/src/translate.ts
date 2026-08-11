@@ -55,16 +55,24 @@ function terminalChips(detail: TaskDetail, status: TaskStatus): string[] {
 export function translate(detail: TaskDetail): StreamEvent[] {
   const out: StreamEvent[] = [];
   const pending = detail.kind === "single" ? detail.pending : null;
-  const lastSeq = detail.events.length
-    ? detail.events[detail.events.length - 1].seq
-    : 0;
-  // 终局卡延后一拍：orchestrator 先写 status 事件再写 [DONE]/[STOP] 日志，
-  // 卡片压在日志前面会倒序，所以等后面的日志行先出来
-  let deferredTerminal: StreamEvent | null = null;
+  // 「此刻仍在等」的判据是**最后一条 status 事件**，不是最后一条事件。
+  //
+  // 原来写的是「这条 status 恰好是整条时间线的最后一条」，而 orchestrator 有
+  // 若干条路径会在挂起之后再写一行 `[STOP]` 日志说明原因 —— 于是那些情况下
+  // 裁决表单直接不出现，只剩一行灰字「挂起，等待人处理」，人看得见挂起了却
+  // 无处答复。而 pending 本身已经是服务端按 `status == AWAITING_HUMAN` 算出来的，
+  // 前端再拿事件顺序去二次判断，只会引入这种错法。
+  const lastStatusSeq = detail.events.reduce(
+    (acc, e) => (e.kind === "status" ? Math.max(acc, e.seq) : acc),
+    0,
+  );
+  // 终局卡与「等你拍板」卡都延后一拍：orchestrator 先写 status 事件再写
+  // [DONE]/[STOP] 日志，卡片压在日志前面会倒序，所以等后面的日志行先出来
+  let deferred: StreamEvent | null = null;
   const flushTerminal = () => {
-    if (deferredTerminal) {
-      out.push(deferredTerminal);
-      deferredTerminal = null;
+    if (deferred) {
+      out.push(deferred);
+      deferred = null;
     }
   };
 
@@ -113,9 +121,9 @@ export function translate(detail: TaskDetail): StreamEvent[] {
         const status = ev.payload?.status as TaskStatus | undefined;
         if (status === "AWAITING_HUMAN") {
           flushTerminal();
-          // 只有「此刻仍在等」的最后一条渲染成卡片；历史上的挂起降为一行
-          if (pending && ev.seq === lastSeq) {
-            out.push({ kind: "awaiting", pending, ts: ev.created_at });
+          // 只有「此刻仍在等」的那条渲染成卡片；历史上的挂起降为一行
+          if (pending && ev.seq === lastStatusSeq) {
+            deferred = { kind: "awaiting", pending, ts: ev.created_at };
           } else {
             out.push({
               kind: "log",
@@ -129,7 +137,7 @@ export function translate(detail: TaskDetail): StreamEvent[] {
           status === "FAILED" ||
           status === "ABANDONED"
         ) {
-          deferredTerminal = {
+          deferred = {
             kind: "terminal",
             status,
             chips: terminalChips(detail, status),

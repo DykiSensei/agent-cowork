@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import type { ActionResult } from "../../api";
 import { fmtTime, proSignalBody } from "../../copy";
 import { translate } from "../../translate";
 import type {
@@ -186,7 +187,7 @@ function AwaitCard({
 }: {
   pending: PendingRuling;
   ts: number | null;
-  onSubmit: (action: string, rationale: string) => Promise<boolean>;
+  onSubmit: (action: string, rationale: string) => Promise<ActionResult>;
 }) {
   const sg = pending.suggestion;
   const [action, setAction] = useState<DecisionRecord["action"]>(
@@ -194,6 +195,10 @@ function AwaitCard({
   );
   const [rationale, setRationale] = useState("");
   const [done, setDone] = useState<string | null>(null);
+  // 服务端拒了就不能显示「已记录你的裁决」—— 那句话的意思是 DecisionRecord
+  // 已经落库，而它没有
+  const [failed, setFailed] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   if (done) {
     return (
@@ -256,7 +261,14 @@ function AwaitCard({
           className="ruling-form"
           onSubmit={(e: FormEvent) => {
             e.preventDefault();
-            void onSubmit(action, rationale).then(() => setDone(action));
+            setBusy(true);
+            setFailed(null);
+            void onSubmit(action, rationale)
+              .then((r) => {
+                if (r.ok) setDone(action);
+                else setFailed(r.error ?? "服务端没有接受这条裁决");
+              })
+              .finally(() => setBusy(false));
           }}
         >
           <div className="f-label">
@@ -282,11 +294,12 @@ function AwaitCard({
             onChange={(e) => setRationale(e.target.value)}
           />
           <div className="f-actions">
-            <button className="btn" type="submit">
-              提交裁决
+            <button className="btn" type="submit" disabled={busy}>
+              {busy ? "提交中…" : "提交裁决"}
             </button>
             <span className="f-note">选中 MODIFY_TASK 时应展开 spec 编辑区（未实现）</span>
           </div>
+          {failed && <div className="f-fail">没能提交：{failed}</div>}
         </form>
         <div className="await-ft">
           <span>任务已挂起 · 挂起期间不消耗 token</span>
@@ -396,11 +409,12 @@ export default function ProStream({
 }: {
   taskId: string;
   detail: TaskDetail;
-  onIntervene: (taskId: string, text: string) => Promise<boolean>;
-  onCancel: (taskId: string, reason: string) => Promise<boolean>;
-  onRuling: (taskId: string, action: string, rationale: string) => Promise<boolean>;
+  onIntervene: (taskId: string, text: string) => Promise<ActionResult>;
+  onCancel: (taskId: string, reason: string) => Promise<ActionResult>;
+  onRuling: (taskId: string, action: string, rationale: string) => Promise<ActionResult>;
 }) {
   const [bar, setBar] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const events = useMemo(() => translate(detail), [detail]);
   const isAwaiting =
@@ -413,7 +427,12 @@ export default function ProStream({
   const submitCancel = () => {
     if (stopping) return;
     setStopping(true);
-    void onCancel(taskId, "在界面上取消").finally(() => setStopping(false));
+    setFailed(null);
+    void onCancel(taskId, "在界面上取消")
+      .then((r) => {
+        if (!r.ok) setFailed(r.error ?? "没能取消");
+      })
+      .finally(() => setStopping(false));
   };
 
   const submitIntervene = (e: FormEvent<HTMLFormElement>) => {
@@ -421,7 +440,13 @@ export default function ProStream({
     const input = e.currentTarget.querySelector("input")!;
     const text = input.value.trim();
     if (!text) return;
-    void onIntervene(taskId, text).then(() => {
+    setFailed(null);
+    void onIntervene(taskId, text).then((r) => {
+      if (!r.ok) {
+        // 输入框不清 —— 这条指令没送到，人多半想改改再发
+        setFailed(r.error ?? "没能送出去");
+        return;
+      }
       input.value = "";
       setBar(true);
       setTimeout(() => setBar(false), 5000);
@@ -473,6 +498,7 @@ export default function ProStream({
         <span className="dot RUNNING" />
         已提交，等待当前 step 结束（实测 step 中位 1.65s · p99 5.9s）。中断后抢占队列清空，重复提交只有一条生效。
       </div>
+      {failed && <div className="sysbar bad show">服务端拒绝了：{failed}</div>}
       <div className="composer">
         <form className="row" onSubmit={submitIntervene}>
           <input

@@ -145,6 +145,33 @@ export interface ReviewData {
   independent: boolean;
 }
 
+/**
+ * `GET /api/plans/{id}`：一次拆解的现状（`DecompositionResult.to_dict()` +
+ * 服务层补的几个字段）。拆解还在跑时只有 plan_id / goal / status。
+ *
+ * 三种终局与执行层同构：ACCEPTED ≙ COMPLETED，AWAITING_HUMAN ≙ AWAITING_HUMAN，
+ * REJECTED ≙ ABANDONED。**都不是异常** —— 界面也要照这个分法渲染。
+ */
+export interface PlanView {
+  plan_id: string;
+  goal?: string;
+  status: "RUNNING" | "ERROR" | "ACCEPTED" | "AWAITING_HUMAN" | "REJECTED";
+  error?: string | null;
+  root_id?: string | null;
+  attempts?: number;
+  tokens?: number;
+  decider?: "LLM" | "HUMAN";
+  escalation_reason?: string | null;
+  rationale?: string;
+  specs?: TaskSpec[];
+  review?: ReviewData | null;
+  /** 人裁决过没有、能不能派发。派发过一次之后 dispatched_root 非空。 */
+  dispatchable?: boolean;
+  ruling_note?: string;
+  dispatched_root?: string | null;
+  available_providers?: Record<string, string>;
+}
+
 /** views.thread_list() 的列表项。 */
 export interface ThreadSummary {
   task_id: string;

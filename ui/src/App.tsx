@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ActionResult } from "./api";
 import {
   fetchDetail,
   fetchProviders,
@@ -22,9 +23,11 @@ export interface AppProps {
   detail: TaskDetail | null;
   onSwitchMode: (m: Mode) => void;
   onOpenSettings: () => void;
-  onIntervene: (taskId: string, instruction: string) => Promise<boolean>;
-  onCancel: (taskId: string, reason: string) => Promise<boolean>;
-  onRuling: (taskId: string, action: string, rationale: string) => Promise<boolean>;
+  /** 派发完成后把新线程选中并刷新列表。 */
+  onDispatched: (rootId: string) => void;
+  onIntervene: (taskId: string, instruction: string) => Promise<ActionResult>;
+  onCancel: (taskId: string, reason: string) => Promise<ActionResult>;
+  onRuling: (taskId: string, action: string, rationale: string) => Promise<ActionResult>;
 }
 
 /** 全新用户的第一屏：一家 key 都没配、也还没有任何线程。 */
@@ -55,7 +58,7 @@ function initialMode(): Mode {
 
 /** 服务端按 updated_at 排序（views.thread_list），这里把「等你处理」的顶到最前。 */
 function sortThreads(ts: ThreadSummary[]): ThreadSummary[] {
-  return ts.sort(
+  return [...ts].sort(
     (a, b) =>
       Number(b.status === "AWAITING_HUMAN") - Number(a.status === "AWAITING_HUMAN") ||
       (b.updated_at ?? 0) - (a.updated_at ?? 0),
@@ -111,6 +114,17 @@ export default function App() {
     };
   }, [selected]);
 
+  const refresh = useCallback((taskId?: string | null) => {
+    fetchThreads()
+      .then((ts) => setThreads(sortThreads(ts)))
+      .catch(() => {});
+    if (taskId) {
+      fetchDetail(taskId)
+        .then((d) => setDetail(d))
+        .catch(() => {});
+    }
+  }, []);
+
   // SSE：事件只是「该重拉了」的通知，正文永远以 task_detail 为准（接口文档 §10.4）
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
@@ -119,48 +133,47 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const stop = subscribeStream(() => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        fetchThreads()
-          .then((ts) => setThreads(sortThreads(ts)))
-          .catch(() => {});
-        const cur = selectedRef.current;
-        if (cur) {
-          fetchDetail(cur)
-            .then((d) => setDetail(d))
-            .catch(() => {});
-        }
-      }, 400);
+      timer = setTimeout(() => refresh(selectedRef.current), 400);
     });
     return () => {
       if (timer) clearTimeout(timer);
       stop();
     };
-  }, [page]);
+  }, [page, refresh]);
 
   const switchMode = useCallback((m: Mode) => {
     setMode(m);
     localStorage.setItem("cowork-mode", m);
   }, []);
 
-  const onIntervene = useCallback(async (taskId: string, instruction: string) => {
-    return (await postIntervene(taskId, instruction)).ok;
-  }, []);
+  const onIntervene = useCallback(
+    (taskId: string, instruction: string) => postIntervene(taskId, instruction),
+    [],
+  );
 
-  const onCancel = useCallback(async (taskId: string, reason: string) => {
-    return (await postCancel(taskId, reason)).ok;
-  }, []);
+  const onCancel = useCallback(
+    (taskId: string, reason: string) => postCancel(taskId, reason),
+    [],
+  );
 
   const onRuling = useCallback(
-    async (taskId: string, action: string, rationale: string) => {
-      return (await postRuling(taskId, action, rationale)).ok;
-    },
+    (taskId: string, action: string, rationale: string) =>
+      postRuling(taskId, action, rationale),
     [],
+  );
+
+  const onDispatched = useCallback(
+    (rootId: string) => {
+      setSelected(rootId);
+      refresh(rootId);
+    },
+    [refresh],
   );
 
   if (error) {
     return (
       <div style={{ padding: 40, fontFamily: "monospace" }}>
-        mock API 连不上：{error}（用 npm run dev / preview 启动）
+        连不上服务：{error}（真实服务用 cowork serve，界面开发用 npm run dev）
       </div>
     );
   }
@@ -201,6 +214,7 @@ export default function App() {
       setPage("settings");
       history.replaceState(null, "", "#settings");
     },
+    onDispatched,
     onIntervene,
     onCancel,
     onRuling,

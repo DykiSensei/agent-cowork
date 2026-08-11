@@ -64,6 +64,54 @@ function saveSettings(data: Required<SettingsFile>): void {
   writeFileSync(settingsFile, JSON.stringify(data, null, 1), "utf8");
 }
 
+/** mock 只记住最近一次拆解 —— 它演的是形状，不是并发。 */
+interface MockPlan {
+  id: string;
+  goal: string;
+  asked: number;
+  accepted?: boolean;
+}
+let mockPlan: MockPlan | null = null;
+
+/**
+ * 拆解结果直接借用 fixtures 里那条复合线程的子任务，形状因此和
+ * `views.task_detail()` 里的 spec 完全一致（都出自 make_fixtures.py）。
+ * 状态刻意演 AWAITING_HUMAN：那是 M7 三种终局里唯一需要界面出按钮的一种。
+ */
+function mockPlanResult(p: MockPlan): unknown {
+  const detail = readFixture("task_comp.json") as
+    | { tasks?: Record<string, { spec?: unknown }> }
+    | null;
+  const specs = Object.values(detail?.tasks ?? {}).map((t) => t.spec);
+  const accepted = p.accepted === true;
+  return {
+    plan_id: p.id,
+    goal: p.goal,
+    status: accepted ? "ACCEPTED" : "AWAITING_HUMAN",
+    root_id: "task_comp",
+    attempts: 2,
+    tokens: 18342,
+    decider: accepted ? "HUMAN" : "LLM",
+    escalation_reason: accepted
+      ? null
+      : "已重生成 1 次仍未通过复核（阈值 max_regenerate=2）",
+    rationale: accepted ? "人确认按当前拆解执行" : "需要人裁决这份拆解",
+    specs,
+    review: {
+      structural: [],
+      sufficient: false,
+      missing: ["原始目标里的「一页」没有任何验收标准管它"],
+      tokens: 1203,
+      reviewer: "openai-compat:kimi-k3",
+      independent: true,
+    },
+    dispatchable: accepted,
+    ruling_note: accepted ? "人确认拆解" : "",
+    dispatched_root: null,
+    available_providers: { deepseek: "deepseek-v4", kimi: "kimi-k3" },
+  };
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
@@ -103,6 +151,53 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
 
     if (req.method === "GET" && url.pathname === "/api/tasks") {
       return sendJson(res, 200, readFixture("threads.json") ?? []);
+    }
+
+    // 发布任务 → 拆解 → 裁决 → 派发。mock 不真的拆解，只把**形状**走一遍：
+    // 第一次问是 RUNNING，之后回一份取自 fixtures 的拆解。
+    // 端点在这里必须存在，否则 `npm run dev` 里那个按钮是死的，而真实服务上它是活的
+    // —— mock 和服务层分叉正是 fixtures 这套东西要防的事。
+    if (req.method === "POST" && url.pathname === "/api/tasks") {
+      const body = JSON.parse((await drain(req)) || "{}") as { goal?: string };
+      if (!(body.goal ?? "").trim()) {
+        return sendJson(res, 400, { error: "goal 不能为空" });
+      }
+      mockPlan = { id: `plan_mock${Date.now().toString(36)}`, goal: body.goal!, asked: 0 };
+      return sendJson(res, 202, { plan_id: mockPlan.id });
+    }
+
+    const plan = url.pathname.match(/^\/api\/plans\/([\w-]+)$/);
+    if (req.method === "GET" && plan) {
+      if (!mockPlan || mockPlan.id !== plan[1]) {
+        return sendJson(res, 404, { error: "没有这次拆解" });
+      }
+      mockPlan.asked += 1;
+      if (mockPlan.asked < 3) {
+        return sendJson(res, 200, {
+          plan_id: mockPlan.id, goal: mockPlan.goal, status: "RUNNING", error: null,
+        });
+      }
+      return sendJson(res, 200, mockPlanResult(mockPlan));
+    }
+
+    const planRule = url.pathname.match(/^\/api\/plans\/([\w-]+)\/ruling$/);
+    if (req.method === "POST" && planRule) {
+      const body = JSON.parse((await drain(req)) || "{}") as { accept?: boolean };
+      if (!("accept" in body)) {
+        return sendJson(res, 400, { error: "要么给 accept（true/false），要么给一份 specs" });
+      }
+      if (mockPlan) mockPlan.accepted = Boolean(body.accept);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    const planDispatch = url.pathname.match(/^\/api\/plans\/([\w-]+)\/dispatch$/);
+    if (req.method === "POST" && planDispatch) {
+      await drain(req);
+      if (!mockPlan || mockPlan.id !== planDispatch[1]) {
+        return sendJson(res, 404, { error: "没有这次拆解" });
+      }
+      // fixtures 里那条现成的复合线程 —— 派发之后界面该跳到它
+      return sendJson(res, 202, { root_id: "task_comp" });
     }
 
     const detail = url.pathname.match(/^\/api\/tasks\/([\w-]+)$/);

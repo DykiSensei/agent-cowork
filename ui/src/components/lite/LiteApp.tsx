@@ -1,5 +1,7 @@
+import { useState } from "react";
 import type { AppProps } from "../../App";
 import { LITE_STATUS } from "../../copy";
+import NewTask from "../NewTask";
 import LiteStream from "./LiteStream";
 
 /** lite 模式的线程状态点色。 */
@@ -14,6 +16,7 @@ const LITE_DOT: Record<string, string> = {
 };
 
 export default function LiteApp(props: AppProps) {
+  const [composing, setComposing] = useState(false);
   // INTERRUPTED 是过渡态，不值得在 lite 里占一行
   const threads = props.threads.filter((t) => t.status !== "INTERRUPTED");
   const awaiting = threads.filter((t) => t.status === "AWAITING_HUMAN").length;
@@ -40,6 +43,9 @@ export default function LiteApp(props: AppProps) {
             任务
             {awaiting > 0 && <span className="l-await-tag">{awaiting} 件等你处理</span>}
           </div>
+          <button className="nt-open" onClick={() => setComposing(true)}>
+            ＋ 发布新任务
+          </button>
           {threads.map((t) => (
             <div
               key={t.task_id}
@@ -55,7 +61,14 @@ export default function LiteApp(props: AppProps) {
           ))}
         </aside>
 
-        {props.detail && props.selected ? (
+        {composing ? (
+          <main className="l-stream nt-host">
+            <NewTask
+              onDispatched={props.onDispatched}
+              onClose={() => setComposing(false)}
+            />
+          </main>
+        ) : props.detail && props.selected ? (
           <LiteStream
             key={props.selected}
             taskId={props.selected}

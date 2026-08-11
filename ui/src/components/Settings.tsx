@@ -45,11 +45,20 @@ function ProviderCard({ p }: { p: ProviderInfo }) {
   const [saving, setSaving] = useState(false);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [testing, setTesting] = useState(false);
+  // 保存**可能失败**：值里有换行会被 400 拦（那是 .env 注入防线），.env 写不进去
+  // 是 500。原来这里不看返回码，一律显示「已填 ····abcd」——
+  // 于是唯一会拒绝的那条路径，恰好在界面上长得像成功。
+  const [failed, setFailed] = useState<string | null>(null);
 
   const save = async (key: string) => {
     setSaving(true);
+    setFailed(null);
     try {
-      await putProviderKey(p.name, key);
+      const r = await putProviderKey(p.name, key);
+      if (!r.ok) {
+        setFailed(r.error ?? "没能保存");
+        return;
+      }
       setConfigured(key.length > 0);
       setHint(key ? `····${key.slice(-4)}` : null);
       setInput("");
@@ -127,6 +136,7 @@ function ProviderCard({ p }: { p: ProviderInfo }) {
           </button>
         )}
       </div>
+      {failed && <div className="set-fail">没能保存：{failed}</div>}
       <div className="set-testrow">
         <button className="set-test" disabled={testing || !configured} onClick={() => void test()}>
           {testing ? "测试中…" : "测试连接"}
@@ -149,15 +159,27 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [savedMsg, setSavedMsg] = useState("");
+  const [failed, setFailed] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    void fetchProviders().then(setProviders);
-    void fetchSettings().then(setSettings);
+    // 拿不到就说出来。原来是裸 .then()，服务不在时这一页永远停在「加载中…」
+    void fetchProviders()
+      .then(setProviders)
+      .catch((e: unknown) => setLoadError(String(e)));
+    void fetchSettings()
+      .then(setSettings)
+      .catch((e: unknown) => setLoadError(String(e)));
   }, []);
 
   const saveGlobals = async () => {
     if (!settings) return;
-    await putSettings(settings);
+    setFailed(null);
+    const r = await putSettings(settings);
+    if (!r.ok) {
+      setFailed(r.error ?? "没能保存");
+      return;
+    }
     setSavedMsg("已保存");
     setTimeout(() => setSavedMsg(""), 2500);
   };
@@ -177,9 +199,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           Key 只写不读：保存后这里只显示最后 4 位。真实服务写 .env（配置立即
           生效于新起跑的任务）；mock 存在 ui/mock/settings.local.json。
         </p>
+        {loadError && <div className="set-fail">读不到设置：{loadError}</div>}
         <div className="set-grid">
           {providers === null
-            ? "加载中…"
+            ? loadError
+              ? null
+              : "加载中…"
             : providers.map((p) => <ProviderCard key={p.name} p={p} />)}
         </div>
 
@@ -267,6 +292,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                   这两种改动没有任何东西会拦 —— 它们会让任务<b>看起来成功</b>。
                 </p>
               )}
+              {failed && <div className="set-fail">没能保存：{failed}</div>}
               <div className="set-row" style={{ justifyContent: "flex-end" }}>
                 {savedMsg && <span className="set-key-ok">{savedMsg}</span>}
                 <button className="set-save" onClick={() => void saveGlobals()}>

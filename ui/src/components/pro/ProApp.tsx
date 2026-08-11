@@ -1,9 +1,12 @@
+import { useState } from "react";
 import type { AppProps } from "../../App";
 import { STATUSES, fmtTok } from "../../copy";
+import NewTask from "../NewTask";
 import ProStream from "./ProStream";
 import ProMetaPanel from "./ProMetaPanel";
 
 export default function ProApp(props: AppProps) {
+  const [composing, setComposing] = useState(false);
   const awaiting = props.threads.filter(
     (t) => t.status === "AWAITING_HUMAN",
   ).length;
@@ -15,7 +18,6 @@ export default function ProApp(props: AppProps) {
           agent-cowork <span className="sub">/ ChatSurface</span>
         </div>
         <div className="spacer" />
-        <span className="env">mock API · fixtures 数据</span>
         <span className="env">backend: scripted</span>
         <button className="env mode-btn" onClick={props.onOpenSettings}>
           ⚙ 设置
@@ -30,6 +32,9 @@ export default function ProApp(props: AppProps) {
           <div className="threads-hd">
             <h2>Threads</h2>
             {awaiting > 0 && <span className="await-pill">{awaiting} 待你答复</span>}
+            <button className="nt-open" onClick={() => setComposing(true)}>
+              ＋ 新任务
+            </button>
           </div>
           <ul className="thread-list">
             {props.threads.map((t) => (
@@ -65,7 +70,14 @@ export default function ProApp(props: AppProps) {
           </div>
         </aside>
 
-        {props.detail && props.selected ? (
+        {composing ? (
+          <main className="stream nt-host">
+            <NewTask
+              onDispatched={props.onDispatched}
+              onClose={() => setComposing(false)}
+            />
+          </main>
+        ) : props.detail && props.selected ? (
           <ProStream
             key={props.selected}
             taskId={props.selected}
