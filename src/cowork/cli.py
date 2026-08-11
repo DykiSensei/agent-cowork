@@ -563,12 +563,37 @@ def probe_provider(name: str, *, timeout: float = 10.0) -> dict:
 
     url = base.rstrip("/") + "/models"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            served = {m["id"] for m in json.load(resp).get("data", [])}
-    except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+
+    # **HTTP 状态码要分开看，不能一律当「问不到」。** 实测反馈：这里经常报
+    # 不可用而那家其实好好的 —— 因为 HTTPError 是 URLError 的子类，于是
+    # 「这家没有 /v1/models 这个接口」（404）和「限流」（429，说明 key 是对的）
+    # 全被归成 unreachable。**一个探测函数最重要的是不误报。**
+    last: str = ""
+    for attempt in range(2):   # 一次超时不算数：网络抖动比配置错误常见得多
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                served = {m["id"] for m in json.load(resp).get("data", [])}
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                return {"name": name, "status": "bad_key",
+                        "detail": f"端点通，但 key 被拒（HTTP {exc.code}）"}
+            if exc.code in (404, 405):
+                return {"name": name, "status": "skipped",
+                        "detail": f"这家没有 {url} 这个接口（HTTP {exc.code}）—— "
+                                  "不代表 key 不能用"}
+            if exc.code == 429:
+                # 限流说明**鉴权已经过了**，这是最容易被误报成不可用的一种
+                return {"name": name, "status": "ok",
+                        "detail": "被限流（HTTP 429）—— 说明 key 有效，只是这会儿太忙"}
+            last = f"HTTP {exc.code}"
+        except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+            last = f"{type(exc).__name__}: {str(exc)[:120]}"
+        if attempt == 0:
+            timeout *= 2
+    else:
         return {"name": name, "status": "unreachable",
-                "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}
+                "detail": f"两次都没问到（{last}）—— 网络或代理的问题，不代表 key 不对"}
 
     where = "" if base == p["base"] else f"（走覆盖地址 {base}）"
     missing = [m for m in wanted if m not in served]
@@ -578,10 +603,14 @@ def probe_provider(name: str, *, timeout: float = 10.0) -> dict:
     return {"name": name, "status": "ok", "detail": f"{wanted} 都在服务端{where}"}
 
 
-_PROBE_LABEL = {"ok": "OK", "mismatch": "对不上", "unreachable": "问不到", "skipped": "跳过"}
-_PROBE_EXIT = {"ok": 0, "skipped": 0, "unreachable": 1, "mismatch": 2}
-_PROBE_MARK = {"ok": "✓", "mismatch": "✗", "unreachable": "?", "skipped": "-"}
-_PROBE_MARK_ASCII = {"ok": "+", "mismatch": "x", "unreachable": "?", "skipped": "-"}
+_PROBE_LABEL = {"ok": "OK", "mismatch": "对不上", "unreachable": "问不到",
+                "skipped": "跳过", "bad_key": "key 被拒"}
+# bad_key 是唯一「确实配错了」的一种，退出码给 2；unreachable 只是没问到
+_PROBE_EXIT = {"ok": 0, "skipped": 0, "unreachable": 1, "mismatch": 2, "bad_key": 2}
+_PROBE_MARK = {"ok": "✓", "mismatch": "✗", "unreachable": "?", "skipped": "-",
+               "bad_key": "✗"}
+_PROBE_MARK_ASCII = {"ok": "+", "mismatch": "x", "unreachable": "?", "skipped": "-",
+                     "bad_key": "x"}
 
 
 def _marks() -> dict[str, str]:

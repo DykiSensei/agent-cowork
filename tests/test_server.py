@@ -519,6 +519,101 @@ class TestServer(unittest.TestCase):
                 r = client.post("/api/tasks", json={"goal": "x", "mode": "yolo"})
                 self.assertEqual(r.status_code, 400)
 
+    def test_delete_thread_removes_records_but_not_files(self):
+        """**删记录不删文件。** 产物是人的东西 —— 删一条聊天记录不该顺手删他的代码。"""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            spec, backend = _restore_scenario(tmp / "ws")
+            (tmp / "ws").mkdir()
+            (tmp / "ws" / "keep.txt").write_text("人的东西", encoding="utf-8")
+            client = self._app(backend, tmp)
+            with client:
+                runner = client.app.state.runner
+                Orchestrator(spec, backend=backend, store=runner.store,
+                             human_gate=runner.gate, log=QUIET).run()
+                self.assertIsNotNone(runner.store.load_task(spec.id))
+
+                r = client.delete(f"/api/tasks/{spec.id}")
+                self.assertEqual(r.status_code, 200, r.text)
+
+                self.assertIsNone(runner.store.load_task(spec.id))
+                self.assertEqual(runner.store.events_for(spec.id), [])
+                self.assertEqual(runner.store.signals_for(spec.id), [])
+                self.assertEqual(runner.store.decisions_for(spec.id), [])
+                self.assertNotIn(
+                    spec.id, [t["task_id"] for t in client.get("/api/tasks").json()]
+                )
+                self.assertTrue((tmp / "ws" / "keep.txt").exists(),
+                                "工作区里的文件不能被删")
+
+    def test_a_running_task_cannot_be_deleted(self):
+        """边跑边删等于没删：后面每一次 save_task 都会把行写回来。"""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            spec, backend = _restore_scenario(tmp / "ws")
+            (tmp / "ws").mkdir()
+            client = self._app(backend, tmp)
+            with client:
+                runner = client.app.state.runner
+                runner.running[spec.id] = Orchestrator(
+                    spec, backend=backend, store=runner.store,
+                    human_gate=runner.gate, log=QUIET,
+                )
+                try:
+                    r = client.delete(f"/api/tasks/{spec.id}")
+                    self.assertEqual(r.status_code, 409)
+                    self.assertIn("先点", r.json()["error"])
+                finally:
+                    runner.running.pop(spec.id, None)
+
+    def test_folder_picker_lists_directories(self):
+        """浏览器拿不到本机绝对路径，只能让服务端列 —— 这是路径能点选的前提。"""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "proj").mkdir()
+            (tmp / "proj" / "sub").mkdir()
+            (tmp / "proj" / "a.txt").write_text("x", encoding="utf-8")
+            client = self._app(self._plan_backend(), tmp)
+            with client:
+                # 不给 path 时给几个起点，而不是从文件系统根开始
+                roots = client.get("/api/fs").json()
+                self.assertTrue(roots["roots"])
+                self.assertTrue(roots["entries"])
+
+                got = client.get("/api/fs", params={"path": str(tmp / "proj")}).json()
+                names = [e["name"] for e in got["entries"]]
+                self.assertEqual(names, ["sub"], "只列子目录，文件是噪声")
+                self.assertEqual(got["parent"], str(tmp))
+
+                r = client.get("/api/fs", params={"path": str(tmp / "nope")})
+                self.assertEqual(r.status_code, 400)
+
+    def test_planning_progress_lands_in_the_timeline(self):
+        """拆解过程要落成事件，不能只是一条 SSE 广播。
+
+        广播没人订阅就消失，刷新页面也拿不回来 —— 于是「架构师在干什么」
+        在界面上是一段空白（实测原话：不知道它在干啥，卡住了也不知道）。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            client = self._app(self._plan_backend(), Path(td))
+            with client:
+                plan_id = client.post(
+                    "/api/tasks", json={"goal": "做点东西", "workspace": td}
+                ).json()["plan_id"]
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("status")
+                    != "RUNNING",
+                    what="拆解完成",
+                )
+                texts = [
+                    e["text"]
+                    for e in client.get(f"/api/tasks/{plan_id}").json()["events"]
+                    if e["kind"] == "log"
+                ]
+                self.assertTrue(any("开始拆解" in t for t in texts))
+                self.assertTrue(any("产物会落在" in t for t in texts))
+                self.assertTrue(any("终局" in t for t in texts))
+
     def test_settings_carry_the_role_providers_and_workspace(self):
         with tempfile.TemporaryDirectory() as td:
             client = self._app(self._plan_backend(), Path(td))

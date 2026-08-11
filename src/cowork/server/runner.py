@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .. import ids, views, workspace
@@ -24,7 +24,7 @@ from ..agent.architect import (
 from ..orchestrator import Orchestrator
 from ..policy import DEFAULT_POLICY
 from ..scheduler import Scheduler
-from ..types import Action, SandboxProfile, TaskEvent, TaskSpec, TaskStatus
+from ..types import Action, SandboxProfile, TaskEvent, TaskSpec, TaskStatus  # noqa: F401
 
 # PROVIDERS 预设表和后端工厂目前住在 cli 里 —— 服务层复用同一份，
 # 不另抄（将来值得挪进 llm/，那是另一次整理）
@@ -144,8 +144,48 @@ class Runner:
 
         return (os.environ.get("COWORK_REVIEW_WRITES") or "on").strip().lower() != "off"
 
+    def _allowed_binaries(self) -> tuple[str, ...]:
+        """`run` 能调哪些可执行文件。默认只有 python。
+
+        **白名单归人和模板，不归架构师**（同 `SpecTemplate` 那条：让被隔离方
+        给自己配隔离边界是没有意义的）。所以它在设置页，不在拆解提示词里。
+        """
+        import os
+
+        raw = (os.environ.get("COWORK_ALLOWED_BINARIES") or "").strip()
+        if not raw:
+            return ("python",)
+        return tuple(x.strip() for x in raw.split(",") if x.strip()) or ("python",)
+
+    def _allow_network(self) -> bool:
+        """`fetch_url` 开不开。**默认关** —— 见 `SpecTemplate.tools` 的说明。"""
+        import os
+
+        return (os.environ.get("COWORK_ALLOW_NETWORK") or "").strip().lower() == "on"
+
     def _log(self, msg: str) -> None:
         self.hub.publish_threadsafe({"type": "server-log", "text": msg})
+
+    def _plan_log(self, plan_id: str):
+        """拆解过程的日志 —— **落成事件**，不只是广播。
+
+        原来 `architect.plan()` 的日志走 `self._log`，那只是一条 SSE 广播：
+        没人订阅时它就消失了，刷新页面也拿不回来。于是「架构师在干什么」在界面上
+        是一段空白 —— 实测反馈的原话是「不知道它到底在干啥，卡住了也不知道」。
+
+        写在 root 线程上（那条线程此时只有事件、还没有任何 tasks 行 ——
+        这正是 `views` 那条「线程的存在性看事件」要支撑的场景）。
+        """
+        def log(msg: str) -> None:
+            self._log(msg)
+            try:
+                self.store.append_event(
+                    TaskEvent(task_id=plan_id, kind="log", text=msg)
+                )
+            except Exception:  # noqa: BLE001 - 事件是旁路，写不进去不该影响拆解
+                pass
+
+        return log
 
     # ------------------------------------------------------------------ #
     # 拆解（POST /tasks）
@@ -191,8 +231,11 @@ class Runner:
 
     def _plan_worker(self, plan_id: str, goal: str, backend) -> None:
         entry = self.plans[plan_id]
+        log = self._plan_log(plan_id)
         try:
+            log(f"[PLAN] 开始拆解：{goal}")
             ws = workspace.ensure(Path(entry.workspace))
+            log(f"[PLAN] 产物会落在 {ws}")
             # 接手已有项目：先把现状摆给架构师看。**不给的话它会把一个有内容的
             # 目录当空目录，从零重建一遍** —— 那正是「半路接手」和「从零开始」
             # 的全部区别。从零开始的任务不采集（目录本来就是空的，白花提示词）。
@@ -200,8 +243,8 @@ class Runner:
             if entry.takeover:
                 entries = workspace.snapshot(ws)
                 existing = workspace.render_snapshot(entries)
-                self._log(
-                    f"[PLAN] 接手已有项目：{ws}，现状 {len(entries)} 个文件"
+                log(
+                    f"[PLAN] 接手已有项目，看到 {len(entries)} 个文件"
                     if entries
                     else f"[PLAN] 接手模式，但 {ws} 是空的 —— 按从零开始处理"
                 )
@@ -213,16 +256,25 @@ class Runner:
                 reviewer_backend=self._reviewer_backend(),
                 review_writes=self._review_writes(),
             )
-            result = architect.plan(
-                goal,
-                SpecTemplate(
-                    sandbox=SandboxProfile(
-                        workspace=str(ws), allowed_binaries=("python",)
-                    ),
-                    parent_id=plan_id,
+            template = SpecTemplate(
+                sandbox=SandboxProfile(
+                    workspace=str(ws), allowed_binaries=self._allowed_binaries()
                 ),
-                existing=existing or None,
-                log=self._log,
+                parent_id=plan_id,
+            )
+            if self._allow_network():
+                template = replace(template, tools=(*template.tools, "fetch_url"))
+            reviewer = self._reviewer_backend()
+            log(
+                f"[PLAN] 生成者 {getattr(backend, 'name', '?')}"
+                f" / 复核者 {getattr(reviewer, 'name', '（同生成者）') if reviewer else '（同生成者）'}"
+            )
+            result = architect.plan(
+                goal, template, existing=existing or None, log=log
+            )
+            log(
+                f"[PLAN] 终局 {result.status}：{len(result.specs)} 个子任务，"
+                f"{result.attempts} 轮，{result.tokens} token"
             )
             with self._lock:
                 entry.result = result
@@ -230,6 +282,7 @@ class Runner:
                 entry.dispatchable = result.accepted
         except Exception as exc:  # noqa: BLE001 - 线程里任何异常都得落成状态
             entry.error = f"{type(exc).__name__}: {exc}"
+            log(f"[PLAN] 拆解失败：{entry.error}")
         self.hub.publish_threadsafe({"type": "plan", "plan_id": plan_id})
 
     def get_plan(self, plan_id: str) -> dict | None:
@@ -351,6 +404,35 @@ class Runner:
             return False
         orch.cancel(reason)
         return True
+
+    def delete_thread(self, task_id: str) -> tuple[bool, str]:
+        """删掉一条线程。返回 (成不成, 原因)。
+
+        **正在跑的不能删** —— 那不是删除，是「一边跑一边把它的记录抽走」，
+        后面每一次 save_task 都会把行写回来，删了等于没删。先取消，再删。
+        """
+        running = [tid for tid in self.running if tid == task_id]
+        running += [
+            tid
+            for tid, orch in list(self.running.items())
+            if orch.spec.parent_id == task_id
+        ]
+        if running:
+            return False, (
+                "这条任务还在跑，先点「停下来」，等它停了再删 —— "
+                "边跑边删的话记录会被它自己写回来"
+            )
+        deleter = getattr(self.store, "delete_thread", None)
+        if deleter is None:
+            return False, "这个存储实现不支持删除"
+        deleter(task_id)
+        # 内存里的拆解注册表也要清 —— 不清的话列表里那一行会被
+        # 「有事件的线程」那条规则重新变出来（plans 里还留着它的 goal）
+        with self._lock:
+            self.plans.pop(task_id, None)
+        self.hub.publish_threadsafe({"type": "task", "task_id": task_id,
+                                     "status": "DELETED"})
+        return True, ""
 
     # ------------------------------------------------------------------ #
     # restore 路径（M6 §9 最实质的那块）

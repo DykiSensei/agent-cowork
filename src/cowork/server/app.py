@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from ..cli import PROVIDERS, available_providers
 from ..llm.effort import LEVELS as EFFORT_LEVELS
 from ..store import SqliteStore
+from ..workspace import browse as browse_dirs
 from ..workspace import resolve_workspace
 from .runner import Runner
 from .settings_io import DEFAULTS, GLOBAL_KEYS, effective_env, key_hint, update_env
@@ -152,6 +153,24 @@ def create_app(
                 "如果它已经结束了，就不用停了。",
             )
         return {"accepted": True}
+
+    @app.delete("/api/tasks/{task_id}")
+    def delete_task(task_id: str):
+        """删掉一条线程。**只删记录，不碰工作区里的文件。**
+
+        产物是人的东西 —— 删一条聊天记录不该顺手删掉他的代码。要删文件人自己
+        去那个目录删（界面上显示着路径）。
+        """
+        ok, why = runner.delete_thread(task_id)
+        return {"deleted": True} if ok else err(409, why)
+
+    @app.get("/api/fs")
+    def browse_fs(path: str = ""):
+        """列目录，给界面上的文件夹选择器用（浏览器拿不到本机绝对路径）。"""
+        try:
+            return browse_dirs(path)
+        except ValueError as exc:
+            return err(400, str(exc))
 
     @app.post("/api/tasks/{task_id}/ruling", status_code=202)
     async def rule_task(task_id: str, req: Request):
@@ -318,6 +337,12 @@ def create_app(
             "workspace": env.get(GLOBAL_KEYS["workspace"], ""),
             # 界面要显示「没配的话东西会落在哪」—— 这个问题得有答案
             "workspace_default": str(runner.workspace_root()),
+            "allowed_binaries": env.get(
+                GLOBAL_KEYS["allowed_binaries"], DEFAULTS["allowed_binaries"]
+            ),
+            "allow_network": env.get(
+                GLOBAL_KEYS["allow_network"], DEFAULTS["allow_network"]
+            ),
         }
         return out
 
@@ -338,6 +363,11 @@ def create_app(
                     value = str(raw).strip().lower()
                     if value not in ("on", "off"):
                         return err(400, f"review_writes 只能是 on / off，收到 {raw!r}")
+                    pairs[env_name] = value
+                elif flat == "allow_network":
+                    value = str(raw).strip().lower()
+                    if value not in ("on", "off"):
+                        return err(400, f"allow_network 只能是 on / off，收到 {raw!r}")
                     pairs[env_name] = value
                 elif flat == "workspace":
                     value = str(raw or "").strip()

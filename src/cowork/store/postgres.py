@@ -338,5 +338,17 @@ class PostgresStore:
             r = cur.fetchone()
         return Artifact.from_dict(r) if r else None
 
+    def delete_thread(self, task_id: str) -> int:
+        """删掉一条线程及其附属记录（理由与边界见 SqliteStore 的同名方法）。"""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM tasks WHERE id=%s OR parent_id=%s", (task_id, task_id)
+            )
+            ids = list({r["id"] for r in cur.fetchall()} | {task_id})
+            for table in ("checkpoints", "signals", "decisions", "events", "artifacts"):
+                cur.execute(f"DELETE FROM {table} WHERE task_id = ANY(%s)", (ids,))
+            cur.execute("DELETE FROM tasks WHERE id = ANY(%s)", (ids,))
+            return len(ids) - 1 if task_id not in ids else len(ids)
+
     def close(self) -> None:
         self.conn.close()

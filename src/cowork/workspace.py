@@ -96,6 +96,61 @@ def ensure(path: Path) -> Path:
     return path
 
 
+def browse(raw: str | None) -> dict:
+    """列一个目录下的**子目录**，给界面上的文件夹选择器用。
+
+    为什么要有它：浏览器拿不到本机路径 —— `<input type="file" webkitdirectory>`
+    给的是文件句柄和相对名，不是绝对路径，而服务端要的正是绝对路径。
+    但这个服务本来就跑在**本机**，所以「让服务端列目录、界面上点」是唯一
+    既能点又能拿到真路径的做法。
+
+    只列目录不列文件：这个选择器是用来选工作区的，文件是噪声。
+    `raw` 为空时给几个起点（home、各盘符）——**不要从文件系统根开始**，
+    那对人没有帮助。
+
+    权限边界与设置页写 .env 同级：服务只绑 loopback（`server/bind.py` 硬拦），
+    这条端点因此只暴露给本机的人，而他本来就能看自己的磁盘。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {"path": "", "parent": None, "entries": _roots(), "roots": True}
+    path = Path(os.path.expandvars(os.path.expanduser(text)))
+    if not path.is_absolute() or not path.is_dir():
+        raise WorkspaceError(f"打不开这个目录：{text}")
+    try:
+        dirs = sorted(
+            (p for p in path.iterdir() if p.is_dir() and not p.name.startswith(".")),
+            key=lambda p: p.name.lower(),
+        )
+    except OSError as exc:
+        raise WorkspaceError(f"读不了这个目录：{exc}") from None
+    return {
+        "path": str(path),
+        "parent": None if path.parent == path else str(path.parent),
+        "entries": [{"name": p.name, "path": str(p)} for p in dirs[:500]],
+        "roots": False,
+    }
+
+
+def _roots() -> list[dict]:
+    """起点：home 和常用位置，Windows 上再加各个盘符。"""
+    out: list[dict] = [{"name": "主目录", "path": str(Path.home())}]
+    for name in ("Desktop", "Documents", "桌面", "文档"):
+        p = Path.home() / name
+        if p.is_dir():
+            out.append({"name": name, "path": str(p)})
+    default = default_root()
+    if default.is_dir():
+        out.append({"name": "cowork 工作区", "path": str(default)})
+    if os.name == "nt":
+        for letter in "CDEFGH":
+            drive = Path(f"{letter}:/")
+            if drive.is_dir():
+                out.append({"name": f"{letter}:", "path": str(drive)})
+    seen: set[str] = set()
+    return [e for e in out if not (e["path"] in seen or seen.add(e["path"]))]
+
+
 def snapshot(root: Path, *, max_entries: int = MAX_ENTRIES,
              max_depth: int = MAX_DEPTH) -> list[dict]:
     """工作区现状：相对路径 + 字节数，按路径排序。

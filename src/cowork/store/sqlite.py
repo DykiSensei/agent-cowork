@@ -424,5 +424,27 @@ class SqliteStore:
         return Artifact.from_dict(dict(r)) if r else None
 
     @_synchronized
+    def delete_thread(self, task_id: str) -> int:
+        """删掉一条线程：它自己 + 它的子任务 + 全部附属记录。返回删了几个任务。
+
+        **只删记录，不碰工作区里的文件。** 产物是人的东西，删一条聊天记录不该
+        顺手删掉他的代码 —— 要删文件，人自己去那个目录删（界面上会显示路径）。
+
+        线程可能没有 tasks 行（复合任务的 root 按设计就没有），所以事件、信号
+        这些要按 id 集合删，不能只跟着 tasks 走。
+        """
+        rows = self.conn.execute(
+            "SELECT id FROM tasks WHERE id=? OR parent_id=?", (task_id, task_id)
+        ).fetchall()
+        ids = {r["id"] for r in rows} | {task_id}
+        marks = ",".join("?" * len(ids))
+        args = tuple(ids)
+        for table in ("checkpoints", "signals", "decisions", "events", "artifacts"):
+            self.conn.execute(f"DELETE FROM {table} WHERE task_id IN ({marks})", args)
+        self.conn.execute(f"DELETE FROM tasks WHERE id IN ({marks})", args)
+        self.conn.commit()
+        return len(rows)
+
+    @_synchronized
     def close(self) -> None:
         self.conn.close()

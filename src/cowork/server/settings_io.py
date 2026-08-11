@@ -31,6 +31,10 @@ GLOBAL_KEYS = {
     "providers.reviewer": "COWORK_REVIEWER_PROVIDER",
     "providers.subagent": "COWORK_SUBAGENT_PROVIDER",
     "workspace": "COWORK_WORKSPACE",
+    # 工具面的两个闸门。**都归人，不归架构师** —— 让被隔离方给自己配隔离边界
+    # 是没有意义的（同 SpecTemplate 那条）。
+    "allowed_binaries": "COWORK_ALLOWED_BINARIES",
+    "allow_network": "COWORK_ALLOW_NETWORK",
     "review_writes": "COWORK_REVIEW_WRITES",
 }
 
@@ -44,6 +48,10 @@ DEFAULTS = {
     # （§11.11：独立复核的前提就是不同家），Subagent 跟架构师同一家。
     "providers": {"architect": "", "reviewer": "", "subagent": ""},
     "workspace": "",
+    "allowed_binaries": "python",
+    # 默认关：取回的第三方内容会进 reasoning_trace 再进下一轮提示词，
+    # 那是一条提示词注入通道
+    "allow_network": "off",
     "effort": {"architect": "high", "subagent": "medium", "cheap": "off"},
     # 写入侧复核（§12 M8）。默认开，依据 §11.19；界面上留开关是因为
     # 它的**重做循环**没在真实链路上测过，只有判别力那半有数据。
