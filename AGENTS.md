@@ -13,7 +13,7 @@ Subagent 是薄执行层，Runtime 是完全确定性的（不含任何 LLM 调�
 另有 `M6-界面层接口.md`：给界面层的对外接口约定 —— 改动 `to_dict()` 的形状、
 `HumanGate` 的签名或信号类型时，那份文档必须同步改。
 
-当前进度：M0–M7 全部完成；M8（写入侧复核，改 TaskSpec 前让复核者看一眼）代码完成、
+当前进度：**M0–M8 全部完成。** M8（写入侧复核，改 TaskSpec 前让复核者看一眼）
 判别力已实测（26 用例，**deepseek J 0.963 / kimi 0.907，FPR 两边 0/24**，§11.19），
 **默认开**，界面设置页留开关（`COWORK_REVIEW_WRITES=off`），复核者选 **deepseek**；
 跑批显式关掉（M2/M3 的参数都是在没有它时测的，开着就不可比）。
@@ -65,6 +65,8 @@ python -m cowork.cli plan "<一句话目标>"           # M7：拆解 + 复核�
 python -m cowork.cli bench --backend deepseek --repeat 5   # M2 跑批，约 25 分钟 / 1.6M token
 python -m cowork.cli bench-report bench_runs.jsonl         # 只出报告，不重跑不花钱
 python -m cowork.cli bench-review / bench-plan ...         # M7 复核 / 拆解对照实测
+python -m cowork.cli bench-decide --repeat 3               # M8 写入侧复核，26 用例 × 2 arm
+python -m cowork.cli demo --budget 0                       # 关会话 token 硬护栏（默认 100 万）
 
 pip install -e .[server]                                   # M6 服务层依赖（fastapi/uvicorn）
 python -m cowork.cli serve                                 # HTTP + SSE + 静态 UI（只绑 loopback）
@@ -96,13 +98,17 @@ cli.py          全部子命令 + PROVIDERS 预设表 + DEFAULT_REVIEWER
 runtime/        确定性层：bus / sandbox / detectors / loop —— 这里不许出现 LLM 调用
 agent/          architect（唯一写入决策点）/ subagent（薄绑定层）
 llm/            __init__ 是后端协议本身（给模型加能力从这里改）；
-                scripted / anthropic_backend / openai_compat / errors
+                scripted / anthropic_backend / openai_compat / errors /
+                effort（推理挡位）/ routing（按任务选供应商）/
+                budget（会话级 token 硬护栏，包一层 Backend）
 store/          sqlite（默认）/ postgres
 server/         M6 服务层：app（路由）/ runner（线程编排 + plan 注册表）/
                 gate（ChatGate）/ tap（写入处发事件）/ settings_io（.env 读写）/
                 bind（绑定地址准入：非回环拒绝启动）
 views.py        界面层投影：thread_list / task_detail / pending_ruling（服务层只调它）
 bench/          实测工具，只包装不改被测对象，不参与生产链路
+                review_ab（M7 跨模型复核）/ plan_ab（拆解提示词两臂）/
+                decide_ab（M8 写入侧复核，26 用例带标准答案）
 demo*.py        验证场景，「隐藏要求」写在这里
 ```
 

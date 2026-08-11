@@ -60,8 +60,13 @@ shot-app-*.png         React 版的自检截图
 写类：`POST /api/tasks/:id/intervene|cancel|ruling`（202，mock 不驱动任何任务；
 真实服务里 cancel 对不在运行的任务回 409）。
 `GET /api/stream` 是 SSE，只发心跳。
-设置页：`GET/PUT /api/providers[/:name]`、`GET/PUT /api/settings` ——
-key 只写不读，回包只有 `configured` + 最后 4 位识别串。
+设置页：`GET/PUT /api/providers[/:name]`、`POST /api/providers/:name/test`、
+`GET/PUT /api/settings` —— key 只写不读，回包只有 `configured` + 最后 4 位识别串。
+
+设置页上三件事是分开的，别再合并：**`preset_verified`**（我们验证过这一行的
+model id）/ **`configured`**（你填了 key）/ **「测试连接」的结果**（你的 key 现在
+能不能用）。另有 **写入侧复核开关**（`review_writes`，字符串 on/off 不是布尔 ——
+它落进 .env，空串在那里等于未设置、会回落到默认开）。
 
 ## 真实服务层（已实现，`src/cowork/server/`）
 

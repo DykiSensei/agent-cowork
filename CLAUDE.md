@@ -122,6 +122,8 @@ python -m cowork.cli composite --reviewer none  # 退回同模型复核（默认
 python -m cowork.cli plan "<一句话目标>"          # M7：拆解 + 复核，不执行（约 10-35k token）
 python -m cowork.cli plan "<目标>" --run          # 一路跑到产出：拆解 → 分层 → 并行执行
 python -m cowork.cli plan "<目标>" --gate cli     # 升级给人时自己在终端拍板
+python -m cowork.cli plan "<目标>" --budget 0     # 关掉会话 token 硬护栏（默认 100 万）
+                                                # demo / composite / plan / serve 都有 --budget
 
 python -m cowork.cli bench --backend deepseek --repeat 5  # M2 跑批，约 25 分钟 / 1.6M token
 python -m cowork.cli bench --tasks PROBE_AB --repeat 5    # M3 的 PROBE vs TRUST 对照
@@ -186,6 +188,7 @@ Bash 工具的控制台会乱码。
 | `COWORK_LLM_BASE_URL` / `COWORK_LLM_API_KEY` | 指向 LiteLLM 或任意 OpenAI 兼容端点 |
 | `COWORK_ARCHITECT_MODEL` / `COWORK_SUBAGENT_MODEL` / `COWORK_TRIAGE_MODEL` | 覆盖 `cli.py` 的 `PROVIDERS` 默认分工 |
 | `COWORK_ARCHITECT_EFFORT` / `COWORK_SUBAGENT_EFFORT` / `COWORK_CHEAP_EFFORT` | 推理挡位 off/low/medium/high/max，默认 high / medium / off（§11.15） |
+| `COWORK_REVIEW_WRITES` | 写入侧复核开关，`off` 关掉（默认开，§11.19）。设置页写的就是它 |
 | `COWORK_ENV_FILE` | 换一份 `.env` |
 
 ## 四条架构不变量 —— 改动不能破坏
@@ -436,6 +439,8 @@ agent/          architect（唯一写入决策点：中断决策 + 拆解生成 
                 reviewer_backend = 无写权的复核者）/ subagent（薄绑定层）
 llm/            effort.py 推理挡位映射：统一词表 → 各家参数，不认识就不发
                 routing.py 按任务路由 Subagent 到不同供应商（只路由 next_step）
+                budget.py  会话级 token 硬护栏：包一层 Backend，超限抛
+                           BudgetExceeded（= LiteLLM 硬拒同一信号，不需要新控制流）
                 __init__ 是后端协议本身：Backend Protocol + ArchitectVerdict /
                 Triage / CacheStats，
                 **给模型加一种能力从这里改**；scripted（确定性测试用）/
@@ -445,7 +450,8 @@ store/          sqlite（默认）/ postgres（正式）。两边都在连接时
 bench/          §12 M2/M3/M5 实测 —— 只包装不改被测对象，不参与生产链路
                 review_ab.py 是 M7 7.2：12 个带标准答案的拆解 + TPR/FPR/J
                 plan_ab.py  是 M7 7.4：提示词两臂 + 生成-复核循环的指标
-                decide_ab.py 是 M8 8.4：11 个带标准答案的 spec 改动 + TPR/FPR/J，
-                **还没跑过**；用例全部取自 bench/tasks.py 的真实任务（隐藏要求
-                在那边逐条写明，所以「改对了」有客观答案）
+                decide_ab.py 是 M8 8.4：26 个带标准答案的 spec 改动（每种缺陷
+                形态 3 个）+ TPR/FPR/J。用例全部取自 bench/tasks.py 的真实任务
+                （隐藏要求在那边逐条写明，所以「改对了」有客观答案）。
+                **它故意绕开 `_review_write`** —— 测的是判别力不是重做循环
 ```
