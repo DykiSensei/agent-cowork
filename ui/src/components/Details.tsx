@@ -67,7 +67,10 @@ export default function Details({ detail }: { detail: TaskDetail }) {
               <div className="dt-kv">
                 <span>成本</span>
                 <b>
-                  {fmtTok(t.tokens_used)} / {fmtTok(t.spec.token_budget ?? 0)} tok
+                  {fmtTok(t.tokens_used)} tok
+                  {/* token_budget = 0 是「不限」（M11 起的默认）。
+                      写成 "/ 0 tok" 会让人以为额度是 0、马上要炸 */}
+                  {t.spec.token_budget ? ` / ${fmtTok(t.spec.token_budget)}` : "（不限）"}
                 </b>
               </div>
               <div className="dt-kv">

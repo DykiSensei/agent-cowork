@@ -30,6 +30,7 @@ from ..llm.effort import resolve
 from ..llm.errors import MissingApiKey, ModelCallFailed, from_provider_error
 from ..runtime.detectors import validate_schema
 from ..types import AgentContext, Signal, TaskSpec
+from .prompts import with_extra
 from .anthropic_backend import (
     ACTION_SCHEMA,
     ARCHITECT_SYSTEM,
@@ -312,7 +313,7 @@ class OpenAICompatBackend:
     def next_step(self, ctx: AgentContext) -> tuple[AgentAction, int]:
         data, tokens = self._call(
             model=self.subagent_model or ctx.task_spec.model,
-            system=SUBAGENT_SYSTEM,
+            system=with_extra(SUBAGENT_SYSTEM, "subagent"),
             user=_render_subagent_context(ctx),
             schema=ACTION_SCHEMA,
             effort=self.subagent_effort,
@@ -352,7 +353,7 @@ class OpenAICompatBackend:
         user = _render_architect_context(spec, signals, ctx, history, review_feedback)
         data, tokens = self._call(
             model=self.architect_model,
-            system=ARCHITECT_SYSTEM,
+            system=with_extra(ARCHITECT_SYSTEM, "architect"),
             user=user,
             schema=VERDICT_SCHEMA,
             effort=self.architect_effort,
@@ -419,7 +420,7 @@ class OpenAICompatBackend:
     ) -> tuple[bool, list[str], int]:
         data, tokens = self._call(
             model=self.architect_model,
-            system=REVIEW_SYSTEM,
+            system=with_extra(REVIEW_SYSTEM, "reviewer"),
             user=_render_review_context(root_goal, specs),
             schema=REVIEW_SCHEMA,
             max_tokens=REVIEW_MAX_TOKENS,
@@ -432,7 +433,7 @@ class OpenAICompatBackend:
     ) -> tuple[bool, list[str], int]:
         data, tokens = self._call(
             model=self.architect_model,
-            system=SPEC_REVIEW_SYSTEM,
+            system=with_extra(SPEC_REVIEW_SYSTEM, "reviewer"),
             user=_render_spec_review_context(spec, signals, verdict),
             schema=SPEC_REVIEW_SCHEMA,
             max_tokens=SPEC_REVIEW_MAX_TOKENS,
@@ -446,7 +447,7 @@ class OpenAICompatBackend:
     ) -> tuple[list[SubtaskDraft], int]:
         data, tokens = self._call(
             model=self.architect_model,
-            system=self.decompose_system,
+            system=with_extra(self.decompose_system, "architect"),
             user=_render_decompose_context(root_goal, feedback, existing),
             schema=DECOMPOSE_SCHEMA,
             # 拆解是这里最长的一次输出：6 个子任务 × 若干条带命令的验收标准，

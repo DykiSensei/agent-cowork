@@ -465,6 +465,93 @@ class TestExpandedToolSurface(LoopFixture):
                           f"{call.name} 不该在默认工具面里")
 
 
+class TestBinaryApproval(LoopFixture):
+    """撞 `run` 的程序白名单 → **交给人审批**，不是让人去改配置（M11）。
+
+    这条路以前的终点是「人跑去设置页改 COWORK_ALLOWED_BINARIES 再重跑」——
+    而那和「这一刻要不要放行它」根本不是同一个决定，中间还隔着一次重跑。
+    现在信号带着程序名上来，人的裁决直接把它加进这个任务的白名单。
+    """
+
+    def test_signal_carries_the_binary_name(self):
+        """按名字放行要有名字可用 —— **从 payload 取，不从理由文字里抠**。"""
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="run", args={"command": ["curl", "http://x"]},
+                             thought=""),
+        }, tools=("run",), max_steps=3)
+        outcome = loop.run(ctx, agent)
+
+        sig = outcome.preempting_signal
+        self.assertIs(sig.type, SignalType.SCOPE_VIOLATION)
+        self.assertEqual(sig.payload.get("binary"), "curl")
+
+    def test_message_does_not_send_the_model_to_change_settings(self):
+        """这条消息模型也会看到。让它去改配置是误导 —— 它改不了。
+
+        用 `curl`：它是**刻意不在**默认白名单里的那一类（对外、不可逆），
+        所以这条断言不会因为默认名单以后放宽而失效。
+        """
+        from cowork.runtime.sandbox import Sandbox, ScopeViolation
+        from cowork.types import SandboxProfile
+
+        sb = Sandbox(SandboxProfile(workspace=str(self.ws)), ["out.py"])
+        with self.assertRaises(ScopeViolation) as caught:
+            sb.run(["curl", "https://example.com"])
+        self.assertEqual(caught.exception.binary, "curl")
+        self.assertNotIn("设置页", str(caught.exception))
+
+    def test_granting_adds_it_to_this_task_only(self):
+        """放行落在 spec 上（因此进 checkpoint、扛得住 restore），只对这个任务。"""
+        from cowork.agent.architect import Architect, AutoApproveGate
+        from cowork.policy import Policy
+        from cowork.types import Criterion, SandboxProfile, TaskClass, TaskSpec
+
+        spec = TaskSpec(
+            goal="装依赖", acceptance=[Criterion("c1", "装上")],
+            task_class=TaskClass.CODE,
+            sandbox=SandboxProfile(workspace=str(self.ws)),
+        )
+        self.assertNotIn("curl", spec.sandbox.allowed_binaries)
+
+        arch = Architect(
+            backend=ScriptedBackend({}), store=self.store,
+            human_gate=AutoApproveGate(), policy=Policy(),
+        )
+        new_spec = arch._apply_changes(spec, {"allow_binary": "curl"})
+
+        self.assertIn("curl", new_spec.sandbox.allowed_binaries)
+        self.assertEqual(new_spec.goal, spec.goal, "放行不该顺手改目标")
+        # 原来那份一个字没动 —— 只对这个任务的这一版生效
+        self.assertNotIn("curl", spec.sandbox.allowed_binaries)
+
+    def test_granting_is_additive_only(self):
+        """只能加、一次一个。交一整份列表 = 把「收窄白名单」也变成裁决能干的事。"""
+        from cowork.agent.architect import Architect, AutoApproveGate
+        from cowork.policy import Policy
+        from cowork.types import Criterion, SandboxProfile, TaskClass, TaskSpec
+
+        spec = TaskSpec(
+            goal="x", acceptance=[Criterion("c1", "y")],
+            task_class=TaskClass.CODE,
+            sandbox=SandboxProfile(
+                workspace=str(self.ws), allowed_binaries=("python", "node")
+            ),
+        )
+        arch = Architect(
+            backend=ScriptedBackend({}), store=self.store,
+            human_gate=AutoApproveGate(), policy=Policy(),
+        )
+        out = arch._apply_changes(spec, {"allow_binary": "go"})
+        self.assertEqual(out.sandbox.allowed_binaries, ("python", "node", "go"))
+
+    def test_the_architect_cannot_grant_itself_a_binary(self):
+        """**只有人能用这条。** 架构师自评的 schema 里没有这个字段 ——
+        让被隔离方给自己配隔离边界是没有意义的（同 SpecTemplate 那条）。"""
+        from cowork.llm.anthropic_backend import VERDICT_SCHEMA
+
+        self.assertNotIn("allow_binary", VERDICT_SCHEMA["properties"])
+
+
 class TestToolFaceIsConsistent(unittest.TestCase):
     """加一个工具要同时改四处，少一处就是一类**假信号**。
 

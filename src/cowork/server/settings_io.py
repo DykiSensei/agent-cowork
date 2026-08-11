@@ -14,7 +14,13 @@ import os
 import re
 from pathlib import Path
 
-from ..config import find_env_file, parse_env
+from ..config import (
+    MULTILINE_KEYS,
+    decode_multiline,
+    encode_multiline,
+    find_env_file,
+    parse_env,
+)
 
 # 全局设置项 → 环境变量名。模型/挡位的默认值与 cli.py 的 _make_backend 对齐。
 GLOBAL_KEYS = {
@@ -40,10 +46,20 @@ GLOBAL_KEYS = {
     # key 是密钥，走 `PUT /api/search/key` 那条只写不读的路，不进这张表
     # （这张表的每一项都会被 GET /api/settings 原样回显）。
     "search.provider": "COWORK_SEARCH_PROVIDER",
+    # 三个角色的**附加**提示词（M11）。只追加不替换 —— 内置提示词里带着输出契约
+    # 和工具清单，替换掉就是 100% 解析失败 / 假 SCOPE_VIOLATION。见 llm/prompts.py。
+    "prompts.architect": "COWORK_ARCHITECT_PROMPT",
+    "prompts.reviewer": "COWORK_REVIEWER_PROMPT",
+    "prompts.subagent": "COWORK_SUBAGENT_PROMPT",
 }
 
 # 专用搜索 key 的环境变量名。**刻意不放进 GLOBAL_KEYS**，理由同上。
 SEARCH_KEY_ENV = "COWORK_SEARCH_API_KEY"
+
+# 多行值（自定义提示词）的转义规则住在 `config.py` —— 那里本来就是 .env 语义的
+# 归属地，而且 `llm/prompts.py` 要用它反转义，核心层不该反过来 import 服务层
+# （`server/__init__` 会拉起 FastAPI，那是可选 extra）。
+__all__ = ["MULTILINE_KEYS", "decode_multiline", "encode_multiline"]
 
 # 环境变量名的合法形状。写文件这一步不该依赖调用方一直守白名单。
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -55,7 +71,9 @@ DEFAULTS = {
     # （§11.11：独立复核的前提就是不同家），Subagent 跟架构师同一家。
     "providers": {"architect": "", "reviewer": "", "subagent": ""},
     "workspace": "",
-    "allowed_binaries": "python",
+    # 留空 = `types.DEFAULT_BINARIES`（各语言运行时）。这里给的是**显示用的**默认，
+    # 真正的回落在 `runner._allowed_binaries()`
+    "allowed_binaries": "",
     # 默认关：取回的第三方内容会进 reasoning_trace 再进下一轮提示词，
     # 那是一条提示词注入通道
     "allow_network": "off",
@@ -65,6 +83,7 @@ DEFAULTS = {
     "review_writes": "on",
     # 空 = 用 search.DEFAULT_PROVIDER（今天是 zhipu）
     "search": {"provider": ""},
+    "prompts": {"architect": "", "reviewer": "", "subagent": ""},
 }
 
 
@@ -108,6 +127,8 @@ def update_env(pairs: dict[str, str]) -> Path:
 
     空值 = 清除：文件里写 `KEY=`（load 时按未设置处理），os.environ 里直接删。
     """
+    # 多行值先转义再校验 —— 转义之后就没有换行了，`_check` 那条防线照旧生效
+    pairs = {k: encode_multiline(k, v) for k, v in pairs.items()}
     for name, value in pairs.items():
         _check(name, value)
     path = find_env_file()

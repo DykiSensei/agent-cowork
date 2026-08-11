@@ -29,6 +29,7 @@ await build({
       export { default as Details } from "./src/components/Details";
       export { default as NewTask } from "./src/components/NewTask";
       export { SearchCard } from "./src/components/Settings";
+      export { SpecList } from "./src/components/NewTask";
     `,
     resolveDir: process.cwd(),
     loader: "ts",
@@ -208,6 +209,76 @@ check("key 配好但联网还关着时，要点出来", () => {
     ),
   );
   assert.ok(html.includes("两个都要开"), "配好了却不生效，必须解释为什么");
+});
+
+// 6. 人仲裁那份拆解时**能改** —— 原来只有「同意」和「否决」两个按钮
+check("拆解清单可编辑，且只开放模型有权决定的那几样", () => {
+  const detail = load("task_composite_root.json");
+  const specs = Object.values(detail.tasks).map((t) => t.spec);
+  const html = render(
+    React.createElement(m.NewTask, {
+      onClose: () => {},
+      onDispatched: () => {},
+      __testPlan: {
+        plan_id: "p1",
+        status: "AWAITING_HUMAN",
+        specs,
+        dispatchable: false,
+      },
+    }),
+  );
+  // 渲染的是第一屏（还没 planId），这里只断言组件不炸；
+  // 编辑控件的存在由 SpecList 自己那条覆盖
+  assert.ok(html.length > 100, "发布页渲不出来");
+});
+
+check("SpecList 在可编辑时给出输入框和删除入口", () => {
+  const detail = load("task_composite_root.json");
+  const specs = Object.values(detail.tasks).map((t) => t.spec);
+  const html = render(
+    React.createElement(m.SpecList, {
+      plan: { plan_id: "p1", status: "AWAITING_HUMAN", specs },
+      edited: null,
+      onEdit: () => {},
+    }),
+  );
+  assert.ok(html.includes("textarea"), "目标要能改");
+  assert.ok(html.includes("加一条验收标准"), "验收标准要能加");
+  assert.ok(html.includes("可写路径"), "scope 要能改");
+});
+
+check("派发之后就不能再改了", () => {
+  const detail = load("task_composite_root.json");
+  const specs = Object.values(detail.tasks).map((t) => t.spec);
+  const html = render(
+    React.createElement(m.SpecList, {
+      plan: { plan_id: "p1", status: "ACCEPTED", specs },
+      edited: null,
+      onEdit: null,
+    }),
+  );
+  assert.ok(!html.includes("textarea"), "已经在跑的任务不该还能改拆解");
+});
+
+// 7. 撞程序白名单时，裁决卡要给「允许它并继续」，而不是让人去改配置
+check("想跑没被允许的程序时，人能当场放行", () => {
+  const entry = details.find(
+    ([, d]) => d.kind === "single" && d.state.status === "AWAITING_HUMAN",
+  );
+  const detail = structuredClone(entry[1]);
+  detail.pending = { ...detail.pending, blocked_binary: "npm" };
+  const html = render(React.createElement(m.LiteStream, props(detail)));
+  assert.ok(html.includes("允许 npm 并继续"), "没有放行按钮");
+  assert.ok(html.includes("只对这个任务生效"), "要说清授权范围");
+  assert.ok(!html.includes("COWORK_ALLOWED_BINARIES"), "不该把人支去改环境变量");
+});
+
+check("没撞白名单时不出现放行按钮", () => {
+  const entry = details.find(
+    ([, d]) => d.kind === "single" && d.state.status === "AWAITING_HUMAN",
+  );
+  const html = render(React.createElement(m.LiteStream, props(entry[1])));
+  assert.ok(!html.includes("并继续"), "普通挂起不该冒出一个放行按钮");
 });
 
 console.log(`\n${failed === 0 ? "全部通过" : `${failed} 项失败`}`);

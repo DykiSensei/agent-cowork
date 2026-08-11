@@ -359,7 +359,22 @@ def pending_ruling(store, task_id: str) -> dict[str, Any] | None:
         "suggestion": last.suggestion,
         "decision_id": last.id,
         "checkpoint_id": state.checkpoint_id,
+        # 撞了 `run` 的程序白名单时，人要能当场放行（M11）。
+        # **从信号的 payload 里取，不从理由文字里抠** —— 后者迟早会因为
+        # 改一句话而失效，而失效的方式是按钮悄悄不见了。
+        "blocked_binary": _blocked_binary(store, task_id, last),
     }
+
+
+def _blocked_binary(store, task_id: str, decision) -> str | None:
+    """这次挂起是不是「想跑一个没被允许的程序」，是的话是哪个。"""
+    triggers = set(decision.trigger or ())
+    for sig in store.signals_for(task_id):
+        if sig.id in triggers and isinstance(sig.payload, dict):
+            binary = sig.payload.get("binary")
+            if binary:
+                return str(binary)
+    return None
 
 
 def _events(store, task_id: str, after_seq: int) -> list:

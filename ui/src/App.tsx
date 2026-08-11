@@ -26,7 +26,12 @@ export interface AppProps {
   onDispatched: (rootId: string) => void;
   onIntervene: (taskId: string, instruction: string) => Promise<ActionResult>;
   onCancel: (taskId: string, reason: string) => Promise<ActionResult>;
-  onRuling: (taskId: string, action: string, rationale: string) => Promise<ActionResult>;
+  onRuling: (
+    taskId: string,
+    action: string,
+    rationale: string,
+    specChanges?: Record<string, unknown>,
+  ) => Promise<ActionResult>;
 }
 
 /** 全新用户的第一屏：一家 key 都没配、也还没有任何线程。 */
@@ -171,8 +176,12 @@ export default function App() {
   );
 
   const onRuling = useCallback(
-    (taskId: string, action: string, rationale: string) =>
-      postRuling(taskId, action, rationale),
+    (
+      taskId: string,
+      action: string,
+      rationale: string,
+      specChanges?: Record<string, unknown>,
+    ) => postRuling(taskId, action, rationale, specChanges),
     [],
   );
 

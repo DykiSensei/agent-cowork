@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { FormEvent } from "react";
 import { createTask, dispatchPlan, fetchPlan, fetchSettings, rulePlan } from "../api";
-import type { PlanView } from "../types";
+import type { PlanView, TaskSpec } from "../types";
 import FolderPicker from "./FolderPicker";
 
 /**
@@ -15,9 +15,10 @@ import FolderPicker from "./FolderPicker";
  *
  * - **拆解的三种终局不是异常**（ACCEPTED / AWAITING_HUMAN / REJECTED），
  *   所以 AWAITING_HUMAN 不是错误提示，是一张要人拍板的卡片。
- * - **写权不在这里**。界面只发 accept / reject，重拆永远由架构师做（§2.3）。
- *   所以没有「编辑这份拆解」的入口 —— 那需要人自己交一份完整的 specs，
- *   属于 `PlanRuling.specs`，不是随手改两个字的事。
+ * - **重拆永远由架构师做**（§2.3 唯一写入决策点）。人可以改这份拆解，但那走的是
+ *   `PlanRuling.specs` —— 人**交上一份完整的 specs**，而不是让架构师照着改。
+ *   界面能改的只有模型有权决定的那四样（目标 / 验收标准 / 可写路径 / 依赖），
+ *   sandbox、工具白名单、各类上限原样回传：那是隔离边界，不在这里改。
  *
  * 模型分配（`dispatch` 的 assignments）暂不在界面上做：只有一家可用时它没有意义，
  * 多家时需要先把 profiles 摆出来给人选，那是独立的一屏。不传 = 全用默认那家，
@@ -28,7 +29,11 @@ const POLL_MS = 1500;
 
 function StatusLine({ plan }: { plan: PlanView }) {
   if (plan.status === "RUNNING") {
-    return <div className="nt-line">正在拆解这个目标…（一次真实调用，约 10–35k token）</div>;
+    return (
+      <div className="nt-line waiting">
+        正在拆解这个目标…（一次真实调用，约 10–35k token）
+      </div>
+    );
   }
   if (plan.status === "ERROR") {
     return <div className="nt-line bad">拆解失败：{plan.error}</div>;
@@ -50,28 +55,144 @@ function StatusLine({ plan }: { plan: PlanView }) {
   );
 }
 
-function SpecList({ plan }: { plan: PlanView }) {
-  if (!plan.specs?.length) return null;
+/**
+ * 拆解清单。**可以改** —— 人是仲裁者，不该只有「同意」和「否决」两个按钮。
+ *
+ * 能改的只有模型有权决定的那四样：目标 / 验收标准 / 可写路径 / 依赖。
+ * sandbox、工具白名单、各类上限**原样带回去**（整份 spec 回传，只替换这四个
+ * 字段）—— 那是隔离边界，归模板和人在设置页管，不该在这里被顺手改掉，
+ * 更不能因为界面没带这些字段而丢失。
+ */
+export function SpecList({
+  plan,
+  edited,
+  onEdit,
+}: {
+  plan: PlanView;
+  edited: TaskSpec[] | null;
+  onEdit: ((specs: TaskSpec[] | null) => void) | null;
+}) {
+  const specs = edited ?? plan.specs;
+  if (!specs?.length) return null;
+  const editable = onEdit !== null;
+
+  const patch = (i: number, next: Partial<TaskSpec>) => {
+    if (!onEdit) return;
+    onEdit(specs.map((s, k) => (k === i ? { ...s, ...next } : s)));
+  };
+  const csv = (v: string) =>
+    v.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
+
   return (
     <div className="nt-specs">
-      {plan.specs.map((s) => (
+      {specs.map((s, i) => (
         <div className="nt-spec" key={s.id}>
           <div className="nt-spec-hd">
             <span className="mono">{s.id}</span>
             {s.depends_on.length > 0 && (
               <span className="nt-dep">← {s.depends_on.join(", ")}</span>
             )}
-            {s.scope.length > 0 && <span className="nt-scope">{s.scope.join(", ")}</span>}
+            {editable && specs.length > 1 && (
+              <button
+                className="nt-del"
+                title="删掉这个子任务"
+                onClick={() => onEdit!(specs.filter((_, k) => k !== i))}
+              >
+                删掉
+              </button>
+            )}
           </div>
-          <div className="nt-spec-goal">{s.goal}</div>
+
+          {editable ? (
+            <textarea
+              className="nt-edit nt-edit-goal"
+              value={s.goal}
+              rows={2}
+              onChange={(e) => patch(i, { goal: e.target.value })}
+            />
+          ) : (
+            <div className="nt-spec-goal">{s.goal}</div>
+          )}
+
           <ul className="nt-crit">
-            {s.acceptance.map((c) => (
+            {s.acceptance.map((c, ci) => (
               <li key={c.id}>
-                {c.description}
-                {c.command ? <span className="nt-cmd"> · 机器可检</span> : null}
+                {editable ? (
+                  <div className="nt-crit-row">
+                    <input
+                      className="nt-edit"
+                      value={c.description}
+                      onChange={(e) =>
+                        patch(i, {
+                          acceptance: s.acceptance.map((x, k) =>
+                            k === ci ? { ...x, description: e.target.value } : x,
+                          ),
+                        })
+                      }
+                    />
+                    {s.acceptance.length > 1 && (
+                      <button
+                        className="nt-del"
+                        title="删掉这条验收标准"
+                        onClick={() =>
+                          patch(i, {
+                            acceptance: s.acceptance.filter((_, k) => k !== ci),
+                          })
+                        }
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    {c.description}
+                    {c.command ? <span className="nt-cmd"> · 机器可检</span> : null}
+                  </>
+                )}
               </li>
             ))}
           </ul>
+
+          {editable && (
+            <div className="nt-spec-more">
+              <button
+                className="nt-add"
+                onClick={() =>
+                  patch(i, {
+                    acceptance: [
+                      ...s.acceptance,
+                      { id: `h${s.acceptance.length + 1}`, description: "", command: null },
+                    ],
+                  })
+                }
+              >
+                + 加一条验收标准
+              </button>
+              <label className="nt-field">
+                <span>可写路径</span>
+                <input
+                  className="nt-edit mono"
+                  value={s.scope.join(", ")}
+                  onChange={(e) => patch(i, { scope: csv(e.target.value) })}
+                  placeholder="逗号分隔"
+                />
+              </label>
+              <label className="nt-field">
+                <span>依赖</span>
+                <input
+                  className="nt-edit mono"
+                  value={s.depends_on.join(", ")}
+                  onChange={(e) => patch(i, { depends_on: csv(e.target.value) })}
+                  placeholder="其它子任务的 id，逗号分隔"
+                />
+              </label>
+            </div>
+          )}
+
+          {!editable && s.scope.length > 0 && (
+            <div className="nt-scope">{s.scope.join(", ")}</div>
+          )}
         </div>
       ))}
     </div>
@@ -117,6 +238,8 @@ export default function NewTask({
   const [plan, setPlan] = useState<PlanView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 人改过的拆解。null = 没动过，显示架构师那份。
+  const [edited, setEdited] = useState<TaskSpec[] | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 默认工作区从设置页来 —— 「我的产物会落在哪」要在**发布之前**就看得见，
@@ -190,16 +313,22 @@ export default function NewTask({
   }, [planId, busy, onDispatched, onClose]);
 
   const rule = useCallback(
-    (accept: boolean) => {
+    (accept: boolean, specs?: TaskSpec[]) => {
       if (!planId || busy) return;
       setBusy(true);
       setError(null);
-      void rulePlan(planId, accept, accept ? "人确认按当前拆解执行" : "人否决了这份拆解")
+      const note = specs
+        ? "人改过这份拆解"
+        : accept
+          ? "人确认按当前拆解执行"
+          : "人否决了这份拆解";
+      void rulePlan(planId, accept, note, specs)
         .then((r) => {
           if (!r.ok) {
             setError(r.error ?? "裁决没有被接受");
             return;
           }
+          setEdited(null); // 服务端已经收下，之后以它返回的为准
           return fetchPlan(planId).then(setPlan);
         })
         .finally(() => setBusy(false));
@@ -317,31 +446,54 @@ export default function NewTask({
       )}
       {plan ? <StatusLine plan={plan} /> : <div className="nt-line">正在拆解…</div>}
       {plan && <ReviewNotes plan={plan} />}
-      {plan && <SpecList plan={plan} />}
+      {plan && (
+        <SpecList
+          plan={plan}
+          edited={edited}
+          // 派发之后就不能再改了 —— 那时任务已经在跑
+          onEdit={plan.dispatched_root ? null : setEdited}
+        />
+      )}
+      {edited && (
+        <div className="nt-line nt-dirty">
+          你改过这份拆解（还没保存）。保存时会**整份交上去**，
+          架构师不会再改一遍 —— 沙箱、工具白名单、各类上限原样保留。
+        </div>
+      )}
       {error && <div className="nt-line bad">{error}</div>}
       <div className="nt-actions">
         <button type="button" className="nt-ghost" onClick={onClose}>
           关闭
         </button>
-        {needsRuling && (
-          <>
-            <button
-              type="button"
-              className="nt-ghost"
-              disabled={busy}
-              onClick={() => rule(false)}
-            >
-              否决这份拆解
-            </button>
-            <button
-              type="button"
-              className="nt-primary"
-              disabled={busy}
-              onClick={() => rule(true)}
-            >
-              就按这份拆解跑
-            </button>
-          </>
+        {edited && (
+          <button
+            type="button"
+            className="nt-ghost"
+            disabled={busy}
+            onClick={() => setEdited(null)}
+          >
+            撤销我的修改
+          </button>
+        )}
+        {needsRuling && !edited && (
+          <button
+            type="button"
+            className="nt-ghost"
+            disabled={busy}
+            onClick={() => rule(false)}
+          >
+            否决这份拆解
+          </button>
+        )}
+        {(needsRuling || edited) && (
+          <button
+            type="button"
+            className="nt-primary"
+            disabled={busy}
+            onClick={() => rule(true, edited ?? undefined)}
+          >
+            {edited ? "按我改的这份跑" : "就按这份拆解跑"}
+          </button>
         )}
         {canDispatch && (
           <button

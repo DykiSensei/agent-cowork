@@ -93,6 +93,8 @@ interface MockPlan {
   accepted?: boolean;
   takeover?: boolean;
   workspace?: string;
+  /** 人改过并交上来的那份（`PlanRuling.specs`）。给了就以它为准。 */
+  specs?: unknown[];
 }
 let mockPlan: MockPlan | null = null;
 
@@ -105,7 +107,7 @@ function mockPlanResult(p: MockPlan): unknown {
   const detail = readFixture("task_comp.json") as
     | { tasks?: Record<string, { spec?: unknown }> }
     | null;
-  const specs = Object.values(detail?.tasks ?? {}).map((t) => t.spec);
+  const specs = p.specs ?? Object.values(detail?.tasks ?? {}).map((t) => t.spec);
   const accepted = p.accepted === true;
   return {
     plan_id: p.id,
@@ -214,11 +216,22 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
 
     const planRule = url.pathname.match(/^\/api\/plans\/([\w-]+)\/ruling$/);
     if (req.method === "POST" && planRule) {
-      const body = JSON.parse((await drain(req)) || "{}") as { accept?: boolean };
-      if (!("accept" in body)) {
+      const body = JSON.parse((await drain(req)) || "{}") as {
+        accept?: boolean;
+        specs?: unknown[];
+      };
+      if (!("accept" in body) && !body.specs) {
         return sendJson(res, 400, { error: "要么给 accept（true/false），要么给一份 specs" });
       }
-      if (mockPlan) mockPlan.accepted = Boolean(body.accept);
+      if (mockPlan) {
+        // 人自己交了一份拆解：以它为准，并且直接可派发（同服务端 rule_plan）
+        if (body.specs?.length) {
+          mockPlan.specs = body.specs;
+          mockPlan.accepted = true;
+        } else {
+          mockPlan.accepted = Boolean(body.accept);
+        }
+      }
       return sendJson(res, 200, { ok: true });
     }
 

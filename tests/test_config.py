@@ -180,5 +180,78 @@ class TestSignalEvidenceIsRedacted(unittest.TestCase):
         self.assertIn("401 unauthorized", sig.raw_evidence)
 
 
+class TestMultilineSettings(unittest.TestCase):
+    """自定义提示词是多行的，而 `.env` 是一行一个 KEY=value（M11）。
+
+    换行必须转义成字面 `\\n` 再写 —— 直接写会多出一行，那正是设置页那条
+    注入防线挡的形态（一次「设置提示词」的请求顺手改掉 `COWORK_LLM_BASE_URL`）。
+    """
+
+    def test_newlines_survive_a_round_trip(self):
+        from cowork.config import decode_multiline, encode_multiline
+
+        name = "COWORK_SUBAGENT_PROMPT"
+        text = "第一行\n第二行\n\n带空行的第四行"
+        stored = encode_multiline(name, text)
+        self.assertNotIn("\n", stored, "存进 .env 的值里不能有真换行")
+        self.assertEqual(decode_multiline(name, stored), text)
+
+    def test_backslashes_are_not_eaten(self):
+        """Windows 路径和正则里全是反斜杠，转义必须可逆。"""
+        from cowork.config import decode_multiline, encode_multiline
+
+        name = "COWORK_ARCHITECT_PROMPT"
+        text = "用 C:\\work\\out 这个目录\n正则写成 \\d+"
+        self.assertEqual(
+            decode_multiline(name, encode_multiline(name, text)), text
+        )
+
+    def test_only_the_prompt_keys_are_transformed(self):
+        """别的变量一个字都不能动 —— key 里恰好有 `\\n` 两个字符也不该被改。"""
+        from cowork.config import decode_multiline, encode_multiline
+
+        for name in ("COWORK_LLM_BASE_URL", "ZHIPUAI_API_KEY"):
+            raw = "abc\\ndef"
+            self.assertEqual(encode_multiline(name, raw), raw)
+            self.assertEqual(decode_multiline(name, raw), raw)
+
+
+class TestRolePromptExtra(unittest.TestCase):
+    """追加而不是替换 —— 内置提示词里带着输出契约和工具清单。"""
+
+    def test_no_config_means_byte_identical_prompt(self):
+        """没配的时候**一个字都不能变**：变了缓存前缀就换了，命中率归零。"""
+        import os
+        from unittest import mock
+
+        from cowork.llm.prompts import with_extra
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("COWORK_SUBAGENT_PROMPT", None)
+            self.assertEqual(with_extra("原样", "subagent"), "原样")
+
+    def test_extra_is_appended_after_the_builtin(self):
+        import os
+        from unittest import mock
+
+        from cowork.llm.prompts import with_extra
+
+        with mock.patch.dict(os.environ, {"COWORK_SUBAGENT_PROMPT": "注释写中文"}):
+            out = with_extra("内置提示词", "subagent")
+        self.assertTrue(out.startswith("内置提示词"), "自定义必须在内置之后")
+        self.assertIn("注释写中文", out)
+        self.assertIn("以上面的为准", out, "冲突时的优先级要写明")
+
+    def test_stored_newlines_are_restored(self):
+        """设置页存的是转义过的，喂给模型时必须是真换行。"""
+        import os
+        from unittest import mock
+
+        from cowork.llm.prompts import role_extra
+
+        with mock.patch.dict(os.environ, {"COWORK_ARCHITECT_PROMPT": "一行\\n二行"}):
+            self.assertEqual(role_extra("architect"), "一行\n二行")
+
+
 if __name__ == "__main__":
     unittest.main()

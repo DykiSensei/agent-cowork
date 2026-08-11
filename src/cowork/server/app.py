@@ -15,6 +15,7 @@ from ..store import SqliteStore
 from ..workspace import browse as browse_dirs
 from ..workspace import resolve_workspace
 from .runner import Runner
+from ..config import decode_multiline
 from .settings_io import DEFAULTS, GLOBAL_KEYS, effective_env, key_hint, update_env
 from .tap import EventHub, TapStore
 
@@ -178,6 +179,12 @@ def create_app(
         action = (body.get("action") or "").strip()
         if action not in ("CONTINUE", "MODIFY_TASK", "ABANDON", "REASSIGN"):
             return err(400, f"未知 action: {action!r}")
+        # 放行一个程序（M11）：只收**一个裸程序名**。带路径或空白的进来只会
+        # 静默匹配不上（比对的是 `Path(argv[0]).name`），那种失败最难查 ——
+        # 人点了「允许」，任务却在同一个地方又挂一次。
+        grant = ((body.get("spec_changes") or {}).get("allow_binary") or "").strip()
+        if grant and (len(grant.split()) > 1 or "/" in grant or "\\" in grant):
+            return err(400, f"allow_binary 要一个裸程序名，收到 {grant!r}")
         try:
             runner.rule_task(
                 task_id,
@@ -388,6 +395,15 @@ def create_app(
                 GLOBAL_KEYS["allow_network"], DEFAULTS["allow_network"]
             ),
             "search": _search_status(env),
+            # 三个角色的附加提示词。**存在 .env 里是转义过的**（一行一个
+            # KEY=value），回给界面前要还原成真换行，否则文本框里是一坨 \n
+            "prompts": {
+                k: decode_multiline(
+                    GLOBAL_KEYS[f"prompts.{k}"],
+                    env.get(GLOBAL_KEYS[f"prompts.{k}"], v),
+                )
+                for k, v in DEFAULTS["prompts"].items()
+            },
         }
         return out
 

@@ -113,7 +113,11 @@ class SpecTemplate:
     model: str = "claude-opus-5"
     max_steps: int = 12
     deadline_s: float = 300.0
-    token_budget: int = 60_000
+    # 0 = 不限。**M11 起默认不限**：60k 在真实的大任务上频繁把 Subagent 打断，
+    # 而打断的时机只取决于「这个任务比较费」，与它做得对不对无关。
+    # 成本改由界面上的 token 计数来判断 —— 人看得见，比一个猜出来的上限管用。
+    # bench 仍然可以显式设它（跑批要控成本，而且旧数据按它归一化）。
+    token_budget: int = 0
     probe_interval_s: float | None = None
 
 
@@ -621,6 +625,23 @@ class Architect:
         for field_name in ("scope", "token_budget", "max_steps", "deadline_s", "model"):
             if field_name in changes:
                 kwargs[field_name] = changes[field_name]
+        # 放行一个程序（M11）。**只能追加、一次一个**，形状同 added_criteria ——
+        # 让调用方直接交一整份 allowed_binaries，等于把「收窄白名单」也做成了
+        # 一次裁决能干的事，而那是隔离边界，不该从这条路改。
+        #
+        # **人才能用这条**：`decide()` 的 VERDICT_SCHEMA 里没有这个字段，
+        # 所以架构师提不出「给我放行 npm」—— 让被隔离方给自己配边界是没有意义的
+        # （同 SpecTemplate 那条）。这里是人的答复落地的那扇门。
+        grant = (changes.get("allow_binary") or "").strip()
+        if grant:
+            from dataclasses import replace as _replace
+
+            sandbox = spec.sandbox
+            if sandbox is not None and grant not in sandbox.allowed_binaries:
+                kwargs["sandbox"] = _replace(
+                    sandbox,
+                    allowed_binaries=(*sandbox.allowed_binaries, grant),
+                )
         return spec.bump(**kwargs)
 
     # -- 人的裁决落地（M6 restore 路径）-------------------------------------- #

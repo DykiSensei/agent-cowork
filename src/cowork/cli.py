@@ -1046,8 +1046,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     d.add_argument("--docker", action="store_true", help="用 Docker 沙箱跑工具调用")
-    d.add_argument("--budget", type=int, default=1_000_000, dest="budget",
-                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。0 = 关闭")
+    d.add_argument("--budget", type=int, default=0, dest="budget",
+                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。**默认 0 = 不限**"
+                        " —— 自动刹车总在最不该停的时候停，成本改看 token 计数")
     d.set_defaults(func=_run_demo)
 
     m = sub.add_parser("models", help="拿各家的 /v1/models 对一遍 PROVIDERS 表")
@@ -1075,9 +1076,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--workspace", default=None,
                    help="任务 workspace 根目录（默认每次拆解一个临时目录）")
     s.add_argument("--max-cycles", type=int, default=8, dest="max_cycles")
-    s.add_argument("--budget", type=int, default=1_000_000, dest="budget",
-                   help="token 硬上限（应用层，不依赖 LiteLLM）。0 = 关闭。"
-                        "**服务是长驻的，这个额度跨整个进程生命周期、用完要重启** —— 它防的正是「跑一夜把余额烧光」")
+    s.add_argument("--budget", type=int, default=0, dest="budget",
+                   help="token 硬上限（应用层，不依赖 LiteLLM）。**默认 0 = 不限**。"
+                        "设了的话注意：服务是长驻的，这个额度**跨整个进程生命周期、"
+                        "从不重置**，用完就得重启 —— 原来它默认 100 万，于是一个大任务"
+                        "烧完额度之后，后面每个新任务的拆解都会以「生成者调不动模型」"
+                        "收场，而界面上看着像卡住。成本改看界面上的 token 计数")
     s.set_defaults(func=_serve)
 
     i = sub.add_parser("inspect", help="导出某个 SQLite 库里的任务与决策")
@@ -1096,8 +1100,9 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"拆解复核的供应商（§12 M7 7.1）。auto：真实后端时用 "
                         f"{DEFAULT_REVIEWER}、脚本后端时不复核；none 退回同模型复核")
     c.add_argument("--max-cycles", type=int, default=4, dest="max_cycles")
-    c.add_argument("--budget", type=int, default=1_000_000, dest="budget",
-                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。0 = 关闭")
+    c.add_argument("--budget", type=int, default=0, dest="budget",
+                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。**默认 0 = 不限**"
+                        " —— 自动刹车总在最不该停的时候停，成本改看 token 计数")
     c.set_defaults(func=_run_composite)
 
     b = sub.add_parser("bench", help="M2 参数实测跑批（§12 M2）")
@@ -1130,8 +1135,9 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--run", action="store_true",
                     help="拆解通过后直接派发执行 —— 从自然语言目标一路跑到产出。花真钱")
     pl.add_argument("--max-cycles", type=int, default=4, dest="max_cycles")
-    pl.add_argument("--budget", type=int, default=1_000_000, dest="budget",
-                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。0 = 关闭")
+    pl.add_argument("--budget", type=int, default=0, dest="budget",
+                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。**默认 0 = 不限**"
+                        " —— 自动刹车总在最不该停的时候停，成本改看 token 计数")
     pl.set_defaults(func=_plan)
 
     rv = sub.add_parser("bench-review", help="跨模型复核对照实测（§12 M7 7.2）")

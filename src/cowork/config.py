@@ -91,6 +91,46 @@ _PATTERNS = [
 ]
 
 
+# 值里天然带换行的那几个（自定义提示词，M11）。`.env` 是一行一个 KEY=value，
+# 换行会多写一行 —— 那正是设置页那条注入防线挡的形态，不能对它开口子。
+# 所以这几个**存的时候把换行转义成字面 \n**，读的时候还原。
+#
+# 为什么不让 `parse_env` 统一反转义：那份解析要和 docker-compose 兼容，
+# 而 compose 不做这个反转义。改了它，同一个 .env 在两边的含义就不一样了。
+MULTILINE_KEYS = frozenset(
+    {"COWORK_ARCHITECT_PROMPT", "COWORK_REVIEWER_PROMPT", "COWORK_SUBAGENT_PROMPT"}
+)
+
+
+def encode_multiline(name: str, value: str) -> str:
+    """写进 .env 之前：真换行 → 字面 `\\n`。"""
+    if name not in MULTILINE_KEYS:
+        return value
+    return value.replace("\\", "\\\\").replace("\r\n", "\n").replace("\n", "\\n")
+
+
+def decode_multiline(name: str, value: str) -> str:
+    """从 .env 读出来之后：字面 `\\n` → 真换行。"""
+    if name not in MULTILINE_KEYS or not value:
+        return value
+    out: list[str] = []
+    i = 0
+    while i < len(value):
+        if value[i] == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+        out.append(value[i])
+        i += 1
+    return "".join(out)
+
+
 def redact(text: str | None) -> str | None:
     """抹掉文本里的密钥。用于任何要落库或打日志的 provider 原始输出。
 

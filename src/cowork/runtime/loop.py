@@ -162,7 +162,11 @@ class StepLoop:
                         payload={"deadline_s": spec.deadline_s},
                     )
                 )
-            if tokens > spec.token_budget:
+            # `token_budget = 0` = 不限。**默认就是 0**（M11）：60k 的硬上限在
+            # 真实的大任务上是频繁失败的来源 —— 打断的时机与任务难度无关，
+            # 只与「这个任务恰好比较费」有关，而那正是最不该被打断的那类。
+            # 花多少钱现在靠**看得见的计数**（界面上有），不靠自动刹车。
+            if spec.token_budget and tokens > spec.token_budget:
                 return interrupted(
                     self.bus.emit_hard(
                         SignalType.BUDGET_EXCEEDED, spec.id,
@@ -234,7 +238,13 @@ class StepLoop:
                     return interrupted(
                         self.bus.emit_hard(
                             SignalType.SCOPE_VIOLATION, spec.id,
-                            payload={"resource": exc.resource, "reason": exc.reason},
+                            payload={
+                                "resource": exc.resource,
+                                "reason": exc.reason,
+                                # 撞程序白名单时带上程序名 —— 人的裁决里那个
+                                # 「允许 npm」按钮就是从这里长出来的（M11）
+                                **({"binary": exc.binary} if exc.binary else {}),
+                            },
                             evidence=str(exc),
                         )
                     )

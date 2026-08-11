@@ -16,6 +16,7 @@ import type {
   SearchProbe,
   Settings,
   TaskDetail,
+  TaskSpec,
   ThreadSummary,
 } from "./types";
 
@@ -85,8 +86,24 @@ export function postCancel(taskId: string, reason: string) {
   return send(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { reason });
 }
 
-export function postRuling(taskId: string, action: string, rationale: string) {
-  return send(`/api/tasks/${encodeURIComponent(taskId)}/ruling`, { action, rationale });
+/**
+ * 人对一次挂起的答复。
+ *
+ * `specChanges` 目前只用来放行一个程序（`{allow_binary: "npm"}`）——
+ * 它经 `Architect.apply_human_ruling()` → `_apply_changes()` 落到 spec 上，
+ * **不绕过架构师**（§2.3 唯一写入决策点）。
+ */
+export function postRuling(
+  taskId: string,
+  action: string,
+  rationale: string,
+  specChanges?: Record<string, unknown>,
+) {
+  return send(`/api/tasks/${encodeURIComponent(taskId)}/ruling`, {
+    action,
+    rationale,
+    ...(specChanges ? { spec_changes: specChanges } : {}),
+  });
 }
 
 /**
@@ -131,9 +148,23 @@ export function fetchPlan(planId: string): Promise<PlanView> {
   return req(`/api/plans/${encodeURIComponent(planId)}`);
 }
 
-/** 人对一份拆解的裁决。`accept=false` 是否决，有后果，所以必须显式传。 */
-export function rulePlan(planId: string, accept: boolean, rationale = "") {
-  return send(`/api/plans/${encodeURIComponent(planId)}/ruling`, { accept, rationale });
+/**
+ * 人对一份拆解的裁决。`accept=false` 是否决，有后果，所以必须显式传。
+ *
+ * `specs` 是**人自己交的一份完整拆解**（改过之后）。给了它就以它为准，
+ * 架构师不会再改一遍 —— 写权仍然只有一个入口，只是这次行使的人是你。
+ */
+export function rulePlan(
+  planId: string,
+  accept: boolean,
+  rationale = "",
+  specs?: TaskSpec[],
+) {
+  return send(`/api/plans/${encodeURIComponent(planId)}/ruling`, {
+    accept,
+    rationale,
+    ...(specs ? { specs } : {}),
+  });
 }
 
 /** 派发。回来的 root_id 就是那条复合线程的 id。 */

@@ -145,17 +145,19 @@ class Runner:
         return (os.environ.get("COWORK_REVIEW_WRITES") or "on").strip().lower() != "off"
 
     def _allowed_binaries(self) -> tuple[str, ...]:
-        """`run` 能调哪些可执行文件。默认只有 python。
+        """`run` 能调哪些可执行文件。默认是各语言的运行时（`types.DEFAULT_BINARIES`）。
 
         **白名单归人和模板，不归架构师**（同 `SpecTemplate` 那条：让被隔离方
         给自己配隔离边界是没有意义的）。所以它在设置页，不在拆解提示词里。
         """
         import os
 
+        from ..types import DEFAULT_BINARIES
+
         raw = (os.environ.get("COWORK_ALLOWED_BINARIES") or "").strip()
         if not raw:
-            return ("python",)
-        return tuple(x.strip() for x in raw.split(",") if x.strip()) or ("python",)
+            return DEFAULT_BINARIES
+        return tuple(x.strip() for x in raw.split(",") if x.strip()) or DEFAULT_BINARIES
 
     def _allow_network(self) -> bool:
         """两个联网工具开不开。**默认关** —— 见 `SpecTemplate.tools` 的说明。"""

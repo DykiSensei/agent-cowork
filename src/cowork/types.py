@@ -96,12 +96,45 @@ class Criterion:
         return cls(id=d["id"], description=d["description"], command=d.get("command"))
 
 
+# `run` 的默认白名单：**各语言的运行时与编译器**（M11 放宽）。
+#
+# 原来只有 python，于是「写个 node 脚本」「编译一下这个 Go」根本做不到 ——
+# 而模型不会因此放弃，它会绕路，撞白名单，变成一条假 SCOPE_VIOLATION（§11.6f）。
+#
+# 放宽到这一批的理由：**python 本身就是任意代码执行**（`import subprocess` 就能
+# 干任何事），所以再挡着 node / go / javac 并不多挡住什么，只是让正当活儿做不成。
+# 白名单真正挡住的是另外两类，它们一个都没进这张表：
+#
+#   1. **shell**（sh / bash / zsh / cmd / powershell）—— 放进来等于白名单作废，
+#      因为 shell 能启动任何别的程序。这条是这张表还有意义的唯一原因。
+#   2. **对外或不可逆的工具**（curl / wget / ssh / scp / git / docker / kubectl /
+#      rm / systemctl）—— 它们的后果出了这台机器或收不回来，正是
+#      `policy.irreversible_markers` 盯的那批。
+#
+# 要加就在设置页「run 允许的程序」里加（`COWORK_ALLOWED_BINARIES`）——
+# **白名单归人，不归架构师**，让被隔离方给自己配边界是没有意义的。
+DEFAULT_BINARIES: tuple[str, ...] = (
+    # Python
+    "python", "python3", "pip", "pip3", "pytest",
+    # JavaScript / TypeScript
+    "node", "npm", "npx", "pnpm", "yarn", "deno", "bun", "tsc",
+    # JVM
+    "java", "javac", "kotlin", "kotlinc", "mvn", "gradle",
+    # Go / Rust
+    "go", "gofmt", "cargo", "rustc",
+    # C / C++ / 构建
+    "gcc", "g++", "clang", "clang++", "make", "cmake",
+    # 其它常见运行时
+    "ruby", "php", "perl", "dotnet", "lua", "Rscript", "julia",
+)
+
+
 @dataclass(frozen=True)
 class SandboxProfile:
     """v0.1：本地 Docker 或本地子进程，只为验证 SCOPE_VIOLATION 语义（§10.4）。"""
 
     workspace: str
-    allowed_binaries: tuple[str, ...] = ("python", "python3")
+    allowed_binaries: tuple[str, ...] = DEFAULT_BINARIES
     use_docker: bool = False
     image: str = "python:3.12-slim"
     network: str = "none"
@@ -119,7 +152,7 @@ class SandboxProfile:
     def from_dict(cls, d: dict[str, Any]) -> SandboxProfile:
         return cls(
             workspace=d["workspace"],
-            allowed_binaries=tuple(d.get("allowed_binaries", ("python", "python3"))),
+            allowed_binaries=tuple(d.get("allowed_binaries", DEFAULT_BINARIES)),
             use_docker=d.get("use_docker", False),
             image=d.get("image", "python:3.12-slim"),
             network=d.get("network", "none"),

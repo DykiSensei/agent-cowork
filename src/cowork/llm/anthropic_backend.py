@@ -21,6 +21,7 @@ from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, TaskProfile, Triag
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..signals import SOFT_SIGNALS, SignalType
 from ..types import AgentContext, Signal, TaskSpec
+from .prompts import with_extra
 
 
 def _error_text(exc) -> str:
@@ -740,7 +741,7 @@ class AnthropicBackend:
     def next_step(self, ctx: AgentContext) -> tuple[AgentAction, int]:
         data, tokens = self._call(
             model=ctx.task_spec.model,
-            system=SUBAGENT_SYSTEM,
+            system=with_extra(SUBAGENT_SYSTEM, "subagent"),
             user=_render_subagent_context(ctx),
             schema=ACTION_SCHEMA,
             effort=self.subagent_effort,
@@ -781,7 +782,7 @@ class AnthropicBackend:
         user = _render_architect_context(spec, signals, ctx, history, review_feedback)
         data, tokens = self._call(
             model=self.architect_model,
-            system=ARCHITECT_SYSTEM,
+            system=with_extra(ARCHITECT_SYSTEM, "architect"),
             user=user,
             schema=VERDICT_SCHEMA,
         )
@@ -848,7 +849,7 @@ class AnthropicBackend:
         # 不是分诊那种廉价过滤。它只在拆解时跑一次，成本可接受（§12 M5 的候选方案表）。
         data, tokens = self._call(
             model=self.architect_model,
-            system=REVIEW_SYSTEM,
+            system=with_extra(REVIEW_SYSTEM, "reviewer"),
             user=_render_review_context(root_goal, specs),
             schema=REVIEW_SCHEMA,
         )
@@ -861,7 +862,7 @@ class AnthropicBackend:
         # 需要读懂原始目标和失败证据的关系，不是廉价过滤能做的。
         data, tokens = self._call(
             model=self.architect_model,
-            system=SPEC_REVIEW_SYSTEM,
+            system=with_extra(SPEC_REVIEW_SYSTEM, "reviewer"),
             user=_render_spec_review_context(spec, signals, verdict),
             schema=SPEC_REVIEW_SCHEMA,
         )
@@ -874,7 +875,7 @@ class AnthropicBackend:
         # 用架构师主模型：拆解是这个系统里最有杠杆的一次判断，拆错了后面全白干。
         data, tokens = self._call(
             model=self.architect_model,
-            system=DECOMPOSE_SYSTEM,
+            system=with_extra(DECOMPOSE_SYSTEM, "architect"),
             user=_render_decompose_context(root_goal, feedback, existing),
             schema=DECOMPOSE_SCHEMA,
         )

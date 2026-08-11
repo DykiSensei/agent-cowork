@@ -61,6 +61,33 @@ const PROVIDER_ROLES: {
   },
 ];
 
+/** 三个角色的附加提示词。和 providers.* 是同一套角色划分。 */
+const PROMPT_ROLES: {
+  key: keyof Settings["prompts"];
+  label: string;
+  hint: string;
+  placeholder: string;
+}[] = [
+  {
+    key: "architect",
+    label: "生成者 / 架构师",
+    hint: "拆解、中断决策、验收都走它",
+    placeholder: "例：拆解时每个子任务不要超过一天的工作量；验收标准尽量写成能跑的命令。",
+  },
+  {
+    key: "reviewer",
+    label: "复核者",
+    hint: "只看不改，负责挑毛病",
+    placeholder: "例：特别关注子任务之间的接口是否对得上，以及有没有人负责收尾整合。",
+  },
+  {
+    key: "subagent",
+    label: "Subagent",
+    hint: "真正干活的那个",
+    placeholder: "例：Python 用 type hint，注释写中文；写完先自己跑一遍再交。",
+  },
+];
+
 /** 探测结果 → 一句人话。四种状态的结论不同，不能都说成「失败」。 */
 const PROBE_TEXT: Record<ProbeResult["status"], string> = {
   ok: "可用",
@@ -518,18 +545,23 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
 
             <h2>工具与联网</h2>
             <p className="set-note">
-              Subagent 默认能读写工作区、搜文件、删改文件、跑 python。
-              这两个闸门**归你**，不归架构师 —— 让被隔离方给自己配隔离边界是没有意义的。
+              Subagent 默认能读写工作区、搜文件、删改文件、跑各语言的运行时。
+              这两个闸门<b>归你</b>，不归架构师 —— 让被隔离方给自己配隔离边界是没有意义的。
+              白名单里<b>没有 shell</b>（sh / bash / cmd / powershell）：放进去等于白名单
+              作废，因为 shell 能启动任何别的程序。对外和不可逆的那些（curl / ssh /
+              git / docker / rm）同理，要用得你自己加。
             </p>
             <div className="set-card">
               <div className="set-row">
                 <span className="set-k">
                   run 允许的程序{" "}
-                  <span className="set-env">逗号分隔。加 git / node 之前想清楚</span>
+                  <span className="set-env">
+                    逗号分隔。留空 = 各语言运行时（python / node / go / java / gcc …）
+                  </span>
                 </span>
                 <input
                   className="set-text"
-                  placeholder="python"
+                  placeholder="留空 = 各语言运行时都给"
                   value={settings.allowed_binaries}
                   onChange={(e) =>
                     setSettings({ ...settings, allowed_binaries: e.target.value })
@@ -572,6 +604,35 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                 })
               }
             />
+
+            <h2>给三个角色加要求</h2>
+            <p className="set-note">
+              这里写的内容会<b>追加</b>在内置提示词之后，不替换它 ——
+              内置那部分带着输出格式的约定和工具清单，替换掉的话模型会返回一堆
+              解析不了的东西，看起来像它突然变笨了。
+              写偏好就好：用什么语言、代码风格、要不要写测试、注释多详细。
+            </p>
+            <div className="set-card">
+              {PROMPT_ROLES.map((r) => (
+                <label className="set-prompt" key={r.key}>
+                  <span className="set-k">
+                    {r.label} <span className="set-env">{r.hint}</span>
+                  </span>
+                  <textarea
+                    className="set-ta"
+                    rows={3}
+                    placeholder={r.placeholder}
+                    value={settings.prompts?.[r.key] ?? ""}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        prompts: { ...settings.prompts, [r.key]: e.target.value },
+                      })
+                    }
+                  />
+                </label>
+              ))}
+            </div>
 
             <h2>全局模型与推理挡位</h2>
             <p className="set-note">

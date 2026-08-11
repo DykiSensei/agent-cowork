@@ -82,8 +82,15 @@
         display:flex;align-items:center;justify-content:center;font-size:11px;flex:none;
         border:1px solid #bfe6cb}
   .l-file{margin-left:auto;font:11px var(--mono);color:var(--l-dim);background:#f7f7f4;
-          border:1px solid var(--l-line);border-radius:6px;padding:1px 7px}
-  .l-simul{font-size:11px;color:var(--l-dim)}
+          border:1px solid var(--l-line);border-radius:6px;padding:1px 7px;
+          flex:none;white-space:nowrap;max-width:38%;overflow:hidden;
+          text-overflow:ellipsis}
+  /* **flex:none + nowrap 缺一不可**：这一行是 flex，`l-step-goal` 会先被压扁，
+     压到底之后轮到这个标签 —— 而中文没有词边界，一个可收缩的 flex 项会一路缩到
+     「一个字一行」，于是「与上一步同时做」在窄一点的容器里挤成一根竖条。 */
+  .l-simul{font-size:11px;color:var(--l-dim);flex:none;white-space:nowrap;
+           background:#f2f2ee;border:1px solid var(--l-line);border-radius:999px;
+           padding:1px 8px;line-height:1.6}
   .l-hero{margin:18px 0;border-radius:18px;text-align:center;padding:28px 20px;
           background:linear-gradient(180deg,#f0faf3,#fff);border:1px solid #cfe9d6}
   .l-hero .big-ck{width:44px;height:44px;border-radius:50%;background:#16a34a;color:#fff;
@@ -110,7 +117,10 @@
         border:1px solid #cfdefc;color:#2f5fd0;border-radius:10px;
         padding:7px 14px;font-size:12.5px}
   .l-sysbar.show{display:block}
-  .l-step-goal{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  /* 只有目标文字该被压缩：给它 flex:1 1 auto，其余项各自 flex:none，
+     否则「谁先被压扁」由内容长度偶然决定 */
+  .l-step-goal{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+               min-width:0;flex:1 1 auto}
 
   /* 全新用户第一屏：没配 key 且没有线程时代替聊天页 */
   .first-run{min-height:100%;background:var(--l-bg);color:var(--l-ink);
@@ -138,8 +148,17 @@
   .set-back{border:1px solid var(--l-line2);background:#fff;border-radius:999px;
             padding:6px 14px;font-size:13px;color:#3d434b;cursor:pointer}
   .set-back:hover{background:#fafaf8}
-  .set-page h2{font-size:14px;margin:26px 0 6px}
-  .set-note{font-size:12px;color:var(--l-dim);margin:0 0 12px}
+  /* 分节：原来几十行设置糊成一片，看不出哪些是一组。给每个 h2 一条分隔线 +
+     左侧竖条，扫读时才有落点。**不用包一层 div**：那要改六处 JSX 结构，
+     而这里要的只是「看得出这是一组」。 */
+  .set-page h2{font-size:13.5px;margin:34px 0 10px;letter-spacing:.02em;
+               color:#23272e;font-weight:700;padding:14px 0 0 11px;
+               border-top:1px solid var(--l-line);position:relative}
+  .set-page h2::before{content:"";position:absolute;left:0;top:15px;bottom:1px;
+               width:3px;border-radius:2px;background:var(--l-blue);opacity:.75}
+  .set-page h2:first-of-type{border-top:none;margin-top:18px}
+  .set-note{font-size:12px;color:var(--l-dim);margin:0 0 12px;line-height:1.75}
+  .set-note b{color:#3d434b}
   .set-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));
             gap:12px}
   .set-card{background:#fff;border:1px solid var(--l-line);border-radius:14px;
@@ -177,10 +196,59 @@
             background:#f7f7f4;padding:7px 10px;font-size:12.5px;color:var(--l-ink)}
   .set-text:focus{outline:none;border-color:#bfd4fb;background:#fff}
   .set-save{border-radius:999px;border:none;background:#23272e;color:#fff;
-            padding:7px 18px;font-size:13px;cursor:pointer}
+            padding:7px 18px;font-size:13px;cursor:pointer;
+            transition:transform .12s ease,box-shadow .12s ease,opacity .12s ease}
+  .set-save:hover:not(:disabled){transform:translateY(-1px);
+            box-shadow:0 4px 12px rgba(16,24,40,.16)}
+  .set-save:active:not(:disabled){transform:translateY(0)}
+  /* 自定义提示词：多行，所以自成一行而不是挤在 set-row 里 */
+  .set-prompt{display:block;margin:12px 0}
+  .set-prompt .set-k{width:auto;display:block;margin-bottom:5px;font-size:12.5px;
+                     color:#3d434b}
+  .set-ta{width:100%;border-radius:10px;border:1px solid var(--l-line2);
+          background:#f7f7f4;padding:9px 11px;font:12.5px/1.65 var(--sans);
+          color:var(--l-ink);resize:vertical;box-sizing:border-box;
+          transition:border-color .15s ease,background .15s ease}
+  .set-ta:focus{outline:none;border-color:#bfd4fb;background:#fff}
   .l-setbtn{border:1px solid var(--l-line2);background:#fff;border-radius:999px;
-            padding:5px 14px;font-size:12.5px;color:#3d434b;cursor:pointer}
+            padding:5px 14px;font-size:12.5px;color:#3d434b;cursor:pointer;
+            transition:background .15s ease,border-color .15s ease}
   .l-setbtn:hover{background:#fafaf8}
+
+  /* ---------------- 动效 ----------------
+     只给**状态真的变了**的地方加动画，不做装饰性运动：
+     新消息进来、卡片出现、正在跑的那个点在动。这样动效本身是信息 ——
+     屏幕上动的东西就是刚变的东西。
+     `prefers-reduced-motion` 一律关掉：这是无障碍要求，不是可选项。 */
+  @keyframes l-rise{from{opacity:0;transform:translateY(6px)}
+                    to{opacity:1;transform:none}}
+  @keyframes l-pulse{0%,100%{opacity:1;transform:scale(1)}
+                     50%{opacity:.45;transform:scale(.82)}}
+  @keyframes l-sweep{0%{background-position:100% 0}100%{background-position:-100% 0}}
+
+  /* 时间线里新出现的卡片 */
+  .l-msg,.l-card,.l-step,.nt-spec{animation:l-rise .22s ease both}
+  /* 正在跑的那个圆点：呼吸 = 「它还活着」，静止的灰点则不动 */
+  .l-dot.blue{animation:l-pulse 1.5s ease-in-out infinite}
+  .l-dot.amber{animation:l-pulse 2.2s ease-in-out infinite}
+  /* 进度条推进要有过渡，否则数字跳变时看不出是涨了还是缩了 */
+  .pg-bar i{transition:width .45s cubic-bezier(.4,0,.2,1)}
+  /* 「正在拆解…」这类等待态：一道扫光，说明它在动而不是卡死 */
+  .nt-line.waiting{background:linear-gradient(90deg,
+      transparent 0%,rgba(37,99,235,.10) 50%,transparent 100%);
+      background-size:200% 100%;animation:l-sweep 1.4s linear infinite;
+      border-radius:8px}
+  .l-composer button,.nt-primary,.nt-ghost{
+      transition:transform .12s ease,box-shadow .12s ease,background .15s ease}
+  .nt-primary:hover:not(:disabled){transform:translateY(-1px);
+      box-shadow:0 4px 12px rgba(37,99,235,.22)}
+  .nt-primary:active:not(:disabled){transform:translateY(0)}
+
+  @media (prefers-reduced-motion: reduce){
+    .l-msg,.l-card,.l-step,.nt-spec,.l-dot.blue,.l-dot.amber,.nt-line.waiting{
+      animation:none}
+    .pg-bar i,.nt-primary,.set-save{transition:none}
+  }
 
   /* ---------------- 失败反馈（服务端拒绝时必须说出来）---------------- */
   .l-fail{margin:6px 0 0;color:var(--l-red);font-size:12.5px;
@@ -221,6 +289,44 @@
   #lite .nt-scope{margin-left:auto;font-size:11px}
   #lite .nt-spec-goal{font-size:13px}
   #lite .nt-crit{margin:6px 0 0;padding-left:18px;font-size:12px;color:#4b5158}
+
+  /* 人改这份拆解时用的控件（M11：仲裁不该只有「同意」和「否决」） */
+  #lite .nt-edit{width:100%;border:1px solid var(--l-line2);border-radius:8px;
+        background:#fbfbf9;padding:6px 9px;font:12.5px/1.6 var(--sans);
+        color:var(--l-ink);box-sizing:border-box;resize:vertical;
+        transition:border-color .15s ease,background .15s ease}
+  #lite .nt-edit:focus{outline:none;border-color:#bfd4fb;background:#fff}
+  #lite .nt-edit-goal{font-size:13px;margin-top:2px}
+  #lite .nt-crit-row{display:flex;gap:6px;align-items:center}
+  #lite .nt-del{flex:none;border:1px solid var(--l-line2);background:#fff;
+        border-radius:7px;color:var(--l-red);font-size:11.5px;padding:2px 8px;
+        cursor:pointer;line-height:1.6}
+  #lite .nt-del:hover{background:#fdf3f3}
+  #lite .nt-spec-hd .nt-del{margin-left:auto}
+  #lite .nt-add{border:1px dashed var(--l-line2);background:#fff;border-radius:8px;
+        color:#3d434b;font-size:11.5px;padding:3px 10px;cursor:pointer}
+  #lite .nt-add:hover{background:#fafaf8}
+  #lite .nt-spec-more{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+  #lite .nt-field{display:flex;align-items:center;gap:8px;font-size:11.5px;
+        color:var(--l-dim)}
+  #lite .nt-field span{flex:none;width:64px}
+  #lite .nt-dirty{background:#fff8e6;border:1px solid #f0dfae;border-radius:8px;
+        padding:7px 10px;color:#7a5b12}
+
+  /* 「它想跑 npm，允许吗」—— 撞程序白名单时的当场放行（M11）。
+     摆在通用选项之上：这一刻真正的问题是它，不是 CONTINUE/ABANDON。 */
+  #lite .l-grant{margin:10px 0 4px;padding:10px 12px;border-radius:10px;
+        background:#eef4ff;border:1px solid #cfdefb;font-size:12.5px;
+        display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  #lite .l-grant code{font:12px var(--mono);background:#fff;border-radius:5px;
+        padding:1px 6px;border:1px solid #cfdefb}
+  #lite .l-grant button{flex:none;border:none;border-radius:999px;
+        background:var(--l-blue);color:#fff;padding:5px 14px;font-size:12.5px;
+        cursor:pointer;transition:transform .12s ease,box-shadow .12s ease}
+  #lite .l-grant button:hover:not(:disabled){transform:translateY(-1px);
+        box-shadow:0 4px 12px rgba(37,99,235,.25)}
+  #lite .l-grant button:disabled{opacity:.5;cursor:default}
+  #lite .l-grant-note{font-size:11px;color:var(--l-dim)}
   #lite .nt-cmd{color:var(--l-green);font-size:11px}
   #lite .nt-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
   #lite .nt-primary{border:none;border-radius:999px;background:#23272e;color:#fff;

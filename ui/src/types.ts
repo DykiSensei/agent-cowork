@@ -127,6 +127,13 @@ export interface PendingRuling {
   suggestion: Suggestion | null;
   decision_id: string | null;
   checkpoint_id: string | null;
+  /**
+   * 挂起的原因是「想跑一个不在白名单里的程序」时，是哪个程序。
+   * 有值 = 界面该给一个「允许它并继续」的按钮，而不是让人去设置页改配置。
+   * **来自信号的 payload，不是从理由文字里抠的** —— 后者会因为改一句话而
+   * 失效，且失效方式是按钮悄悄不见了。
+   */
+  blocked_binary?: string | null;
 }
 
 export interface PlanData {
@@ -328,6 +335,11 @@ export interface Settings {
   allow_network: string;
   /** 联网搜索（search_web）的状态。**只有 provider 是可写的**，key 只写不读。 */
   search: SearchSettings;
+  /**
+   * 三个角色的**附加**提示词（追加在内置提示词之后，不替换它）。
+   * 内置提示词里带着输出契约和工具清单 —— 替换掉就是 100% 解析失败。
+   */
+  prompts: { architect: string; reviewer: string; subagent: string };
   effort: { architect: string; subagent: string; cheap: string };
   /**
    * 写入侧复核（§12 M8）。**字符串 "on" / "off"，不是布尔** ——

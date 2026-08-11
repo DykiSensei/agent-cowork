@@ -86,7 +86,10 @@ function WaitCard({
   pending: PendingRuling;
   /** 复合线程上等人的是某个子任务 —— 要说清楚是哪一步在等 */
   title?: string;
-  onSubmit: (action: string) => Promise<ActionResult>;
+  onSubmit: (
+    action: string,
+    specChanges?: Record<string, unknown>,
+  ) => Promise<ActionResult>;
 }) {
   const [done, setDone] = useState<string | null>(null);
   // 服务端可能不收这条裁决（任务已经不在挂起、并发答复过了）。
@@ -126,11 +129,42 @@ function WaitCard({
           {suggestion.rationale ? `，${suggestion.rationale}` : ""}
         </div>
       )}
+      {/* 撞了 `run` 的程序白名单：这不该让人跑去设置页改一行环境变量，
+          那件事和「这一刻要不要放行它」根本不是同一个决定。
+          放行只作用于**这个任务**，落在它的 spec 上。 */}
+      {pending.blocked_binary && (
+        <div className="l-grant">
+          它想跑 <code>{pending.blocked_binary}</code>，而这个程序不在允许清单里。
+          <button
+            className="primary"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              setFailed(null);
+              void onSubmit("MODIFY_TASK", {
+                allow_binary: pending.blocked_binary!,
+              })
+                .then((r) => {
+                  if (r.ok) setDone(`已允许 ${pending.blocked_binary}，接着跑`);
+                  else setFailed(r.error ?? "没能提交");
+                })
+                .finally(() => setBusy(false));
+            }}
+          >
+            允许 {pending.blocked_binary} 并继续
+          </button>
+          <span className="l-grant-note">只对这个任务生效</span>
+        </div>
+      )}
       <div className="l-choices">
         {actions.map((a) => (
           <button
             key={a}
-            className={suggestion?.action === a ? "primary" : undefined}
+            className={
+              !pending.blocked_binary && suggestion?.action === a
+                ? "primary"
+                : undefined
+            }
             disabled={busy}
             onClick={() => {
               setBusy(true);
@@ -239,7 +273,12 @@ export default function LiteStream({
   detail: TaskDetail;
   onIntervene: (taskId: string, text: string) => Promise<ActionResult>;
   onCancel: (taskId: string, reason: string) => Promise<ActionResult>;
-  onRuling: (taskId: string, action: string, rationale: string) => Promise<ActionResult>;
+  onRuling: (
+    taskId: string,
+    action: string,
+    rationale: string,
+    specChanges?: Record<string, unknown>,
+  ) => Promise<ActionResult>;
 }) {
   const [bar, setBar] = useState(false);
   // 介入 / 取消都可能被服务端拒（最常见的是 409「任务不在运行中」）。
@@ -334,7 +373,9 @@ export default function LiteStream({
                     title={ev.title}
                     // 复合线程上要发给**那个子任务**：root 没有 tasks 行，
                     // 发给它只会得到一个 404
-                    onSubmit={(action) => onRuling(ev.taskId ?? taskId, action, "")}
+                    onSubmit={(action, specChanges) =>
+                      onRuling(ev.taskId ?? taskId, action, "", specChanges)
+                    }
                   />
                 );
               case "plan":

@@ -47,10 +47,14 @@ class ScopeViolation(Exception):
     通常意味着它已经偏离了任务理解（§3.2 设计注记）。
     """
 
-    def __init__(self, resource: str, reason: str) -> None:
+    def __init__(self, resource: str, reason: str, *, binary: str | None = None) -> None:
         super().__init__(f"{reason}: {resource}")
         self.resource = resource
         self.reason = reason
+        # 撞的是 `run` 的程序白名单时，把**程序名单独带出来**（M11）。
+        # 只放在人读的消息里不够：界面要据此渲一个「允许 npm」的按钮，
+        # 而从一句话里正则抠程序名是迟早要错的。
+        self.binary = binary
 
 
 @dataclass
@@ -370,9 +374,15 @@ class Sandbox:
             return ToolResult(ok=False, exit_code=2, stderr="empty command")
         binary = Path(command[0]).name.removesuffix(".exe")
         if binary not in self.profile.allowed_binaries:
+            # 消息要说得出**下一步**：这条信号会同时给模型看（让它换个做法）
+            # 和给人看（让他决定加不加）。只报「不在白名单里」的话，两边都只能猜。
             raise ScopeViolation(
                 command[0],
-                f"不在 allowed_binaries {list(self.profile.allowed_binaries)}",
+                f"{binary!r} 不在 run 的白名单里。可用的是 "
+                f"{list(self.profile.allowed_binaries)}。"
+                f"这台机器的主人会被问一句要不要放行 —— 你不用改任何配置，"
+                f"要么等他答复，要么换个能用的程序做同一件事",
+                binary=binary,
             )
         argv = self._wrap(command)
         try:
