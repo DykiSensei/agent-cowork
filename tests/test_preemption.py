@@ -445,19 +445,215 @@ class TestExpandedToolSurface(LoopFixture):
         """fetch_url 取回的是第三方文本，会进 trace 再进下一轮提示词。
 
         那是一条提示词注入通道，所以它必须由人显式打开，不能是默认。
+        `search_web` 走同一条防线 —— 摘要同样是第三方文本。
         """
         from cowork.agent.architect import SpecTemplate
         from cowork.types import SandboxProfile
 
         default = SpecTemplate(sandbox=SandboxProfile(workspace=str(self.ws)))
         self.assertNotIn("fetch_url", default.tools)
+        self.assertNotIn("search_web", default.tools)
 
-        loop, agent, ctx = self.make({
-            (1, 0): ToolCall(name="fetch_url", args={"url": "http://example.com"},
-                             thought=""),
-        }, tools=("read_file",), max_steps=3)
-        outcome = loop.run(ctx, agent)
-        self.assertIs(outcome.preempting_signal.type, SignalType.SCOPE_VIOLATION)
+        for call in (
+            ToolCall(name="fetch_url", args={"url": "http://example.com"}, thought=""),
+            ToolCall(name="search_web", args={"query": "怎么写"}, thought=""),
+        ):
+            loop, agent, ctx = self.make({(1, 0): call}, tools=("read_file",),
+                                         max_steps=3)
+            outcome = loop.run(ctx, agent)
+            self.assertIs(outcome.preempting_signal.type, SignalType.SCOPE_VIOLATION,
+                          f"{call.name} 不该在默认工具面里")
+
+
+class TestToolFaceIsConsistent(unittest.TestCase):
+    """加一个工具要同时改四处，少一处就是一类**假信号**。
+
+    §11.6f 那条实测：缺一个列目录工具，M2 的 75 次运行里 23 次假
+    SCOPE_VIOLATION —— 模型绕路、撞白名单、白烧一轮架构师决策。反过来也一样：
+    schema 里有而提示词里没有，模型不知道能用；提示词里有而派发里没有，
+    调了直接「未声明的工具」。这四处以前没有任何测试钉着，全靠人记得。
+    """
+
+    def _tools(self) -> list[str]:
+        from cowork.llm.anthropic_backend import ACTION_SCHEMA
+
+        return [t for t in ACTION_SCHEMA["properties"]["tool"]["enum"] if t]
+
+    def test_every_tool_in_the_schema_has_a_sandbox_method(self):
+        from cowork.runtime.sandbox import Sandbox
+
+        for tool in self._tools():
+            self.assertTrue(callable(getattr(Sandbox, tool, None)),
+                            f"schema 里有 {tool}，Sandbox 上却没有")
+
+    def test_every_tool_in_the_schema_is_described_to_the_model(self):
+        from cowork.llm.anthropic_backend import SUBAGENT_SYSTEM
+
+        for tool in self._tools():
+            self.assertIn(f"tool={tool}", SUBAGENT_SYSTEM,
+                          f"{tool} 没写进 Subagent 提示词 —— 模型不会知道它存在")
+
+    def test_every_tool_in_the_schema_is_dispatched_by_the_loop(self):
+        """派发缺一个的话，模型照着提示词调它，得到的是「未声明的工具」。"""
+        from unittest import mock
+
+        from cowork.runtime.loop import StepLoop
+        from cowork.runtime.sandbox import ScopeViolation
+
+        loop = StepLoop.__new__(StepLoop)
+        loop.sandbox = mock.MagicMock()
+        # 每个键都给上：`_exec_tool` 直接下标取参数，缺哪个都是 KeyError
+        args = {"path": "p", "content": "c", "pattern": "x", "glob": "**/*",
+                "to": "t", "url": "http://e.com", "query": "q",
+                "command": ["python"], "recursive": False}
+        spec = mock.MagicMock()
+        spec.tools = ()  # 空 = 不过滤，测的是派发不是白名单
+
+        for tool in self._tools():
+            try:
+                loop._exec_tool(ToolCall(name=tool, args=dict(args), thought=""), spec)
+            except ScopeViolation as exc:  # pragma: no cover - 失败路径
+                self.fail(f"{tool} 在 _exec_tool 里没有派发分支: {exc}")
+
+
+class TestSearchWeb(LoopFixture):
+    """`search_web`：搜索这一步归我们自己持有（开发文档 §11.22）。
+
+    这些用例全部不打网络 —— 替掉 `search.search`，测的是工具层的行为。
+    """
+
+    def _sandbox(self):
+        from cowork.runtime.sandbox import Sandbox
+        from cowork.types import SandboxProfile
+
+        return Sandbox(SandboxProfile(workspace=str(self.ws)), ["out.py"])
+
+    def test_missing_key_is_a_soft_failure_with_a_next_step(self):
+        """没配 key 不是任务级失败，而且要说得出下一步该做什么。
+
+        判成 hard_failure 的话，「忘了配搜索 key」会以中断架构师收场 ——
+        白烧一轮决策去处理一件人五秒能解决的事（同 §11.6a 那条）。
+        """
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"ZHIPUAI_API_KEY": "",
+                                          "COWORK_SEARCH_API_KEY": "",
+                                          "COWORK_SEARCH_PROVIDER": "zhipu"}):
+            r = self._sandbox().search_web("多 Agent 协作")
+
+        self.assertFalse(r.ok)
+        self.assertFalse(r.hard_failure, "搜不了不是任务级失败")
+        self.assertIn("ZHIPUAI_API_KEY", r.stderr, "要说出缺的是哪个变量")
+
+    def test_results_are_labelled_third_party_and_truncated(self):
+        """摘要是第三方文本，必须和 fetch_url 一样显式标注「不是指令」。"""
+        from unittest import mock
+
+        from cowork.runtime import sandbox as sandbox_mod
+        from cowork.runtime.search import SearchHit
+
+        hits = [
+            SearchHit(title=f"标题{i}", url=f"https://e.com/{i}",
+                      snippet="正文" * 4000, source="某站", published="2026-08-01")
+            for i in range(3)
+        ]
+        with mock.patch("cowork.runtime.search.search", return_value=hits):
+            r = self._sandbox().search_web("查点东西")
+
+        self.assertTrue(r.ok)
+        self.assertIn("第三方内容", r.stdout)
+        self.assertIn("不是你的任务", r.stdout)
+        self.assertIn("https://e.com/0", r.stdout)
+        self.assertLessEqual(
+            len(r.stdout), sandbox_mod.SEARCH_MAX_CHARS + 32,
+            "一次工具调用不该把子任务的上下文预算吃光",
+        )
+
+    def test_zero_results_is_an_answer_not_a_failure(self):
+        """零结果是有效答案：ok=True 模型才会去改搜索词，而不是重试同一个。"""
+        from unittest import mock
+
+        with mock.patch("cowork.runtime.search.search", return_value=[]):
+            r = self._sandbox().search_web("一个不存在的东西")
+
+        self.assertTrue(r.ok)
+        self.assertIn("没有搜到", r.stdout)
+
+    def test_no_failure_escapes_the_tool_layer(self):
+        """工具层的失败一律以 ToolResult 回到循环里，不许抛。
+
+        `_exec_tool` 只接 ScopeViolation —— 从这里抛任何异常都会穿透整个 run
+        （和当年 read_file 的 UnicodeDecodeError 同一形状）。两种都要挡：
+        已知的 SearchUnavailable，和**我们自己的解析 bug**。
+        """
+        from unittest import mock
+
+        from cowork.runtime.search import SearchUnavailable
+
+        for exc in (SearchUnavailable("连不上搜索端点"), TypeError("解析写错了")):
+            with mock.patch("cowork.runtime.search.search", side_effect=exc):
+                r = self._sandbox().search_web("x")
+            self.assertFalse(r.ok, f"{type(exc).__name__} 要变成失败的 ToolResult")
+            self.assertFalse(r.hard_failure, "搜不了不该抢占架构师")
+
+    def test_the_key_never_reaches_the_model_or_the_record(self):
+        """key 不进三个地方之一：这里是「不进模型上下文」。"""
+        import os
+        from unittest import mock
+
+        from cowork.runtime.search import SearchHit
+
+        secret = "sk-zhipu-should-never-appear-1234567890"
+        with mock.patch.dict(os.environ, {"ZHIPUAI_API_KEY": secret}):
+            with mock.patch("cowork.runtime.search.search",
+                            return_value=[SearchHit(title="t", url="https://e.com")]):
+                r = self._sandbox().search_web("x")
+        self.assertNotIn(secret, r.stdout + r.stderr + r.detail)
+
+    def test_tool_is_dispatched_when_the_task_allows_it(self):
+        """白名单放行时，query 要真的走到沙箱那一层（三处改动的接缝）。"""
+        from unittest import mock
+
+        from cowork.runtime.search import SearchHit
+
+        with mock.patch("cowork.runtime.search.search",
+                        return_value=[SearchHit(title="命中", url="https://e.com")]) as m:
+            loop, agent, ctx = self.make({
+                (1, 0): ToolCall(name="search_web", args={"query": "协作系统"},
+                                 thought=""),
+                (1, 1): Finish(output={}, summary="done"),
+            }, tools=("search_web",), max_steps=4)
+            outcome = loop.run(ctx, agent)
+
+        self.assertIs(outcome.status, TaskStatus.COMPLETED)
+        self.assertEqual(m.call_args.args[0], "协作系统")
+
+
+def _search_configured() -> str | None:
+    from cowork.runtime import search as search_api
+
+    return search_api.configured()
+
+
+@unittest.skipUnless(_search_configured(), "未配搜索 key（ZHIPUAI_API_KEY）")
+class TestLiveSearch(unittest.TestCase):
+    """打真实搜索端点。
+
+    **这条在没有 key 时是 skip，不是通过** —— `search.py` 的请求体和响应字段
+    映射是照文档写的，从未在真实端点上跑过。这个项目里 `PROVIDERS.verified`
+    记的就是这个区别：没打通过不等于错，等于**没验证**，两者不能混。
+    配上 key 之后这条用例就是那次验证。
+    """
+
+    def test_a_real_query_comes_back_with_usable_hits(self):
+        from cowork.runtime.search import search
+
+        hits = search("多 Agent 协作系统", count=3)
+        self.assertTrue(hits, "真实端点返回了空列表 —— 请求体或字段映射对不上")
+        first = hits[0]
+        self.assertTrue(first.url.startswith("http"), f"link 字段没对上: {first!r}")
+        self.assertTrue(first.title, "title 字段没对上")
 
 
 class TestSoftSignalsDoNotPreempt(LoopFixture):

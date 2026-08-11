@@ -323,9 +323,11 @@ export interface Settings {
   workspace_default: string;
   /** `run` 能调哪些可执行文件，逗号分隔。默认只有 python。 */
   allowed_binaries: string;
-  /** 联网工具 fetch_url 开不开（"on" / "off"）。**默认关**：取回的第三方内容
-   * 会进 reasoning_trace 再进下一轮提示词，那是一条提示词注入通道。 */
+  /** 两个联网工具（fetch_url / search_web）的总闸（"on" / "off"）。**默认关**：
+   * 取回的第三方内容会进 reasoning_trace 再进下一轮提示词，那是一条提示词注入通道。 */
   allow_network: string;
+  /** 联网搜索（search_web）的状态。**只有 provider 是可写的**，key 只写不读。 */
+  search: SearchSettings;
   effort: { architect: string; subagent: string; cheap: string };
   /**
    * 写入侧复核（§12 M8）。**字符串 "on" / "off"，不是布尔** ——
@@ -333,6 +335,41 @@ export interface Settings {
    * 所以发 false 反而关不掉。服务端会拒非 on/off 的值。
    */
   review_writes: string;
+}
+
+/**
+ * 联网搜索的配置与现状。
+ *
+ * 两把 key 的关系：**专用 key 优先，没有就用那家自己的**。所以已经配过
+ * 智谱（模型供应商那一栏）的人，这里什么都不用填就能搜 —— `key_source`
+ * 就是用来把这件事说清楚的，否则界面只会显示一个没有下文的「已配置」。
+ */
+export interface SearchSettings {
+  /** 用户显式选的那家（空 = 用默认）。可写。 */
+  provider: string;
+  /** 实际生效的那家（provider 为空时是默认值）。只读。 */
+  effective_provider: string;
+  /** 可选的搜索供应商。 */
+  options: string[];
+  /** effective_provider 认不认识（配了个不存在的名字时为 false）。 */
+  known: boolean;
+  /** 那家自己的 key 变量名，例如 ZHIPUAI_API_KEY —— 界面要用它说「配哪个」。 */
+  provider_key_env: string | null;
+  /** 专用搜索 key 的变量名（COWORK_SEARCH_API_KEY）。 */
+  dedicated_key_env: string;
+  /** 这一刻能不能搜。false = search_web 不会进白名单，其余功能不受影响。 */
+  configured: boolean;
+  /** 用的是哪一把 key。null = 一把都没有。 */
+  key_source: "dedicated" | "provider" | null;
+  /** 末 4 位识别串。完整 key 永远不出服务端。 */
+  key_hint: string | null;
+}
+
+/** `POST /api/search/test` 的结果。三种状态结论不同，不能都说成失败。 */
+export interface SearchProbe {
+  status: "ok" | "empty" | "failed";
+  detail: string;
+  sample?: { title: string; url: string };
 }
 
 // --------------------------------------------------------------------- //

@@ -13,6 +13,7 @@ import type {
   PlanView,
   ProbeResult,
   ProviderInfo,
+  SearchProbe,
   Settings,
   TaskDetail,
   ThreadSummary,
@@ -181,6 +182,19 @@ export function testProvider(name: string): Promise<ProbeResult> {
 
 export function putProviderKey(name: string, apiKey: string) {
   return send(`/api/providers/${encodeURIComponent(name)}`, { api_key: apiKey }, "PUT");
+}
+
+/** 专用搜索 key。只写不读 —— 传空串 = 清掉，回落到那家自己的 key。 */
+export function putSearchKey(apiKey: string) {
+  return send("/api/search/key", { api_key: apiKey }, "PUT");
+}
+
+/**
+ * 真搜一次。会花一次搜索的钱（约 0.01 元），所以只在用户点按钮时调。
+ * 它同时是 `search.py` 字段映射的第一次真实验证。
+ */
+export function testSearch(): Promise<SearchProbe> {
+  return req("/api/search/test", { method: "POST" });
 }
 
 export function fetchSettings(): Promise<Settings> {

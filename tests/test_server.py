@@ -790,6 +790,117 @@ class TestServer(unittest.TestCase):
                     else:
                         os.environ[k] = v
 
+    def test_search_settings_roundtrip_and_key_discipline(self):
+        """联网搜索走设置页：供应商可读写，**key 只写不读**。
+
+        两把 key 的关系也要能从 GET 看出来（`key_source`）：专用 key 优先，
+        没有就用那家自己的。少了这个，界面只能显示一个没有下文的「已配置」，
+        人不知道自己配的是哪一把、也不知道该去哪儿改。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            env_file = Path(td) / ".env"
+            env_file.write_text("# test env\n", encoding="utf-8")
+            saved = {
+                k: os.environ.get(k)
+                for k in ("COWORK_ENV_FILE", "COWORK_SEARCH_API_KEY",
+                          "COWORK_SEARCH_PROVIDER", "ZHIPUAI_API_KEY")
+            }
+            os.environ["COWORK_ENV_FILE"] = str(env_file)
+            for k in ("COWORK_SEARCH_API_KEY", "COWORK_SEARCH_PROVIDER",
+                      "ZHIPUAI_API_KEY"):
+                os.environ.pop(k, None)
+            client = self._app(ScriptedBackend({}), Path(td))
+            try:
+                with client:
+                    got = client.get("/api/settings").json()["search"]
+                    self.assertFalse(got["configured"], "一把 key 都没有")
+                    self.assertIsNone(got["key_source"])
+                    self.assertEqual(got["effective_provider"], "zhipu")
+                    self.assertEqual(got["provider_key_env"], "ZHIPUAI_API_KEY",
+                                     "界面要能说出「配哪个变量」")
+
+                    # 那家自己的 key 就够用 —— 配过智谱的人不用再填任何东西
+                    os.environ["ZHIPUAI_API_KEY"] = "zp-abcd1234"
+                    got = client.get("/api/settings").json()["search"]
+                    self.assertTrue(got["configured"])
+                    self.assertEqual(got["key_source"], "provider")
+
+                    # 专用 key 优先
+                    r = client.put("/api/search/key", json={"api_key": "sk-search-9999"})
+                    self.assertEqual(r.status_code, 200, r.text)
+                    got = client.get("/api/settings").json()["search"]
+                    self.assertEqual(got["key_source"], "dedicated")
+                    self.assertEqual(got["key_hint"], "····9999")
+
+                    # **完整 key 不出服务端**：整份响应里不该出现它
+                    self.assertNotIn("sk-search-9999",
+                                     client.get("/api/settings").text)
+
+                    # 清掉专用 key = 回落到那家自己的
+                    r = client.put("/api/search/key", json={"api_key": ""})
+                    self.assertEqual(r.status_code, 200, r.text)
+                    self.assertEqual(
+                        client.get("/api/settings").json()["search"]["key_source"],
+                        "provider",
+                    )
+
+                    # 换行 = .env 注入，必须 400 而不是 500（同供应商 key 那条）
+                    r = client.put(
+                        "/api/search/key",
+                        json={"api_key": "x\nCOWORK_LLM_BASE_URL=http://坏人/"},
+                    )
+                    self.assertEqual(r.status_code, 400, r.text)
+                    self.assertNotIn("坏人", env_file.read_text("utf-8"))
+
+                    # 供应商可写，但不认识的当场拒
+                    r = client.put("/api/settings",
+                                   json={"search": {"provider": "没这家"}})
+                    self.assertEqual(r.status_code, 400, r.text)
+                    r = client.put("/api/settings",
+                                   json={"search": {"provider": "zhipu"}})
+                    self.assertEqual(r.status_code, 200, r.text)
+                    self.assertIn("COWORK_SEARCH_PROVIDER=zhipu",
+                                  env_file.read_text("utf-8"))
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
+    def test_search_not_configured_changes_nothing_else(self):
+        """**不配搜索不影响主体功能** —— 这是这个功能的前提，得有东西钉着。
+
+        没配 key 时：设置页照常打开、任务照常发布、工具面只是少一个
+        `search_web`（连 `fetch_url` 都不受影响）。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            saved = {
+                k: os.environ.get(k)
+                for k in ("COWORK_SEARCH_API_KEY", "ZHIPUAI_API_KEY",
+                          "COWORK_ALLOW_NETWORK")
+            }
+            for k in ("COWORK_SEARCH_API_KEY", "ZHIPUAI_API_KEY"):
+                os.environ.pop(k, None)
+            os.environ["COWORK_ALLOW_NETWORK"] = "on"
+            client = self._app(ScriptedBackend({}), Path(td))
+            try:
+                with client:
+                    self.assertEqual(client.get("/api/settings").status_code, 200)
+                    self.assertEqual(client.get("/api/tasks").status_code, 200)
+                    self.assertEqual(client.get("/api/providers").status_code, 200)
+
+                    tools = client.app.state.runner._network_tools()
+                    self.assertIn("fetch_url", tools, "抓网页不该受搜索连累")
+                    self.assertNotIn("search_web", tools,
+                                     "没 key 就别放进白名单：调了必然失败，白费一步")
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
     def test_provider_test_endpoint(self):
         """「已填」和「能用」是两件事。
 

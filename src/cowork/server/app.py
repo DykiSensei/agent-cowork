@@ -314,6 +314,50 @@ def create_app(
             return err(400, str(exc))
         return {"ok": True}
 
+    @app.put("/api/search/key")
+    async def put_search_key(req: Request):
+        """专用搜索 key。**只写不读**，和供应商 key 同一条纪律。
+
+        清空（传空串）= 回落到那家自己的 key（默认就是 `ZHIPUAI_API_KEY`）——
+        所以「已经配过智谱」的人本来就不用来这儿。
+        """
+        from .settings_io import SEARCH_KEY_ENV
+
+        body = await optional_body(req)
+        try:
+            update_env({SEARCH_KEY_ENV: (body.get("api_key") or "").strip()})
+        except ValueError as exc:
+            # 值里带换行会往 .env 多写一行 —— 那是任意环境变量注入，不是 500
+            return err(400, str(exc))
+        return {"ok": True}
+
+    @app.post("/api/search/test")
+    async def test_search():
+        """真搜一次，回答「这把 key 现在能不能搜」。
+
+        和供应商那个 `/test` 同一个理由：设置页原来只会显示「已配置」，
+        判据是环境变量非空 —— 填错照样显示已配置，任务照样失败。
+        这里还多担一件事：`search.py` 的请求体与字段映射是照文档写的，
+        **这个按钮是它第一次真实验证**。会花一次搜索的钱（约 0.01 元）。
+        """
+        from ..runtime import search as search_api
+
+        def probe() -> dict[str, object]:
+            try:
+                hits = search_api.search("agent cowork 联网搜索自检", count=3)
+            except search_api.SearchUnavailable as exc:
+                return {"status": "failed", "detail": str(exc)}
+            if not hits:
+                # 能调通但零结果：key 是好的，字段映射可能不对 —— 两者结论不同
+                return {"status": "empty", "detail": "调通了，但没有返回结果"}
+            return {
+                "status": "ok",
+                "detail": f"回了 {len(hits)} 条",
+                "sample": {"title": hits[0].title, "url": hits[0].url},
+            }
+
+        return await asyncio.to_thread(probe)
+
     @app.get("/api/settings")
     def get_settings():
         env = effective_env()
@@ -343,8 +387,42 @@ def create_app(
             "allow_network": env.get(
                 GLOBAL_KEYS["allow_network"], DEFAULTS["allow_network"]
             ),
+            "search": _search_status(env),
         }
         return out
+
+    def _search_status(env: dict[str, str]) -> dict[str, object]:
+        """`search_web` 这一刻能不能用，以及**为什么** —— 后者才是设置页要答的。
+
+        「要配哪家」在界面上必须有答案：默认那家的 key 变量名、现在用的是
+        哪一把（专用 key 还是那家自己的 key）、没配会怎样。少了这些，人看到的
+        只是一个「未配置」，不知道下一步该点哪儿。
+
+        key 只回显末 4 位识别串（`key_hint`），完整值永不出服务端。
+        """
+        from ..runtime import search as search_api
+        from .settings_io import SEARCH_KEY_ENV
+
+        chosen = (env.get(GLOBAL_KEYS["search.provider"]) or "").strip().lower()
+        name = chosen or search_api.DEFAULT_PROVIDER
+        prov = search_api.PROVIDERS.get(name)
+        dedicated, dedicated_hint = key_hint(SEARCH_KEY_ENV)
+        shared, shared_hint = (
+            key_hint(prov.key_env) if prov else (False, None)
+        )
+        return {
+            "provider": chosen,
+            "effective_provider": name,
+            "options": sorted(search_api.PROVIDERS),
+            "known": prov is not None,
+            # 那家自己的 key 变量名 —— 界面要用它告诉人「配哪个」
+            "provider_key_env": prov.key_env if prov else None,
+            "dedicated_key_env": SEARCH_KEY_ENV,
+            "configured": search_api.configured() is not None,
+            # 用的是哪一把：专用 key 优先，否则回落到那家自己的
+            "key_source": "dedicated" if dedicated else ("provider" if shared else None),
+            "key_hint": dedicated_hint if dedicated else shared_hint,
+        }
 
     @app.put("/api/settings")
     async def put_settings(req: Request):
@@ -385,6 +463,17 @@ def create_app(
                 value = str(body[section][key] or "").strip()
                 if section == "effort" and value not in EFFORT_LEVELS:
                     return err(400, f"未知推理挡位: {value!r}")
+                if section == "search" and key == "provider" and value:
+                    # 选一家不认识的，`search_web` 会在任务跑起来之后才失败，
+                    # 而那时人已经离开设置页了 —— 当场拒绝
+                    from ..runtime import search as search_api
+
+                    if value not in search_api.PROVIDERS:
+                        return err(
+                            400,
+                            f"不认识的搜索供应商 {value!r}"
+                            f"（可选：{sorted(search_api.PROVIDERS)}）",
+                        )
                 if section == "providers" and value:
                     # 只能选**已经配了 key 的**那几家：选一家没 key 的，
                     # 任务会在起跑时才失败，而那时人已经离开设置页了。

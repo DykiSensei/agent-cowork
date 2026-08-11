@@ -36,7 +36,14 @@ GLOBAL_KEYS = {
     "allowed_binaries": "COWORK_ALLOWED_BINARIES",
     "allow_network": "COWORK_ALLOW_NETWORK",
     "review_writes": "COWORK_REVIEW_WRITES",
+    # search_web 用哪家搜索 API。**只有供应商名在这里** ——
+    # key 是密钥，走 `PUT /api/search/key` 那条只写不读的路，不进这张表
+    # （这张表的每一项都会被 GET /api/settings 原样回显）。
+    "search.provider": "COWORK_SEARCH_PROVIDER",
 }
+
+# 专用搜索 key 的环境变量名。**刻意不放进 GLOBAL_KEYS**，理由同上。
+SEARCH_KEY_ENV = "COWORK_SEARCH_API_KEY"
 
 # 环境变量名的合法形状。写文件这一步不该依赖调用方一直守白名单。
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -56,6 +63,8 @@ DEFAULTS = {
     # 写入侧复核（§12 M8）。默认开，依据 §11.19；界面上留开关是因为
     # 它的**重做循环**没在真实链路上测过，只有判别力那半有数据。
     "review_writes": "on",
+    # 空 = 用 search.DEFAULT_PROVIDER（今天是 zhipu）
+    "search": {"provider": ""},
 }
 
 

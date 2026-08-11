@@ -383,6 +383,8 @@ class StepLoop:
             return self.sandbox.move_file(call.args["path"], call.args["to"])
         if call.name == "fetch_url":
             return self.sandbox.fetch_url(call.args["url"])
+        if call.name == "search_web":
+            return self.sandbox.search_web(call.args["query"])
         if call.name == "run":
             return self.sandbox.run(list(call.args["command"]))
         raise ScopeViolation(call.name, "未声明的工具")

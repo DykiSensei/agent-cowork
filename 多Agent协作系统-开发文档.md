@@ -2267,6 +2267,91 @@ system 提示词列了 8 个工具，而 bench 任务的 `spec.tools` 只给 4 �
 
 ---
 
+### 11.22 各家自带联网搜索的调研（未实测，2026-08）
+
+`fetch_url` 只能取一个已知网址，**没有「搜」这一步**。调研各家自带的搜索能力，
+结论是三种形态，接入代价差一个数量级：
+
+| 家 | 形态 | 端点 | 我们现在能不能直接开 |
+|---|---|---|---|
+| qwen | 一个开关 `enable_search` | chat/completions（`extra_body`） | **能**，改一行 |
+| zhipu | `tools:[{type:"web_search"}]`，服务端执行 | chat/completions | **能** |
+| kimi | `builtin_function` `$web_search` | chat/completions | 能，但**要自己写回传循环** |
+| anthropic | server tool `web_search_2026xxxx` | /v1/messages | 能（我们已有原生后端） |
+| openai | server tool | **Responses API** | 不能，得写第二条请求路径 |
+| xai | server tool（旧 `search_parameters` 已 410） | **Responses API** | 同上 |
+| doubao | `tools:[{type:"web_search"}]` | **Responses API** | 同上 |
+| gemini | `google_search` grounding | **原生端点**，OpenAI 兼容层拿不到 | 不能，得换端点 |
+| deepseek | 无 | —— | 没有这个东西 |
+
+三条与我们的结构直接冲突的事实：
+
+- **「内置搜索搬去 Responses API」是这一年的共同方向**（openai / xai / doubao 三家）。
+  `openai_compat.py` 从头到尾只说 `chat.completions`，所以对这三家而言，
+  「开一下搜索」实际是「多一条请求协议」。
+- **Gemini 的 OpenAI 兼容层不透传 grounding**：`extra_body` 表里 `tools` 那一行
+  写死了「仅适用于 `gemini-3-pro-image-preview`」、端点是图片。我们连 Gemini
+  用的就是兼容层 —— 这类缺口不会报错，只会**静默不搜**。
+- **内置搜索和 `response_format={"type":"json_object"}` 的共存，九家全部无文档**。
+  而方向上它们是冲突的：内置搜索的产物是「带引文的散文答案」，我们要的是
+  `ACTION_SCHEMA` 那一条动作 JSON。**这是接入前第一个要实测的东西。**
+
+还有一条更重要的、与价格无关的理由：**内置搜索把第三方文本直接注入模型上下文，
+绕过工具层**。`COWORK_ALLOW_NETWORK` 默认 off 的理由（`fetch_url` 取回的文本会进
+`reasoning_trace` 再进下一轮提示词 = 一条提示词注入通道）在这里更严重 ——
+内置搜索连 `ToolResult` 这个记录点都没有，**取回了什么在库里查不到**。
+
+**结论：选第四种形态，已落地**（`runtime/search.py` + `Sandbox.search_web`，
+工具面 8→9）。理由如下，实现细节见该文件的模块注释。
+
+因此选的方向是**第四种形态：把搜索做成我们自己的工具**（`search_web`），
+后端接一个纯搜索 API。这 10 家里智谱是唯一一个把搜索单独暴露成 API 的
+（`POST /api/paas/v4/web_search`，`search_std` 0.01 元/次，返回标题/摘要/链接的
+结构化结果，不经过模型）。这样控制流仍归我们（§10.1 第三条不变量）、结果以
+`ToolResult` 进 checkpoint 可审计、并且**与供应商解耦** —— 否则「这个任务能不能
+联网」会随 M10 的按角色路由飘。
+
+价格（各家口径不同，未实测）：anthropic $10/千次、openai 约 $10/千次（另计搜索
+内容 token）、gemini $35/千次、xai $5/千次、kimi ¥0.03/次、zhipu ¥0.01~0.05/次、
+qwen 的 `agent` 档另计、doubao 按次（免费额度待核）。
+
+#### 落地后的几个决定
+
+- **和 `fetch_url` 共用一条防线**（`COWORK_ALLOW_NETWORK`，默认关）。摘要同样是
+  第三方文本，同样会进 `reasoning_trace` 再进下一轮提示词 —— 一个开关就够，
+  两个开关只会让人以为「只开搜索」是更安全的选项，而它并不是。
+- **key 默认复用 `ZHIPUAI_API_KEY`**，只有要用另一把时才设 `COWORK_SEARCH_API_KEY`。
+  多一个必填配置项就多一处「装好了但用不了」。
+- **设置页有一张「联网搜索」卡**（M6 §6 契约同步更新）。它要回答三个问题，
+  少一个人就得去翻文档：**要配哪家**（显示那家的 key 变量名）、
+  **现在用的是哪一把 key**（`key_source`：专用 / 那家自己的 / 没有）、
+  **不配会怎样**（只是 `search_web` 不给，其余一概不受影响）。
+  另有「测试搜索」按钮真搜一次 —— 同 `/providers/{name}/test` 那条理由：
+  「已配置」的判据是环境变量非空，填错照样显示已配置。
+  **这个按钮同时是 `search.py` 字段映射的第一次真实验证。**
+- **专用 key 走单独端点 `PUT /search/key`，不进 `GLOBAL_KEYS`** —— 那张表的
+  每一项都会被 `GET /settings` 原样回显，密钥放进去就等于回显密钥。
+- **没配 key 就不把 `search_web` 放进白名单**（`runner._network_tools()`）。白名单里
+  放一个调了必然失败的工具，模型会去调、会白费一步 —— 那是 §11.6f 那条
+  「工具面的缺口表现成白烧一轮」的反面版本。同时**日志里说出来**，否则
+  「开了联网却搜不了」在界面上是一段沉默。
+- **搜不了不是任务级失败**（`hard_failure=False`）：没配 key、被限流、零结果，
+  都照旧把结果回给模型。判成硬失败的话，「忘了配 key」会以中断架构师收场。
+  零结果还必须是 `ok=True` —— 那是有效答案，模型据此该改搜索词而不是重试同一个。
+- **`ACTION_SCHEMA` 多了一个必填字段 `query`**（没复用 `pattern`：那是
+  `search_files` 的正则，一个字段两种语义迟早出事）。这意味着
+  **M2/M7/M10 的基线又动了一次**，同 §11.21 那条 —— 再比 token 时要记得。
+- 新增 `TestToolFaceIsConsistent`：schema enum / Subagent 提示词 / `_exec_tool`
+  派发 / `Sandbox` 方法**四处必须一致**。以前这四处没有任何测试钉着，全靠人记得，
+  而少一处的表现形式正是 §11.6f 那种假 SCOPE_VIOLATION。
+
+**还没验证的一件事**：`search.py` 的请求体与响应字段映射是照文档写的，
+**从未在真实端点上跑过**（本机没有智谱 key）。`TestLiveSearch` 在没有 key 时
+是 skip 而不是通过 —— 同 `PROVIDERS.verified` 那条：没打通过不等于错，
+等于**没验证**，两者不能混。配上 key 后跑一次那条用例就是这次验证。
+
+---
+
 ## 12. 开发路线图
 
 ### 总览

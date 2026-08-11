@@ -158,10 +158,23 @@ class Runner:
         return tuple(x.strip() for x in raw.split(",") if x.strip()) or ("python",)
 
     def _allow_network(self) -> bool:
-        """`fetch_url` 开不开。**默认关** —— 见 `SpecTemplate.tools` 的说明。"""
+        """两个联网工具开不开。**默认关** —— 见 `SpecTemplate.tools` 的说明。"""
         import os
 
         return (os.environ.get("COWORK_ALLOW_NETWORK") or "").strip().lower() == "on"
+
+    def _network_tools(self) -> tuple[str, ...]:
+        """联网开着时，实际放进白名单的那几个。
+
+        **`search_web` 还要看有没有配搜索 key**：白名单里放一个调了必然失败的
+        工具，模型会去调、会白费一步 —— 那正是 §11.6f「工具面的缺口表现成
+        白烧一轮」的反面版本。没 key 就当没有这个工具，`fetch_url` 照常给。
+        """
+        if not self._allow_network():
+            return ()
+        from ..runtime import search as search_api
+
+        return ("fetch_url", "search_web") if search_api.configured() else ("fetch_url",)
 
     def _log(self, msg: str) -> None:
         self.hub.publish_threadsafe({"type": "server-log", "text": msg})
@@ -262,8 +275,14 @@ class Runner:
                 ),
                 parent_id=plan_id,
             )
-            if self._allow_network():
-                template = replace(template, tools=(*template.tools, "fetch_url"))
+            net = self._network_tools()
+            if net:
+                template = replace(template, tools=(*template.tools, *net))
+                log(f"[PLAN] 联网已开：{', '.join(net)}")
+                if "search_web" not in net:
+                    # **说出来**：否则「开了联网却搜不了」在界面上是一段沉默，
+                    # 而人手上唯一的线索是子任务绕远路的执行记录。
+                    log("[PLAN] 没配搜索 key（ZHIPUAI_API_KEY），search_web 这次不给")
             reviewer = self._reviewer_backend()
             log(
                 f"[PLAN] 生成者 {getattr(backend, 'name', '?')}"

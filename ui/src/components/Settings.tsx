@@ -3,10 +3,18 @@ import {
   fetchProviders,
   fetchSettings,
   putProviderKey,
+  putSearchKey,
   putSettings,
   testProvider,
+  testSearch,
 } from "../api";
-import type { ProbeResult, ProviderInfo, Settings } from "../types";
+import type {
+  ProbeResult,
+  ProviderInfo,
+  SearchProbe,
+  SearchSettings,
+  Settings,
+} from "../types";
 
 /**
  * 设置页：各家供应商的 API Key + 全局模型 / 推理挡位。
@@ -60,6 +68,200 @@ const PROBE_TEXT: Record<ProbeResult["status"], string> = {
   unreachable: "问不到（网络或这家没有这个接口）",
   skipped: "没测到",
 };
+
+/** 搜索自检的三种结果 → 一句人话。「调通了但零结果」不能说成失败。 */
+const SEARCH_PROBE_TEXT: Record<SearchProbe["status"], string> = {
+  ok: "能搜",
+  empty: "调通了，但没返回结果",
+  failed: "搜不了",
+};
+
+/**
+ * 联网搜索（search_web）。
+ *
+ * 这张卡要回答三个问题，缺一个人就得去翻文档：**要配哪家**、
+ * **我现在配没配上（用的是哪把 key）**、**不配会怎样**。
+ * 最后一个尤其重要 —— 不配只是这一个工具不给，其余功能一概不受影响。
+ */
+export function SearchCard({
+  search,
+  networkOn,
+  provider,
+  onProvider,
+}: {
+  search: SearchSettings;
+  networkOn: boolean;
+  provider: string;
+  onProvider: (p: string) => void;
+}) {
+  const [input, setInput] = useState("");
+  const [configured, setConfigured] = useState(search.configured);
+  const [hint, setHint] = useState(search.key_hint);
+  const [source, setSource] = useState(search.key_source);
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [probe, setProbe] = useState<SearchProbe | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  const save = async (key: string) => {
+    setSaving(true);
+    setFailed(null);
+    try {
+      const r = await putSearchKey(key);
+      if (!r.ok) {
+        // 服务端会拒绝带换行的值（.env 注入防线）—— 那条路径必须看得见
+        setFailed(r.error ?? "没能保存");
+        return;
+      }
+      setInput("");
+      setProbe(null); // 换了 key，上一次自检结果作废
+      if (key) {
+        setConfigured(true);
+        setSource("dedicated");
+        setHint(`····${key.slice(-4)}`);
+      } else {
+        // 清掉专用 key = 回落到那家自己的，能不能搜要重新问服务端
+        const s = await fetchSettings();
+        setConfigured(s.search.configured);
+        setSource(s.search.key_source);
+        setHint(s.search.key_hint);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const test = async () => {
+    setTesting(true);
+    try {
+      setProbe(await testSearch());
+    } catch {
+      setProbe({ status: "failed", detail: "服务端没应答" });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="set-card">
+      <div className="set-card-hd">
+        <b>联网搜索</b>
+        <span
+          className="set-tag"
+          title="search_web —— 给一句话搜索词，回标题/摘要/链接"
+        >
+          search_web
+        </span>
+        {configured ? (
+          <span className="set-key-ok">
+            已配 {hint}
+            {source === "provider" ? "（这家自己的 key）" : ""}
+          </span>
+        ) : (
+          <span className="set-key-no">未配</span>
+        )}
+      </div>
+
+      <p className="set-note" style={{ margin: "0 0 8px" }}>
+        <b>不配不影响其它任何功能</b> —— 只是 Subagent 拿不到 <code>search_web</code>
+        这一个工具，别的照常。用的是{" "}
+        <b>{search.effective_provider}</b> 的搜索接口（不经过大模型，直接返回
+        标题/摘要/链接）。最省事的做法是在上面「供应商」里配好{" "}
+        <code>{search.effective_provider}</code> 的 key，这里就不用填了。
+      </p>
+
+      <div className="set-row">
+        <span className="set-k">
+          搜索服务商{" "}
+          <span className="set-env">留空 = {search.effective_provider}（默认）</span>
+        </span>
+        <select
+          className="set-text"
+          value={provider}
+          onChange={(e) => onProvider(e.target.value)}
+        >
+          <option value="">默认（{search.effective_provider}）</option>
+          {search.options.map((o) => (
+            <option key={o} value={o}>
+              {o}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="set-row">
+        <span className="set-k">
+          专用搜索 key{" "}
+          <span className="mono set-env">{search.dedicated_key_env}</span>
+        </span>
+        <input
+          className="set-text"
+          type="password"
+          placeholder={
+            search.provider_key_env
+              ? `留空 = 用 ${search.provider_key_env}`
+              : "留空 = 用那家自己的 key"
+          }
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          spellCheck={false}
+        />
+      </div>
+
+      <div className="set-keyrow">
+        <button disabled={saving || !input} onClick={() => void save(input.trim())}>
+          保存
+        </button>
+        {source === "dedicated" && (
+          <button className="set-clear" disabled={saving} onClick={() => void save("")}>
+            清除
+          </button>
+        )}
+      </div>
+      {failed && <div className="set-fail">没能保存：{failed}</div>}
+      <div className="set-testrow">
+        <button
+          className="set-test"
+          disabled={testing || !configured}
+          onClick={() => void test()}
+        >
+          {testing ? "搜索中…" : "测试搜索"}
+        </button>
+        {probe ? (
+          <span
+            className={`set-probe ${probe.status === "ok" ? "ok" : "unreachable"}`}
+            title={probe.detail}
+          >
+            {SEARCH_PROBE_TEXT[probe.status]}
+          </span>
+        ) : (
+          <span className="set-probe none">
+            {configured
+              ? "「已配」只说明填了，没说明能搜 —— 测一下"
+              : "配上 key 才能测"}
+          </span>
+        )}
+      </div>
+
+      {!search.known && (
+        <p className="set-note" style={{ margin: "6px 0 0" }}>
+          配的搜索服务商 <code>{search.effective_provider}</code> 不认识，
+          <code>search_web</code> 不会生效。可选：{search.options.join(" / ")}。
+        </p>
+      )}
+      {configured && !networkOn && (
+        <p className="set-note" style={{ margin: "6px 0 0" }}>
+          key 配好了，但上面的<b>允许联网</b>还是关的 —— 两个都要开，
+          <code>search_web</code> 才会进任务的工具白名单。
+        </p>
+      )}
+      <p className="set-note" style={{ margin: "6px 0 0" }}>
+        「测试搜索」会真的搜一次，花一次搜索的钱（约 0.01 元）。
+        搜回来的摘要是第三方文本，和抓网页一样：只当资料，不当指令。
+      </p>
+    </div>
+  );
+}
 
 function ProviderCard({ p }: { p: ProviderInfo }) {
   const [input, setInput] = useState("");
@@ -358,6 +560,18 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                 </p>
               )}
             </div>
+
+            <SearchCard
+              search={settings.search}
+              networkOn={settings.allow_network === "on"}
+              provider={settings.search.provider}
+              onProvider={(p) =>
+                setSettings({
+                  ...settings,
+                  search: { ...settings.search, provider: p },
+                })
+              }
+            />
 
             <h2>全局模型与推理挡位</h2>
             <p className="set-note">

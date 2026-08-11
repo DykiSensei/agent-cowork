@@ -28,6 +28,7 @@ await build({
       export { default as Progress } from "./src/components/Progress";
       export { default as Details } from "./src/components/Details";
       export { default as NewTask } from "./src/components/NewTask";
+      export { SearchCard } from "./src/components/Settings";
     `,
     resolveDir: process.cwd(),
     loader: "ts",
@@ -159,6 +160,54 @@ check("发布页把「从零开始」和「接手已有项目」摆成两件事"
   assert.ok(html.includes("接手已有项目"), "缺「接手已有项目」");
   // 「我的产物在哪」要在**发布之前**就看得见，而不是跑完了再去找
   assert.ok(html.includes("产物放在哪"), "没有工作区输入");
+});
+
+// 5. 联网搜索那张卡：三个问题都要有答案 —— 配哪家 / 配没配上 / 不配会怎样
+const searchProps = (over = {}) => ({
+  search: {
+    provider: "",
+    effective_provider: "zhipu",
+    options: ["zhipu"],
+    known: true,
+    provider_key_env: "ZHIPUAI_API_KEY",
+    dedicated_key_env: "COWORK_SEARCH_API_KEY",
+    configured: false,
+    key_source: null,
+    key_hint: null,
+    ...over,
+  },
+  networkOn: false,
+  provider: "",
+  onProvider: () => {},
+});
+
+check("搜索卡说得出「配哪家」和「不配会怎样」", () => {
+  const html = render(React.createElement(m.SearchCard, searchProps()));
+  assert.ok(html.includes("ZHIPUAI_API_KEY"), "没说该配哪个变量");
+  assert.ok(html.includes("不配不影响其它任何功能"), "没说清不配的后果");
+  assert.ok(html.includes("未配"), "没显示当前状态");
+});
+
+check("用的是哪一把 key 要说出来", () => {
+  const html = render(
+    React.createElement(
+      m.SearchCard,
+      searchProps({ configured: true, key_source: "provider", key_hint: "····abcd" }),
+    ),
+  );
+  // 「已配置」而不说明用的是哪把，人就不知道该去哪儿改
+  assert.ok(html.includes("····abcd"), "没显示识别串");
+  assert.ok(html.includes("这家自己的 key"), "没说清用的是哪一把");
+});
+
+check("key 配好但联网还关着时，要点出来", () => {
+  const html = render(
+    React.createElement(
+      m.SearchCard,
+      { ...searchProps({ configured: true, key_source: "dedicated" }), networkOn: false },
+    ),
+  );
+  assert.ok(html.includes("两个都要开"), "配好了却不生效，必须解释为什么");
 });
 
 console.log(`\n${failed === 0 ? "全部通过" : `${failed} 项失败`}`);

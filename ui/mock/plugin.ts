@@ -49,6 +49,21 @@ const DEFAULT_SETTINGS = {
   effort: { architect: "high", subagent: "medium", cheap: "off" },
   // 字符串 on/off 而不是布尔：它落到 .env，空串在那里 = 未设置 = 回落到默认
   review_writes: "on",
+  allowed_binaries: "python",
+  allow_network: "off",
+  // 联网搜索（search_web）。**key 不在这里** —— 它只写不读，走
+  // PUT /api/search/key，GET 只回末 4 位识别串。
+  search: {
+    provider: "",
+    effective_provider: "zhipu",
+    options: ["zhipu"],
+    known: true,
+    provider_key_env: "ZHIPUAI_API_KEY",
+    dedicated_key_env: "COWORK_SEARCH_API_KEY",
+    configured: false,
+    key_source: null as "dedicated" | "provider" | null,
+    key_hint: null as string | null,
+  },
 };
 
 interface SettingsFile {
@@ -268,6 +283,46 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    // 专用搜索 key：只写不读（GET /api/settings 只回末 4 位）
+    if (url.pathname === "/api/search/key" && req.method === "PUT") {
+      const body = JSON.parse((await drain(req)) || "{}") as { api_key?: string };
+      const key = (body.api_key ?? "").trim();
+      if (key.includes("\n") || key.includes("\r")) {
+        // 服务端真的会拒（.env 注入防线）—— mock 也要拒，否则前端那条
+        // 「拒绝要显示出来」的分支在开发时永远走不到
+        return sendJson(res, 400, { error: "值里不能有换行" });
+      }
+      const data = loadSettings();
+      data.settings = {
+        ...data.settings,
+        search: {
+          ...DEFAULT_SETTINGS.search,
+          ...data.settings.search,
+          configured: key.length > 0,
+          key_source: key ? "dedicated" : null,
+          key_hint: key ? `····${key.slice(-4)}` : null,
+        },
+      };
+      saveSettings(data);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (url.pathname === "/api/search/test" && req.method === "POST") {
+      const data = loadSettings();
+      const on = data.settings.search?.configured ?? false;
+      return sendJson(
+        res,
+        200,
+        on
+          ? {
+              status: "ok",
+              detail: "回了 3 条",
+              sample: { title: "示例结果", url: "https://example.com" },
+            }
+          : { status: "failed", detail: "没配搜索 key" },
+      );
+    }
+
     if (url.pathname === "/api/settings") {
       const data = loadSettings();
       if (req.method === "GET") {
@@ -276,6 +331,7 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
           ...data.settings,
           models: { ...DEFAULT_SETTINGS.models, ...data.settings.models },
           effort: { ...DEFAULT_SETTINGS.effort, ...data.settings.effort },
+          search: { ...DEFAULT_SETTINGS.search, ...data.settings.search },
         });
       }
       if (req.method === "PUT") {
