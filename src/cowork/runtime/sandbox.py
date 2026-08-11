@@ -66,8 +66,18 @@ class Sandbox:
 
     def write_file(self, path: str, content: str) -> ToolResult:
         target = self._resolve_in_scope(path, write=True)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            # 文件系统的拒绝是**工具失败**，不是我们的崩溃。写到一个已经是目录的
+            # 路径、盘满、Windows 上的保留名（con/nul）都会走到这里 —— 抛出去的话
+            # 一次可以喂回给模型的错误会变成整个 run 的 traceback。
+            # 这与 `run()` 固定 errors="replace" 是同一条纪律：
+            # **工具层的失败必须以 ToolResult 的形式回到循环里。**
+            return ToolResult(
+                ok=False, exit_code=1, stderr=f"写入失败: {type(exc).__name__}: {exc}"
+            )
         return ToolResult(ok=True, detail=f"wrote {len(content)} chars to {path}")
 
     def list_files(self, path: str = ".") -> ToolResult:
@@ -92,9 +102,14 @@ class Sandbox:
                 ok=False, exit_code=1, stderr=f"not a directory: {path}",
                 hard_failure=False,
             )
-        entries = sorted(
-            (p.name + "/" if p.is_dir() else p.name) for p in target.iterdir()
-        )
+        try:
+            entries = sorted(
+                (p.name + "/" if p.is_dir() else p.name) for p in target.iterdir()
+            )
+        except OSError as exc:
+            return ToolResult(
+                ok=False, exit_code=1, stderr=f"列目录失败: {type(exc).__name__}: {exc}"
+            )
         return ToolResult(ok=True, stdout="\n".join(entries), detail=f"{len(entries)} entries")
 
     def read_file(self, path: str) -> ToolResult:
@@ -103,7 +118,18 @@ class Sandbox:
             return ToolResult(
                 ok=False, exit_code=1, stderr=f"no such file: {path}", hard_failure=False
             )
-        return ToolResult(ok=True, stdout=target.read_text(encoding="utf-8"))
+        try:
+            # **不能按严格 UTF-8 解码**：产出可能是别的编码、也可能压根是二进制
+            # （上游任务写的 .zip / 图片 / GBK 文本）。原来一个 UnicodeDecodeError
+            # 会从这里一路抛穿 step 循环 —— 和 `run()` 当年那个 GBK 坑同一形状，
+            # 只是那次炸在 subprocess 的读取线程里。errors="replace"：
+            # 内容宁可花掉几个字符，也不能丢掉整条链路。
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return ToolResult(
+                ok=False, exit_code=1, stderr=f"读取失败: {type(exc).__name__}: {exc}"
+            )
+        return ToolResult(ok=True, stdout=content)
 
     def run(self, command: list[str], timeout: float = 60.0) -> ToolResult:
         if not command:

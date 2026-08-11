@@ -408,9 +408,21 @@ class Architect:
         # 改了 spec 且无人过目）。已经要升级的不必复核：人马上就会看到它。
         review_findings: list[str] = []
         if reason is None and verdict.action == "MODIFY_TASK" and self.review_writes:
+            before = verdict
             verdict, reason, review_findings = self._review_write(
                 state, signals, ctx, verdict, history
             )
+            # **重做出来的是一份新裁决，必须重新过一遍确定性下限。**
+            # 上面那次 should_escalate 判的是 `before`；复核驳回后架构师可能改成
+            # ABANDON（§7.2「任何 ABANDON 都不可逆、要人确认」）、可能把
+            # complexity_score 抬过阈值、也可能在 added_criteria 里带进一条
+            # 不可逆命令 —— 这三条判据读的全是 verdict 本身。不重判的话，
+            # 「让复核者看一眼」反而成了绕过升级下限的通道（审计实测：复核驳回
+            # 后架构师改判 ABANDON，人一次都没被问到）。
+            if reason is None and verdict is not before:
+                reason = should_escalate(
+                    self.policy, spec, state, signals, verdict, identical_streak=streak
+                )
 
         decider = Decider.LLM
         escalation_reason = None
@@ -428,6 +440,11 @@ class Architect:
             # 建议里也带上它想改什么 —— 人要判断的往往正是这个
             "spec_changes": dict(verdict.spec_changes),
         }
+        if review_findings:
+            # 复核者说了什么要跟着裁决走。原来它只以「前三条拼进 escalation_reason」
+            # 的形式漏出来，第四条起当场丢失 —— 而人要判断的正是「复核者到底
+            # 挑了什么毛病、架构师改到第几版还没改掉」。
+            suggestion["review_findings"] = list(review_findings)
 
         if reason:
             escalation_reason = reason
@@ -571,7 +588,9 @@ class Architect:
 
         return (
             verdict,
-            f"复核者连续 {self.policy.max_regenerate + 1} 轮报出规格问题："
+            # 轮数按 max_redo 算，不是按 policy.max_regenerate ——
+            # 同模型复核时上面把重做压到了 1 轮，照 policy 报会说成 3 轮
+            f"复核者连续 {max_redo + 1} 轮报出规格问题："
             + "；".join(findings[:3]),
             findings,
         )

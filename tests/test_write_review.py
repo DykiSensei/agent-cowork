@@ -265,6 +265,75 @@ class TestRedoLoop(WriteReviewFixture):
         self.assertEqual(rec.new_spec.scope, ["solution.py"], "复核者动不了 scope")
         self.assertEqual(rec.spec_changes, ADD_CRITERION)
 
+    def test_redone_verdict_is_re_checked_against_the_deterministic_floor(self):
+        """**重做出来的是一份新裁决，必须重新过一遍确定性下限。**
+
+        复核循环开始前那次 `should_escalate` 判的是第一版；复核驳回之后架构师
+        改判 ABANDON，而 §7.2 明写「任何 ABANDON 都不可逆、要人确认」。
+        不重判的话，「让复核者看一眼」反而成了绕过升级下限的通道 ——
+        审计实测：架构师被驳回后改判 ABANDON，人一次都没有被问到。
+        """
+        spec = self.spec()
+        calls = {"n": 0}
+
+        def verdict_for(*_):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _verdict(LOOSEN_GOAL)
+            return ArchitectVerdict(action="ABANDON", rationale="复核说不行，那就放弃",
+                                    complexity_score=0.1)
+
+        backend = ScriptedBackend({}, verdict_for=verdict_for)
+        reviewer = ScriptedBackend({}, spec_review_for=lambda *_: (False, ["目标被改松"]))
+        arch = self.architect(backend, reviewer=reviewer)
+
+        rec = self.decide(arch, spec, self.signals(spec))
+
+        self.assertIsNotNone(rec.escalation_reason, "ABANDON 必须升级给人")
+        self.assertIn("ABANDON", rec.escalation_reason)
+        self.assertIsNot(rec.action, Action.ABANDON,
+                         "没有网关时该挂起等人，不是直接放弃")
+
+    def test_redone_verdict_with_high_complexity_is_re_checked(self):
+        """同一条路的另一半：重做把自评复杂度抬过了阈值，也要重判。"""
+        spec = self.spec()
+        calls = {"n": 0}
+
+        def verdict_for(*_):
+            calls["n"] += 1
+            score = 0.1 if calls["n"] == 1 else 0.95
+            return ArchitectVerdict(action="MODIFY_TASK", rationale="改法二",
+                                    complexity_score=score,
+                                    spec_changes=ADD_CRITERION)
+
+        backend = ScriptedBackend({}, verdict_for=verdict_for)
+        seen = {"n": 0}
+
+        def review(*_):
+            seen["n"] += 1
+            return (True, []) if seen["n"] > 1 else (False, ["第一版不行"])
+
+        reviewer = ScriptedBackend({}, spec_review_for=review)
+        arch = self.architect(backend, reviewer=reviewer)
+
+        rec = self.decide(arch, spec, self.signals(spec))
+
+        self.assertIsNotNone(rec.escalation_reason)
+        self.assertIn("complexity_score", rec.escalation_reason)
+
+    def test_review_findings_are_kept_on_the_record(self):
+        """复核者说了什么要跟着裁决走，不能只有前三条拼进升级原因。"""
+        spec = self.spec()
+        findings = [f"第 {i} 条毛病" for i in range(1, 6)]
+        backend = ScriptedBackend({}, verdict_for=lambda *_: _verdict(LOOSEN_GOAL))
+        reviewer = ScriptedBackend({}, spec_review_for=lambda *_: (False, findings))
+        arch = self.architect(backend, reviewer=reviewer)
+
+        rec = self.decide(arch, spec, self.signals(spec))
+
+        self.assertEqual(rec.suggestion["review_findings"], findings,
+                         "第四条起原来当场丢失")
+
     def test_redo_that_stops_writing_leaves_the_loop(self):
         """重做之后不改 spec 了 —— 没有复核对象，回主路径按常规判。"""
         spec = self.spec()
@@ -344,6 +413,9 @@ class TestBothSidesFailTheSameWay(WriteReviewFixture):
         # 同模型：初版 + 1 次重做后 = 2 次复核（跨模型是 max_regenerate + 1 = 3）
         self.assertEqual(backend.spec_review_calls, 2)
         self.assertIsNotNone(rec.escalation_reason)
+        # 升级文案里的轮数要和实际轮数一致：原来写死 policy.max_regenerate + 1，
+        # 同模型时会说成 3 轮 —— 人读着记录去复盘，数字对不上就没法查
+        self.assertIn("连续 2 轮", rec.escalation_reason)
 
     def test_cross_model_gets_the_full_redo_budget(self):
         """对照上一条：给了独立复核者才用满 max_regenerate。"""

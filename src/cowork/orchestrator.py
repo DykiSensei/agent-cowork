@@ -164,6 +164,25 @@ class Orchestrator:
         self._event("human", text=f"取消任务：{self._cancelled}", ref_id=sig.id)
         return sig
 
+    def _no_decider(self, exc: ModelError) -> RunResult:
+        """架构师侧的模型调用失败 —— 挂起等人，不把异常抛出去。
+
+        **架构师的每一次模型调用都要走这里**：中断决策、验收、探查、软信号分诊。
+        原来只有 `decide()` 被接住，于是「跑完了但验收调用失败」「探查到点但
+        分诊调用失败」会以 traceback 收尾，而库里的状态停在 RUNNING ——
+        服务层的 cancel 回 409（不在活任务注册表）、ruling 也回 409
+        （不是 AWAITING_HUMAN），那条线程从界面上再也动不了。
+
+        日志写在状态迁移**之前**：AWAITING_HUMAN 是终局态，它之后不该再有事件
+        （界面把「最后一条状态事件是不是 AWAITING_HUMAN」当作要不要给人出裁决
+        表单的判据）。
+        """
+        self._say(
+            f"[STOP] 架构师无法决策（{exc.signal_type.value}）: {exc.message[:200]}"
+        )
+        self._set_status(TaskStatus.AWAITING_HUMAN)
+        return RunResult(self.state, self.ctx, self.decisions)
+
     def _finish_cancelled(self, triggers: list[Signal]) -> RunResult:
         """取消的收尾：记一条 decider=HUMAN 的裁决，然后 ABANDONED。
 
@@ -291,13 +310,21 @@ class Orchestrator:
                     f"agent={subagent.id} step={self.state.current_step}"
                 )
 
-                outcome, probe_sig = self._run_with_probes(subagent)
+                try:
+                    outcome, probe_sig = self._run_with_probes(subagent)
+                except ModelError as exc:
+                    # 探查也是模型调用（§3.2.1），它失败同样不能把 run 打挂
+                    return self._no_decider(exc)
 
                 # 软信号在检查点批量消费（§3.4）
                 if outcome.soft_signals:
                     for s in outcome.soft_signals:
                         self.store.save_signal(s)
-                    escalated = self.architect.consume_soft(outcome.soft_signals)
+                    try:
+                        escalated = self.architect.consume_soft(outcome.soft_signals)
+                    except ModelError as exc:
+                        # 分诊走的是廉价模型，但它照样会撞上耗尽的 key
+                        return self._no_decider(exc)
                     self._say(
                         f"[SOFT] 消费 {len(outcome.soft_signals)} 条，"
                         f"升级 {len(escalated)} 条"
@@ -307,7 +334,15 @@ class Orchestrator:
                     # 探查发现跑偏。走的是和「架构师验收不通过」完全相同的路径。
                     triggers = [probe_sig]
                 elif outcome.status is TaskStatus.COMPLETED:
-                    passed, reason = self.architect.verify(self.ctx.task_spec, self.ctx)
+                    try:
+                        passed, reason = self.architect.verify(
+                            self.ctx.task_spec, self.ctx
+                        )
+                    except ModelError as exc:
+                        # 验收是**每次 COMPLETED 都会走**的一次模型调用。
+                        # 它抛出去的话，一个已经做完的任务会以 traceback 收尾，
+                        # 而库里停在 RUNNING —— 界面上既停不掉也裁决不了。
+                        return self._no_decider(exc)
                     if passed:
                         self._set_status(TaskStatus.COMPLETED)
                         self._say(f"[DONE] {reason}")
@@ -346,9 +381,7 @@ class Orchestrator:
                 except ModelError as exc:
                     # 架构师自己也调不动模型了（典型场景：virtual key 预算耗尽，
                     # Subagent 和架构师用同一把 key）。没有决策者，只能挂起等人。
-                    self._set_status(TaskStatus.AWAITING_HUMAN)
-                    self._say(f"[STOP] 架构师无法决策（{exc.signal_type.value}）: {exc.message[:200]}")
-                    return RunResult(self.state, self.ctx, self.decisions)
+                    return self._no_decider(exc)
 
                 self.store.save_decision(decision)
                 self.decisions.append(decision)
@@ -368,11 +401,12 @@ class Orchestrator:
             if decision.resume_mode is ResumeMode.REBASE:
                 self._rebase_count += 1
                 if self._rebase_count > self.policy.max_rebase:
-                    # 风险 #5：多次 REBASE 后摘要压缩会累积失真
-                    self._set_status(TaskStatus.AWAITING_HUMAN)
+                    # 风险 #5：多次 REBASE 后摘要压缩会累积失真。
+                    # 日志在状态迁移之前 —— 理由同 `_no_decider()`
                     self._say(
                         f"[STOP] REBASE 次数超过上限 {self.policy.max_rebase}，挂起等人"
                     )
+                    self._set_status(TaskStatus.AWAITING_HUMAN)
                     return RunResult(self.state, self.ctx, self.decisions)
 
             self.ctx, tokens = apply_resume(

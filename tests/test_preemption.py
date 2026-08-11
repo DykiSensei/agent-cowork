@@ -243,6 +243,50 @@ class TestHardSignals(LoopFixture):
         self.assertTrue(outcome.preempting_signal.payload["errors"])
 
 
+class TestFilesystemErrorsStayInsideTheLoop(LoopFixture):
+    """文件系统的拒绝是**工具失败**，不是我们的崩溃。
+
+    这和 `run()` 固定 `encoding="utf-8", errors="replace"` 是同一条纪律，只是
+    那次炸在 subprocess 的读取线程里、这次炸在 `read_text` 上：
+    **工具层的失败必须以 ToolResult 的形式回到循环里**，那样架构师才有得判。
+    抛出去的话，一个可以喂回给模型的错误会变成整个 run 的 traceback。
+    """
+
+    def test_reading_a_non_utf8_file_does_not_crash_the_loop(self):
+        """上游任务写了个 GBK 文件 / 二进制产出，下游读一下就崩 —— 不行。"""
+        (self.ws / "data.bin").write_bytes("中文".encode("gbk"))
+        loop, agent, ctx = self.make(
+            {
+                (1, 0): ToolCall(name="read_file", args={"path": "data.bin"},
+                                 thought="看一眼上游产出"),
+                (1, 1): Finish(output={}, summary="看完了"),
+            }
+        )
+        outcome = loop.run(ctx, agent)
+
+        self.assertIs(outcome.status, TaskStatus.COMPLETED)
+        tool_records = [r for r in ctx.reasoning_trace if r.get("role") == "tool"]
+        self.assertTrue(tool_records[0]["ok"], "读得到就算成功，坏字节替换掉即可")
+
+    def test_write_to_a_directory_becomes_a_tool_result(self):
+        """写到一个已经是目录的路径 —— 回 ToolResult，让模型自己换个路径。"""
+        (self.ws / "out.py").mkdir()
+        loop, agent, ctx = self.make(
+            {
+                (1, 0): ToolCall(name="write_file",
+                                 args={"path": "out.py", "content": "x"},
+                                 thought="写产出"),
+            },
+            max_steps=2,
+        )
+        outcome = loop.run(ctx, agent)
+
+        # 硬失败 -> 中断交给架构师，但**不是异常**
+        self.assertIs(outcome.status, TaskStatus.INTERRUPTED)
+        self.assertIs(outcome.preempting_signal.type, SignalType.TOOL_FAILURE)
+        self.assertIn("写入失败", outcome.preempting_signal.raw_evidence)
+
+
 class TestSoftSignalsDoNotPreempt(LoopFixture):
     def test_soft_signal_is_queued_not_preempting(self):
         from cowork.actions import SoftSignalAction
