@@ -48,9 +48,14 @@ Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAP
 
 ```bash
 pip install -e .                                  # 或 set PYTHONPATH=src（仅 CLI 需要）
+pip install -e .[openai]                          # 真实模型：deepseek / kimi / OpenAI 兼容端点
+pip install -e .[anthropic]                       # Anthropic 系（含 LiteLLM 的 /v1/messages）
+pip install -e .[postgres]                        # --store pg
+                                                  # 零必需依赖 + 延迟导入 = 没装 extra 时是裸
+                                                  # ImportError，没有友好报错
 
 docker compose up -d postgres litellm             # postgres:5433 / litellm:4000
-python -m unittest discover -s tests -t .         # 404 个测试。用 unittest，没引 pytest
+python -m unittest discover -s tests -t .         # 404 个测试。用 unittest，断言风格也是 unittest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -73,6 +78,12 @@ python -m cowork.cli serve                                 # HTTP + SSE + 静态
 ```
 
 - 测试不需要 `PYTHONPATH`：`tests/__init__.py` 负责挂 `src/` 并载入 `.env`。
+  `tests/conftest.py` 是同一份挂载的 pytest 版本（`pytest tests` 也能跑），
+  但用例本身是 `unittest.TestCase`，新增测试别引 pytest 专有写法；
+  改挂载逻辑要同时改两份。
+- **没有 linter / formatter**：自动化门只有三道 —— `python -m unittest`（423 个测试）、
+  前端 `tsc --noEmit`、前端 `npm run check`（翻译层的行为检查，
+  后两道都串在 `npm run build` 里）。别去找 ruff / black。
 - 三样基础设施（Postgres / LiteLLM / Docker 守护进程）都不起时，依赖它们的 14 个
   测试会 skip（3 PG + 5 LiteLLM + 6 Docker 沙箱），不是失败。
 - 打真实供应商的用例需要 `.env` 里配 `DEEPSEEK_API_KEY` 或 `MOONSHOT_API_KEY`。
@@ -113,9 +124,13 @@ demo*.py        验证场景，「隐藏要求」写在这里
 ```
 
 界面层（M6 前端）在仓库根的 `ui/`：React 18 + TS + Vite，`npm run dev / build /
-preview`；mock API（`ui/mock/plugin.ts`）按 `M6-界面层接口.md` §6 契约应答，
+preview / check`；mock API（`ui/mock/plugin.ts`）按 `M6-界面层接口.md` §6 契约应答，
 数据骨架是 `ui/fixtures/` 里的真实 CLI 输出。双模式（简洁默认 / 专业），
 lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
+前端只有一处逻辑（`translate.ts`：Store 投影 → 时间线），它有单独的行为检查
+`ui/check/translate.mjs` —— 它判错的方式是静默的（卡片不出现，类型全对）。
+写类调用统一返回 `ActionResult{ok,error}`：**服务端拒绝了必须显示出来**，
+从前一律 `.then()` 当成功，于是 409 会清空输入框并弹「已告诉它」。
 
 一次 run 的控制流（跨四个文件，先读这段再进代码）：
 `Orchestrator.run()`（最多 `max_cycles=8` 轮）→ `StepLoop.run()`（循环开头
@@ -183,12 +198,22 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
 - **取消不走架构师**：`intervene` 交回控制权，架构师可能回 `CONTINUE`，人的取消
   会降级成建议。`Orchestrator.cancel()` 抢占后直接 `ABANDONED`。
 - 抢占队列必须在中断时清空，否则一次中断放大成无限中断。
-- 模型调用失败要变成硬信号，不能抛异常穿透整个 run。
+- 模型调用失败要变成硬信号，不能抛异常穿透整个 run。**架构师那四次调用
+  （决策 / 验收 / 探查 / 分诊）四条都要接**，走 `Orchestrator._no_decider()` ——
+  漏掉的话库里停在 RUNNING，serve 上 cancel 和 ruling 都回 409，线程再也动不了。
 - 硬信号是「任务级失败」，探测不存在文件返回 `ok=False` 不算（靠
   `ToolResult.hard_failure` 区分）。
 - 解析失败抛 `ModelError` 走硬信号通道，别抛 `ValueError`。
 - 子进程输出固定 `encoding="utf-8", errors="replace"`，不能按系统编码解码
-  （中文 Windows 上 GBK 会在读取线程里炸掉）。
+  （中文 Windows 上 GBK 会在读取线程里炸掉）。**沙箱的 `read_file` 同理**：
+  `_exec_tool` 只接 `ScopeViolation`，所以任何 `OSError` / `UnicodeDecodeError`
+  都会抛穿 run。工具层的失败一律以 `ToolResult` 回到循环里。
+- **写入侧复核重做出来的裁决要重新过 `should_escalate`**：不重判的话，
+  「让复核者看一眼」反而成了绕过升级下限的通道（改判 ABANDON 时人不会被问到）。
+  一般化：判据跟着它读的对象走，不跟着阶段走。
+- **body 可选的端点用 `optional_body()`**：`headers.get("content-length")` 是字符串，
+  `"0"` 为真 —— 照它判空会让 `curl -X POST` 得到 500。
+- **界面必须把服务端的拒绝显示出来**：写类调用返回 `ActionResult{ok,error}`。
 - 提示词拼装顺序 = 缓存命中率：静态在前、可变在后，这是条沉默的不变量
   （功能测试全绿但命中率归零），有 `test_openai_compat.TestPromptCaching` 钉着。
 - 并行要求存储层可并发：SQLite 已改 `check_same_thread=False` + 方法级 `RLock`，

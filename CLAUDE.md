@@ -17,7 +17,12 @@ M2/M3 的参数都是在没有它的情况下测出来的，开着跑就和 `ben
 （FastAPI，`python -m cowork.cli serve`，只绑 loopback）—— 含 restore 路径
 （`Orchestrator.restore()` + `resume_with_ruling()`，人的裁决经
 `Architect.apply_human_ruling()` 落地，不绕过架构师）、`TapStore` 写入处发
-事件 + SSE、设置页写 .env（key 只写不读）。
+事件 + SSE、设置页写 .env（key 只写不读）、界面上发布任务
+（`NewTask.tsx`：目标 → 拆解 → 人裁决 → 派发，走 `POST /tasks` + `/plans/*`）。
+
+**M8 之后做过一次全栈审计（§11.20）**，14 个缺陷全部在 404 个测试之外。
+三条方法可以直接拿去查下一个模块：**「A 失败有兜底」的地方要问 B/C/D 失败走哪儿**、
+**判据跟着它读的对象走不跟着阶段走**、**契约写了什么就要有一条从调用方那侧发起的测试**。
 
 `policy.py` 的参数全部有实测依据（§11.6 / §11.7 / §11.9 / §11.13），
 改它们之前先跑 `bench` 或 `bench-plan`，别凭感觉调。
@@ -54,6 +59,11 @@ M2/M3 的参数都是在没有它的情况下测出来的，开着跑就和 `ben
 - **循环还是那一个**：决策 → 复核 → 重做 ≤ `max_regenerate` → 升级给人。
   意见走 `decide_interrupt(review_feedback=...)` 喂回去，**和 `history` 分开传** ——
   history 参与「同一指纹连续出现」的计数，被驳回的草稿混进去会把计数搞脏。
+- **重做出来的裁决要重新过一遍 `should_escalate`**（§11.20 第一条，审计实测）：
+  循环开始前那次判的是第一版，而重做可能改判 ABANDON、把 complexity 抬过阈值、
+  或在 `added_criteria` 里带进不可逆命令 —— 这三条判据读的全是 verdict 本身。
+  不重判的话，**「让复核者看一眼」反而成了绕过升级下限的通道**。
+  一般化：**判据跟着它读的对象走，不跟着阶段走。**
 - **默认开，依据是**（§11.19，四轮 321 次调用，26 个用例）：
   **deepseek J 0.963 / kimi 0.907，FPR 两边都是 0/24。复核者选 deepseek。**
 - **⚠️ 这个结论是扩表之后才对的，扩表之前是反的** —— 11 个用例时判定
@@ -98,11 +108,22 @@ M2/M3 的参数都是在没有它的情况下测出来的，开着跑就和 `ben
 ## 命令
 
 ```bash
+pip install -e .                          # CLI（不装就得 PYTHONPATH=src，src layout）
+pip install -e .[openai]                  # 真实模型：deepseek / kimi / 任何 OpenAI 兼容端点
+pip install -e .[anthropic]               # Anthropic 系（含 LiteLLM 暴露的 /v1/messages）
+pip install -e .[postgres]                # --store pg
+                                          # 零必需依赖 + 全部延迟导入 = 没装 extra 时不会有
+                                          # 友好报错，只在 openai_compat / anthropic_backend /
+                                          # store/postgres 的函数体里裸 ImportError
+
 docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 404 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 423 个测试。项目用 unittest，断言风格也是 unittest
+                                          # 没有 linter / formatter。全部自动化门只有三道：
+                                          # 这一条、前端的 tsc --noEmit、前端的 npm run check
+                                          # （后两道都串在 npm run build 里）。别去找 ruff / black
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -146,7 +167,9 @@ pip install -e .[server]                        # M6 服务层依赖：fastapi /
 python -m cowork.cli serve                      # HTTP + SSE + ui/dist 静态页，只绑 loopback
                                                 # --backend / --db / --workspace / --max-cycles
 cd ui && npm install && npm run dev             # 前端 5173，自带 mock API，不需要后端在跑
-cd ui && npm run build                          # tsc --noEmit + vite build（typecheck 在这一步）
+cd ui && npm run build                          # tsc --noEmit + npm run check + vite build
+cd ui && npm run check                          # 翻译层的行为检查（前端唯一一处逻辑）
+                                                # 不引测试框架，esbuild 是 vite 已有的依赖
 PYTHONPATH=src python ui/mock/make_fixtures.py  # 重生成 ui/fixtures（在仓库根跑）
 ```
 
@@ -176,9 +199,12 @@ M5a 那四个文件是「改提示词必须两侧都测」的现成对照组，�
 `plan_ab.jsonl` 是改拆解提示词或 `max_regenerate` 时的基线。
 
 测试不需要 `PYTHONPATH` —— `tests/__init__.py` 负责挂 `src/` 并载入 `.env`
-（所以打真实供应商的用例能自己拿到 key）。CLI 未 `pip install -e .` 时才需要
-`PYTHONPATH=src`（src layout）。Windows 上中文输出用 PowerShell，
-Bash 工具的控制台会乱码。
+（所以打真实供应商的用例能自己拿到 key）。`tests/conftest.py` 是**同一份挂载的
+pytest 版本**，只为让 `pytest tests` 也能跑；用例本身仍然是 `unittest.TestCase`，
+新增测试不要引 pytest 专有写法（fixture / 裸 `assert` 之外的 `pytest.` API）。
+**改了其中一个的挂载逻辑，另一个也要改** —— 两份内容是重复的，会分叉。
+CLI 未 `pip install -e .` 时才需要 `PYTHONPATH=src`（src layout）。
+Windows 上中文输出用 PowerShell，Bash 工具的控制台会乱码。
 
 环境变量（全部可选，真实环境变量优先于 `.env`）：
 
@@ -275,6 +301,17 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   用两家 key 一起测（`test_openai_compat.TestProviderResolution` 就是为这个建的）。
 - **模型调用失败要变成信号，不能抛异常穿透** —— 否则架构师连中断决策的机会
   都没有。共用一把耗尽的 key 时架构师也会挂，此时正确行为是 `AWAITING_HUMAN`。
+  **架构师有四次模型调用，四条都要接**（§11.20 第二条）：决策 / 验收 / 探查 /
+  软信号分诊，现在共用 `Orchestrator._no_decider()`。原来只接了决策那条，
+  于是「跑完了但验收调不动模型」会以 traceback 收尾，而**库里停在 RUNNING**——
+  serve 上 cancel 回 409（不在活任务注册表）、ruling 也回 409（不是 AWAITING_HUMAN），
+  那条线程从界面上再也动不了。**给一个能力加拦截点时，问一遍它覆盖了几条调用路径。**
+- **工具层的失败一律以 `ToolResult` 回到循环里**，不许抛。`loop.py` 的
+  `_exec_tool` 只接 `ScopeViolation`，所以沙箱里任何 `OSError` /
+  `UnicodeDecodeError` 都会抛穿整个 run —— 读一个 GBK 或二进制产出就够了
+  （`read_file` 现在也是 `errors="replace"`，和 `run()` 一致）。
+  **同一个编码教训在同一个文件里犯过两次**，因为第一次修的是那个函数、
+  不是那一类边界。沙箱可信的意思是它不制造异常，不是它不出错。
 - **demo 场景的「隐藏要求」必须真的不可推断**。早期版本用「需要归一化大小写
   与标点」，真实模型直接写对，三次运行零中断，场景失去区分度。设计任何验证
   场景时先问：这个失败真实模型会不会自己避开？
@@ -383,6 +420,21 @@ Orchestrator.run()  最多 max_cycles=8 轮，每轮换一个新 Subagent 实例
   表里，`events` 只记「第几条、什么类型、指向谁」。内联正文 = 同一件事两个真相来源。
   排序靠 `seq`（Store 写入时分配）不靠 `created_at` —— 并行任务的时间戳会撞在
   同一毫秒上，而顺序一旦不稳定，前端的追加式渲染就错位。
+- **契约写了「可选 / 会失败 / 有这个端点」，就要有一条测试站在调用方那边问一遍**
+  （§11.20 第五、六、七条）。三个实例，服务端行为全都是对的：
+  `{reason?}` 写成可选、实现却按 `headers.get("content-length")` 判（那是**字符串**，
+  `"0"` 为真）→ 空 body 500；界面对五处写操作一律 `.then()` 不看状态码 →
+  **唯一会主动拒绝的那条路径（`.env` 注入防线，400）在界面上长得像成功**；
+  `POST /tasks` 和 `/plans/*` 服务端齐全、M6 §6 也写了，而界面一个调用都没有 ——
+  **`serve` 起来的界面根本发不出任务**，只能看和答。
+  共同点：没有任何测试是从调用方那一侧发起的。
+- **「服务端做完了」不等于「这件事做完了」**。M6 的出口标准逐条对的是端点，
+  没有一条对的是「人能不能用界面完成一次任务」。
+- **一个模式只落实一半，比两处都没做更难发现**（§11.20 第四条）：翻译层给终局卡
+  写了「延后一拍」（因为 orchestrator 先写 status 再写 `[DONE]` 日志），
+  「等你拍板」卡漏了同一处理，判据还写成「status 必须是最后一条事件」——
+  于是架构师调不动模型 / REBASE 超上限这两条挂起路径上，**人看得见挂起了却无处答复**。
+  现在两边都改：orchestrator 把说明写在状态迁移之前，前端看「最后一条 status 事件」。
 - **「系统建议」和「系统做了什么」是两个字段**。挂起那条裁决里 `action`/`rationale`
   记的是兜底行为（挂起），模型的意见在 `suggestion` 里；同理 `spec_changes` 是
   **已生效的改动**、`suggestion.spec_changes` 是**提议但没被采纳的**。混成一个，
@@ -432,7 +484,11 @@ server/         M6 服务层（可选 extra）：app 路由 / runner 线程编�
                 tap（写入处发事件 → SSE）/ settings_io（.env 读写）/
                 bind（绑定地址准入，非回环拒绝启动）。
                 一次 run 是阻塞的，所以执行都在 daemon 线程里；后端实例每次起跑现建，
-                设置页改的 key / 模型 / 挡位对新任务立即生效
+                设置页改的 key / 模型 / 挡位对新任务立即生效。
+                body 可选的端点走 `optional_body()`，别再用 content-length 判空
+ui/             前端。逻辑只有 translate.ts 一处（Store 投影 → 时间线），
+                所以它有一道单独的行为检查 check/translate.mjs（npm run check）。
+                写类调用统一返回 ActionResult{ok,error}：服务端拒绝了要说出来
 demo*.py        M1 单任务 / M4 复合任务的验证场景 —— 「隐藏要求」写在这里
 runtime/        确定性层：bus / sandbox / detectors / loop —— 这里不许出现 LLM 调用
 agent/          architect（唯一写入决策点：中断决策 + 拆解生成 plan()/decompose()；
