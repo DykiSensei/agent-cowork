@@ -5,6 +5,7 @@
 
 # 本机权限配置，不共享
 .claude/settings.local.json
+reasonix.toml
 
 __pycache__/
 *.py[cod]

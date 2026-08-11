@@ -55,7 +55,7 @@ pip install -e .[postgres]                        # --store pg
                                                   # ImportError，没有友好报错
 
 docker compose up -d postgres litellm             # postgres:5433 / litellm:4000
-python -m unittest discover -s tests -t .         # 404 个测试。用 unittest，断言风格也是 unittest
+python -m unittest discover -s tests -t .         # 423 个测试。用 unittest，断言风格也是 unittest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -162,7 +162,7 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
 
 ## 测试策略
 
-- 404 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
+- 423 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
 - **同一场景跨运行方差很大**（中断 0–5 次，token 0–50k）：单次运行不能作为
   参数或结论的依据，**也不能拿它写断言**。
 - **改提示词必须两侧都测**（正例 + 反例）：M5a 第一版只看不可解侧是「大胜」，
