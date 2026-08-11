@@ -87,6 +87,7 @@ class Scheduler:
         max_parallel: int = 4,
         root_goal: str | None = None,
         reviewer_backend: Backend | None = None,
+        review_writes: bool | None = None,
         log: Callable[[str], None] = print,
         registry: dict | None = None,
     ) -> None:
@@ -119,7 +120,11 @@ class Scheduler:
         self.architect = Architect(
             backend, store, policy=policy, human_gate=human_gate,
             reviewer_backend=reviewer_backend,
+            **({} if review_writes is None else {"review_writes": review_writes}),
         )
+        # 子任务的 Orchestrator 各自建 Architect，这两样要能传下去
+        self.reviewer_backend = reviewer_backend
+        self.review_writes = review_writes
 
     # -- 时间线（M6 §9 第 4 条）------------------------------------------- #
 
@@ -210,6 +215,9 @@ class Scheduler:
             store=self.store,
             policy=self.policy,
             human_gate=self.human_gate,
+            # 子任务的中断决策也走写入侧复核 —— 那 19% 的暴露面正在这一层
+            reviewer_backend=self.reviewer_backend,
+            review_writes=self.review_writes,
             log=lambda m, _t=spec.id: self.log(f"  [{_t}] {m}"),
         )
         # 注册活的 Orchestrator：服务层的人介入（HUMAN_INTERVENTION）要拿到

@@ -213,6 +213,12 @@ class ScriptedComposite:
         sufficient, missing = self.review_for(root_goal, specs)
         return sufficient, list(missing), 20
 
+    def review_spec_change(self, spec, signals, verdict) -> tuple[bool, list[str], int]:
+        """写入侧复核（M8）。脚本后端一律放行 —— 它没有语义判断力，
+        在这里报缺口只会让演示场景多绕一圈，测不出任何东西。
+        """
+        return True, [], 20
+
 
 ROOT_GOAL = (
     "做一个把 'name,42' 这样的文本行渲染成 'name = 42' 报告的小工具："

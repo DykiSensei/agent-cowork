@@ -104,6 +104,16 @@ class Runner:
             return None
         return _make_backend(name)
 
+    def _review_writes(self) -> bool:
+        """写入侧复核开关（设置页 → .env → 这里）。
+
+        **每次起跑时读**，和后端实例一样 —— 设置页改完对下一个任务立即生效，
+        不用重启服务。默认开（§11.19）。
+        """
+        import os
+
+        return (os.environ.get("COWORK_REVIEW_WRITES") or "on").strip().lower() != "off"
+
     def _log(self, msg: str) -> None:
         self.hub.publish_threadsafe({"type": "server-log", "text": msg})
 
@@ -144,6 +154,7 @@ class Runner:
                 policy=DEFAULT_POLICY,
                 human_gate=self.gate,
                 reviewer_backend=self._reviewer_backend(),
+                review_writes=self._review_writes(),
             )
             result = architect.plan(
                 goal,
@@ -240,6 +251,8 @@ class Runner:
             human_gate=self.gate,
             log=self._log,
             registry=self.running,
+            reviewer_backend=self._reviewer_backend(),
+            review_writes=self._review_writes(),
         )
         entry.dispatched_root = sched.root_id
         threading.Thread(
@@ -319,6 +332,8 @@ class Runner:
                 store=self.store,
                 policy=DEFAULT_POLICY,
                 human_gate=self.gate,
+                reviewer_backend=self._reviewer_backend(),
+                review_writes=self._review_writes(),
                 log=self._log,
             )
             self.running[task_id] = orch

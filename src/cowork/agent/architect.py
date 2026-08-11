@@ -295,7 +295,7 @@ class Architect:
         policy: Policy,
         human_gate: HumanGate | None = None,
         reviewer_backend: Backend | None = None,
-        review_writes: bool = False,
+        review_writes: bool = True,
     ) -> None:
         self.backend = backend
         self.store = store
@@ -306,11 +306,14 @@ class Architect:
         # §2.3 的「唯一写入决策点」因此不变。给它写权 = 两个写入点 = 不变量破了。
         self.reviewer_backend = reviewer_backend
         # 写入侧复核（§12 M8）：改 TaskSpec 前先让复核者看一眼。
-        # **默认关闭，这是刻意的。** 它的判别力还没有实测数据 —— M7 那个
-        # J 0.98 是在**拆解**上测的，不能假设迁移到「一次 spec 改动」上
-        # （§11.13 已经有过一次判据移植到新层后无可判之物的先例）。
-        # 按这个项目的规矩：没有对照实验的东西不进控制流的默认路径。
-        # 打开它跑 `bench/decide_ab.py` 出 TPR/FPR/J，够了再谈默认开。
+        # **默认开**，依据是 §11.19 的 26 用例 × 2 arm × 3 次：
+        # deepseek J 0.963 / kimi 0.907，两臂 FPR 都是 0/24（含三条「合法地改
+        # goal / 扩 scope / 调上限」的硬负例）。它防的是六种缺陷里没有兜底的那两种
+        # —— 目标被改松、scope 扩到校验脚本 —— 那两种会让任务**假装成功**，
+        # 没有任何后续信号会暴露。其余四种确定性层接得住，只是白烧一轮。
+        #
+        # **判别力测过，重做循环没测过**（`decide_ab` 故意绕开了它，见那个文件）。
+        # 默认开之后这段循环才第一次在真实链路上跑 —— 界面设置页留了开关。
         self.review_writes = review_writes
         self.tokens_used = 0
         # 每个任务试过什么。M2 归因发现架构师**每次都在「第一次见到这个问题」的
@@ -521,6 +524,13 @@ class Architect:
         spec = state.spec
         reviewer = self.reviewer_backend or self.backend
         findings: list[str] = []
+
+        # 后端没实现这个能力就跳过，**不要崩**。`review_spec_change` 是 M8 才加进
+        # Backend 协议的，而这个开关默认开 —— 于是任何早于 M8 的后端实现
+        # （包括别人写的）都会在这里 AttributeError。没有复核者时的正确行为是
+        # 回到 M8 之前的样子（架构师自己拍板），不是把整条链打挂。
+        if not hasattr(reviewer, "review_spec_change"):
+            return verdict, None, []
 
         # 同模型复核（用户只配了一家）时把重做压到一轮。跨模型驳回能带来生成者
         # 没有的信息，重做有价值；同模型驳回后重做，是**同一套先验再试一次** ——

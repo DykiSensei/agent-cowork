@@ -89,20 +89,72 @@ class WriteReviewFixture(unittest.TestCase):
 
 
 class TestReviewGate(WriteReviewFixture):
-    def test_off_by_default(self):
-        """默认关闭是刻意的：判别力还没有实测数据（M7 的 J 0.98 是拆解上的）。"""
+    def test_on_by_default(self):
+        """默认开（§11.19：26 用例两臂，J 0.963 / 0.907，FPR 都是 0/24）。
+
+        它防的是六种缺陷里**没有兜底**的那两种（目标被改松、scope 扩到校验脚本）
+        —— 那两种会让任务假装成功，没有任何后续信号会暴露。
+        """
         spec = self.spec()
         backend = ScriptedBackend({}, verdict_for=lambda *_: _verdict(ADD_CRITERION))
-        reviewer = ScriptedBackend({}, spec_review_for=lambda *_: (False, ["随便报一条"]))
+        reviewer = ScriptedBackend({}, spec_review_for=lambda *_: (True, []))
         arch = Architect(  # 不传 review_writes
             backend, self.store, policy=DEFAULT_POLICY, reviewer_backend=reviewer
         )
 
+        self.decide(arch, spec, self.signals(spec))
+
+        self.assertEqual(reviewer.spec_review_calls, 1, "默认就该调复核者")
+
+    def test_can_be_turned_off(self):
+        """界面设置页要能关掉它 —— 判别力测过，但重做循环没在真实链路上跑过。"""
+        spec = self.spec()
+        backend = ScriptedBackend({}, verdict_for=lambda *_: _verdict(ADD_CRITERION))
+        reviewer = ScriptedBackend({}, spec_review_for=lambda *_: (False, ["随便报一条"]))
+        arch = self.architect(backend, reviewer=reviewer, review_writes=False)
+
         rec = self.decide(arch, spec, self.signals(spec))
 
-        self.assertEqual(reviewer.spec_review_calls, 0, "默认不该调复核者")
+        self.assertEqual(reviewer.spec_review_calls, 0)
         self.assertIs(rec.action, Action.MODIFY_TASK)
         self.assertIsNone(rec.escalation_reason)
+
+    def test_backend_without_the_capability_degrades_instead_of_crashing(self):
+        """**默认开之后，这条才是最容易伤到别人的地方。**
+
+        `review_spec_change` 是 M8 才进 Backend 协议的。开关默认开 = 任何早于 M8
+        的后端实现（包括别人写的）都会在这里 AttributeError。没有复核者时的正确
+        行为是回到 M8 之前的样子（架构师自己拍板），不是把整条链打挂。
+        """
+
+        class OldBackend(ScriptedBackend):
+            review_spec_change = None
+
+            def __getattribute__(self, name):
+                if name == "review_spec_change":
+                    raise AttributeError(name)
+                return super().__getattribute__(name)
+
+        spec = self.spec()
+        backend = OldBackend({}, verdict_for=lambda *_: _verdict(ADD_CRITERION))
+        arch = self.architect(backend, reviewer=None)
+
+        rec = self.decide(arch, spec, self.signals(spec))
+
+        self.assertIs(rec.action, Action.MODIFY_TASK, "该照常改 spec")
+        self.assertIsNone(rec.escalation_reason, "不该因为后端老就升级给人")
+        self.assertIn("c2", [c.id for c in rec.new_spec.acceptance])
+
+    def test_bench_pins_it_off(self):
+        """跑批必须显式关掉：M2/M3 的参数全部是在没有写入侧复核时测出来的，
+        开着它跑批，新数据和 `bench_runs.jsonl` 就不可比了。
+        """
+        import inspect
+
+        from cowork.bench import runner as bench_runner
+
+        src = inspect.getsource(bench_runner.run_once)
+        self.assertIn("review_writes=False", src, "bench 没有把写入侧复核钉死为关")
 
     def test_approved_change_passes_through_untouched(self):
         spec = self.spec()

@@ -56,6 +56,10 @@ class Orchestrator:
         store,
         policy: Policy = DEFAULT_POLICY,
         human_gate: HumanGate | None = None,
+        reviewer_backend: Backend | None = None,
+        # None = 用 Architect 的默认（开）。bench 显式传 False：M2/M3 的参数
+        # 全部是在没有写入侧复核的情况下测出来的，跑批开着它就不再可比。
+        review_writes: bool | None = None,
         log: Callable[[str], None] = print,
     ) -> None:
         if spec.sandbox is None:
@@ -70,7 +74,14 @@ class Orchestrator:
 
         self.bus = SignalBus()
         self.sandbox = Sandbox(spec.sandbox, spec.scope)
-        self.architect = Architect(backend, store, policy=policy, human_gate=human_gate)
+        # reviewer_backend 传下去才谈得上「独立复核」：不传的话写入侧复核退回
+        # 同模型（M5b 的形态）。§11.19 实测同模型也不弱（单臂 deepseek J 0.963），
+        # 但换一家仍然更稳妥，所以给调用方这个口子。
+        self.architect = Architect(
+            backend, store, policy=policy, human_gate=human_gate,
+            reviewer_backend=reviewer_backend,
+            **({} if review_writes is None else {"review_writes": review_writes}),
+        )
         self.loop = StepLoop(bus=self.bus, sandbox=self.sandbox, store=store)
 
         self.state = TaskState(spec=spec, status=TaskStatus.PENDING)
@@ -195,6 +206,8 @@ class Orchestrator:
         store,
         policy: Policy = DEFAULT_POLICY,
         human_gate: HumanGate | None = None,
+        reviewer_backend: Backend | None = None,
+        review_writes: bool | None = None,
         log: Callable[[str], None] = print,
     ) -> "Orchestrator":
         """从存储重建一个挂起的任务。
@@ -216,6 +229,8 @@ class Orchestrator:
             store=store,
             policy=policy,
             human_gate=human_gate,
+            reviewer_backend=reviewer_backend,
+            review_writes=review_writes,
             log=log,
         )
         orch.state = state

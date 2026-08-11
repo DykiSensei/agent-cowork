@@ -243,6 +243,30 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                   </select>
                 </div>
               ))}
+              <div className="set-row">
+                <span className="set-k">
+                  写入侧复核{" "}
+                  <span className="set-env">
+                    改任务规格前先让复核者看一眼；关掉后架构师自己拍板
+                  </span>
+                </span>
+                <select
+                  className="set-text"
+                  value={settings.review_writes}
+                  onChange={(e) =>
+                    setSettings({ ...settings, review_writes: e.target.value })
+                  }
+                >
+                  <option value="on">开（默认）</option>
+                  <option value="off">关</option>
+                </select>
+              </div>
+              {settings.review_writes === "off" && (
+                <p className="set-note" style={{ margin: "2px 0 0" }}>
+                  关掉之后，「把失败的输入从目标里摘出去」和「把校验脚本纳入可写范围」
+                  这两种改动没有任何东西会拦 —— 它们会让任务<b>看起来成功</b>。
+                </p>
+              )}
               <div className="set-row" style={{ justifyContent: "flex-end" }}>
                 {savedMsg && <span className="set-key-ok">{savedMsg}</span>}
                 <button className="set-save" onClick={() => void saveGlobals()}>

@@ -264,6 +264,9 @@ def create_app(
                 k: env.get(GLOBAL_KEYS[f"effort.{k}"], v)
                 for k, v in DEFAULTS["effort"].items()
             },
+            "review_writes": env.get(
+                GLOBAL_KEYS["review_writes"], DEFAULTS["review_writes"]
+            ),
         }
         return out
 
@@ -273,9 +276,20 @@ def create_app(
         pairs: dict[str, str] = {}
         for flat, env_name in GLOBAL_KEYS.items():
             section, _, key = flat.partition(".")
-            if not key:  # base_url_override 这种顶层项
-                if section in body:
-                    pairs[env_name] = str(body[section] or "").strip()
+            if not key:  # base_url_override / review_writes 这种顶层项
+                if section not in body:
+                    continue
+                raw = body[section]
+                if flat == "review_writes":
+                    # **必须收字符串 on/off，不能收布尔**：`str(False or "")` 是
+                    # 空串，而空串在 .env 语义里是「未设置」→ 回落到默认（开）。
+                    # 也就是说前端发 false 反而关不掉。
+                    value = str(raw).strip().lower()
+                    if value not in ("on", "off"):
+                        return err(400, f"review_writes 只能是 on / off，收到 {raw!r}")
+                    pairs[env_name] = value
+                else:
+                    pairs[env_name] = str(raw or "").strip()
                 continue
             if section in body and key in body[section]:
                 value = str(body[section][key] or "").strip()

@@ -25,6 +25,7 @@ GLOBAL_KEYS = {
     "effort.architect": "COWORK_ARCHITECT_EFFORT",
     "effort.subagent": "COWORK_SUBAGENT_EFFORT",
     "effort.cheap": "COWORK_CHEAP_EFFORT",
+    "review_writes": "COWORK_REVIEW_WRITES",
 }
 
 # 环境变量名的合法形状。写文件这一步不该依赖调用方一直守白名单。
@@ -34,6 +35,9 @@ DEFAULTS = {
     "base_url_override": "",
     "models": {"architect": "", "subagent": "", "triage": ""},
     "effort": {"architect": "high", "subagent": "medium", "cheap": "off"},
+    # 写入侧复核（§12 M8）。默认开，依据 §11.19；界面上留开关是因为
+    # 它的**重做循环**没在真实链路上测过，只有判别力那半有数据。
+    "review_writes": "on",
 }
 
 

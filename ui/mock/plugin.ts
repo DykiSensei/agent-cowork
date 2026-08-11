@@ -41,6 +41,8 @@ const DEFAULT_SETTINGS = {
   base_url_override: "",
   models: { architect: "", subagent: "", triage: "" },
   effort: { architect: "high", subagent: "medium", cheap: "off" },
+  // 字符串 on/off 而不是布尔：它落到 .env，空串在那里 = 未设置 = 回落到默认
+  review_writes: "on",
 };
 
 interface SettingsFile {

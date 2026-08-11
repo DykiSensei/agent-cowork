@@ -15,7 +15,8 @@ Subagent 是薄执行层，Runtime 是完全确定性的（不含任何 LLM 调�
 
 当前进度：M0–M7 全部完成；M8（写入侧复核，改 TaskSpec 前让复核者看一眼）代码完成、
 判别力已实测（26 用例，**deepseek J 0.963 / kimi 0.907，FPR 两边 0/24**，§11.19），
-**默认仍关着**（`review_writes=True` 启用），复核者选 **deepseek**。
+**默认开**，界面设置页留开关（`COWORK_REVIEW_WRITES=off`），复核者选 **deepseek**；
+跑批显式关掉（M2/M3 的参数都是在没有它时测的，开着就不可比）。
 **注意这个结论翻过一次**：11 个用例时看着是 kimi 更好，扩到每种缺陷形态 3 个用例
 之后反了过来 —— 当时判定的「deepseek 在某一族上弱」其实是它恰好在那一两个用例上
 翻车。**一种形态一个用例时，用例难度和形态难度分不开。**
@@ -49,7 +50,7 @@ Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAP
 pip install -e .                                  # 或 set PYTHONPATH=src（仅 CLI 需要）
 
 docker compose up -d postgres litellm             # postgres:5433 / litellm:4000
-python -m unittest discover -s tests -t .         # 400 个测试。用 unittest，没引 pytest
+python -m unittest discover -s tests -t .         # 404 个测试。用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -140,7 +141,7 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
 
 ## 测试策略
 
-- 400 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
+- 404 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
 - **同一场景跨运行方差很大**（中断 0–5 次，token 0–50k）：单次运行不能作为
   参数或结论的依据，**也不能拿它写断言**。
 - **改提示词必须两侧都测**（正例 + 反例）：M5a 第一版只看不可解侧是「大胜」，

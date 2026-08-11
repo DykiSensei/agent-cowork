@@ -229,6 +229,10 @@ def run_once(
             # 升级必须能被记录下来又不能卡住跑批：AutoApproveGate 采纳 LLM 裁决，
             # 但 escalation_reason 仍然如实落进 DecisionRecord。
             human_gate=AutoApproveGate(),
+            # **跑批必须关掉写入侧复核**：M2/M3 的每一个参数都是在没有它的情况下
+            # 测出来的，开着它跑出来的新数据和 `bench_runs.jsonl` 不可比 ——
+            # 而那份记录正是 `policy.py` 全部依据的底稿（§11.6）。
+            review_writes=False,
             log=lambda _msg: None,
         )
         result = orch.run(max_cycles=max_cycles)

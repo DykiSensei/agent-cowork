@@ -226,6 +226,12 @@ export interface Settings {
   base_url_override: string;
   models: { architect: string; subagent: string; triage: string };
   effort: { architect: string; subagent: string; cheap: string };
+  /**
+   * 写入侧复核（§12 M8）。**字符串 "on" / "off"，不是布尔** ——
+   * 它落到 .env，而空串在那里的语义是「未设置」→ 回落到默认（on），
+   * 所以发 false 反而关不掉。服务端会拒非 on/off 的值。
+   */
+  review_writes: string;
 }
 
 // --------------------------------------------------------------------- //

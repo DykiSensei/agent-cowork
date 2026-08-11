@@ -318,6 +318,43 @@ class TestServer(unittest.TestCase):
                 finally:
                     runner.running.pop(spec.id, None)
 
+    def test_review_writes_setting_roundtrip(self):
+        """写入侧复核的开关走设置页。
+
+        **必须收字符串 on/off，不能收布尔**：它落到 .env，而空串在那里是
+        「未设置」→ 回落到默认（on）。前端发 false 的话反而关不掉。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            env_file = Path(td) / ".env"
+            env_file.write_text("# test env\n", encoding="utf-8")
+            old = os.environ.get("COWORK_ENV_FILE")
+            old_flag = os.environ.get("COWORK_REVIEW_WRITES")
+            os.environ["COWORK_ENV_FILE"] = str(env_file)
+            os.environ.pop("COWORK_REVIEW_WRITES", None)
+            client = self._app(ScriptedBackend({}), Path(td))
+            try:
+                with client:
+                    self.assertEqual(
+                        client.get("/api/settings").json()["review_writes"], "on",
+                        "默认开（§11.19）",
+                    )
+
+                    r = client.put("/api/settings", json={"review_writes": "off"})
+                    self.assertEqual(r.status_code, 200, r.text)
+                    self.assertIn("COWORK_REVIEW_WRITES=off", env_file.read_text("utf-8"))
+
+                    # 布尔会被拒 —— 不然 str(False or "") 是空串，等于没关
+                    r = client.put("/api/settings", json={"review_writes": False})
+                    self.assertEqual(r.status_code, 400)
+                    r = client.put("/api/settings", json={"review_writes": "yes"})
+                    self.assertEqual(r.status_code, 400)
+            finally:
+                for k, v in (("COWORK_ENV_FILE", old), ("COWORK_REVIEW_WRITES", old_flag)):
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
     def test_provider_test_endpoint(self):
         """「已填」和「能用」是两件事。
 

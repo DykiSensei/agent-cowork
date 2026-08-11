@@ -9,8 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `AGENTS.md` 是同一批事实的精简版（给别家编码代理）：本文件里的命令、代码地图、
 四条不变量改了，那边也要跟着改，否则两份指南会慢慢分叉。
 
-当前：M0–M7 全部完成；**M8 写入侧复核代码完成、判别力已实测，但默认仍关着**
-（`Architect(review_writes=True)` 启用，理由与数据见下）。
+当前：M0–M8 全部完成。**M8 写入侧复核已默认开**（依据 §11.19），
+界面设置页留了开关（`COWORK_REVIEW_WRITES=off`）；**跑批显式关掉** ——
+M2/M3 的参数都是在没有它的情况下测出来的，开着跑就和 `bench_runs.jsonl` 不可比。
 **M6 群聊界面层已落地**：前端 `ui/`（React + TS + Vite
 双模式界面 + 设置页，细节见 `ui/README.md`）；服务层 `src/cowork/server/`
 （FastAPI，`python -m cowork.cli serve`，只绑 loopback）—— 含 restore 路径
@@ -43,7 +44,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 复核者默认 `kimi`（`cli.DEFAULT_REVIEWER`）：§11.11 实测 J 0.98 vs deepseek 0.66，
   且后者在同一份输入上会翻面。`--reviewer none` 退回同模型复核。
 
-写入侧复核（M8，§12 M8）—— 代码在，默认关闭：
+写入侧复核（M8，§12 M8）—— **默认开**：
 
 - **只复核写入，而且只复核没在升级的那些**。先量的暴露面：M2 的 176 条裁决里
   61% 已被确定性下限送到人面前，真实缺口是**改了 spec 且无人过目的 34 条（19%）**。
@@ -53,7 +54,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **循环还是那一个**：决策 → 复核 → 重做 ≤ `max_regenerate` → 升级给人。
   意见走 `decide_interrupt(review_feedback=...)` 喂回去，**和 `history` 分开传** ——
   history 参与「同一指纹连续出现」的计数，被驳回的草稿混进去会把计数搞脏。
-- **默认仍关着，但数据已经够了**（§11.19，四轮 321 次调用，26 个用例）：
+- **默认开，依据是**（§11.19，四轮 321 次调用，26 个用例）：
   **deepseek J 0.963 / kimi 0.907，FPR 两边都是 0/24。复核者选 deepseek。**
 - **⚠️ 这个结论是扩表之后才对的，扩表之前是反的** —— 11 个用例时判定
   「deepseek 在 `limit_raised` / `scope_widened` 上弱（2/5）」，据此选了 kimi；
@@ -69,6 +70,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **FPR 0/24 这次才算数**：专门放了三条**硬负例**（合法地改 goal / 扩 scope /
   调上限），每条与改同一字段的正例配对 —— 只看字段一定判错，必须读证据。
   两个模型把这三条全部正确放行。上一版「负例只加验收标准、构造偏易」的局限已解决。
+- **判别力测过，重做循环没测过。** `decide_ab` 故意绕开 `_review_write`
+  （混进循环的话一次误报会带出一次重做，记录就不干净了）。所以「复核驳回 →
+  架构师带着意见重做 → 第二版更好吗」这一段，真实模型上一次都没跑过 ——
+  只有脚本后端的单测钉着。默认开之后它才第一次上真实链路。
+- **`review_spec_change` 是 M8 才进 Backend 协议的，而开关默认开** ——
+  早于 M8 的后端实现（包括别人写的）会在这里 AttributeError。
+  `_review_write` 因此先 `hasattr` 再调，没有就跳过、回到 M8 之前的样子，
+  **不崩**（`test_backend_without_the_capability_degrades_instead_of_crashing` 钉着）。
 - **曾经的盲区与它的机制值得记**：v1 时「证据为空 + 编个因果 + 据此改松目标」
   是 0/5。原因不是模型笨 —— 提示词问的是「改完之后**失败证据**指的问题会被挡住吗」，
   而证据为空时这个判据**没有可判之物**。这是第三次遇到同一形状
@@ -93,7 +102,7 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 400 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 404 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
