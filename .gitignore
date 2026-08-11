@@ -6,6 +6,15 @@
 # 本机权限配置，不共享
 .claude/settings.local.json
 reasonix.toml
+.reasonix/
+
+# 给 AI 编码代理的内部指南，不进公开仓库
+AGENTS.md
+CLAUDE.md
+
+# 发布产物与构建中间目录
+dist/
+packaging/staging/
 
 __pycache__/
 *.py[cod]
