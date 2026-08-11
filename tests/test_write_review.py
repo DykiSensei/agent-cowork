@@ -272,6 +272,84 @@ class TestBothSidesFailTheSameWay(WriteReviewFixture):
         self.assertEqual(backend.spec_review_calls, 1)
         self.assertIs(rec.action, Action.MODIFY_TASK)
 
+    def test_same_model_gets_only_one_redo(self):
+        """同模型复核时重做压到一轮。
+
+        跨模型驳回能带来生成者没有的信息，重做有价值；同模型驳回后重做是
+        **同一套先验再试一次** —— M7 实测重生成收益本就在衰减（62% → 33%），
+        共享盲点只会衰减得更快。省下那一轮直接交给人更划算。
+        """
+        spec = self.spec()
+        backend = ScriptedBackend(
+            {},
+            verdict_for=lambda *_: _verdict(LOOSEN_GOAL),
+            spec_review_for=lambda *_: (False, ["把目标改松了"]),
+        )
+        arch = self.architect(backend, reviewer=None)
+
+        rec = self.decide(arch, spec, self.signals(spec))
+
+        # 同模型：初版 + 1 次重做后 = 2 次复核（跨模型是 max_regenerate + 1 = 3）
+        self.assertEqual(backend.spec_review_calls, 2)
+        self.assertIsNotNone(rec.escalation_reason)
+
+    def test_cross_model_gets_the_full_redo_budget(self):
+        """对照上一条：给了独立复核者才用满 max_regenerate。"""
+        spec = self.spec()
+        backend = ScriptedBackend({}, verdict_for=lambda *_: _verdict(LOOSEN_GOAL))
+        reviewer = ScriptedBackend({}, spec_review_for=lambda *_: (False, ["改松了"]))
+        arch = self.architect(backend, reviewer=reviewer)
+
+        self.decide(arch, spec, self.signals(spec))
+
+        self.assertEqual(reviewer.spec_review_calls, DEFAULT_POLICY.max_regenerate + 1)
+
+
+class TestBudgetVisibility(WriteReviewFixture):
+    """复核循环烧的 token 必须进 `state.tokens_used`。
+
+    M8 首版只加到 `Architect.tokens_used`（架构师自己的账），而
+    `escalation.py` 的 `budget_escalation_ratio` 读的是 `state.tokens_used` ——
+    于是复核循环的开销对预算检查**完全隐形**：一个能反复重做的循环，
+    却不算进「这个任务花了多少」。
+    """
+
+    def test_review_tokens_land_on_the_task(self):
+        spec = self.spec()
+        backend = ScriptedBackend(
+            {}, verdict_for=lambda *_: _verdict(ADD_CRITERION), token_cost=1000
+        )
+        reviewer = ScriptedBackend(
+            {}, spec_review_for=lambda *_: (True, []), token_cost=1000
+        )
+        arch = self.architect(backend, reviewer=reviewer)
+
+        state = TaskState(spec=spec)
+        self.store.save_task(state)
+        before = state.tokens_used
+        arch.decide(state, self.signals(spec), AgentContext(task_spec=spec))
+
+        # decide_interrupt(1000) + review_spec_change(1000//5=200)
+        self.assertEqual(state.tokens_used - before, 1200)
+
+    def test_redo_rounds_also_count(self):
+        """重做那几轮尤其要算 —— 它们正是这个循环最贵的部分。"""
+        spec = self.spec()
+        backend = ScriptedBackend(
+            {}, verdict_for=lambda *_: _verdict(LOOSEN_GOAL), token_cost=1000
+        )
+        reviewer = ScriptedBackend(
+            {}, spec_review_for=lambda *_: (False, ["改松了"]), token_cost=1000
+        )
+        arch = self.architect(backend, reviewer=reviewer)
+
+        state = TaskState(spec=spec)
+        self.store.save_task(state)
+        arch.decide(state, self.signals(spec), AgentContext(task_spec=spec))
+
+        # 初版决策 1000 + 复核 3 次 ×200 + 重做 2 次 ×1000 = 3600
+        self.assertEqual(state.tokens_used, 3600)
+
 
 class TestHumanArbitrates(WriteReviewFixture):
     def test_human_ruling_overrides_the_rejected_change(self):

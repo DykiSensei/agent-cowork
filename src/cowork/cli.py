@@ -207,7 +207,35 @@ def _make_routing_backend(default_kind: str, providers: dict[str, str]):
     return RoutingBackend(default, others)
 
 
+# 会话级 token 护栏（§12 M9）。一次 CLI 调用共享一个 CostGuard ——
+# 复核者、路由到别家的 Subagent、架构师是不同的 Backend 对象，但花的是同一笔钱，
+# 每个包一个自己的护栏等于没有护栏。`_set_budget()` 由各子命令在开跑前调一次。
+_GUARD = None
+
+
+def _set_budget(limit: int) -> None:
+    global _GUARD
+    from .llm.budget import CostGuard
+
+    _GUARD = CostGuard(limit) if limit and limit > 0 else None
+
+
+def budget_note() -> str:
+    if _GUARD is None:
+        return "会话 token 护栏：关闭"
+    return f"会话 token 护栏：{_GUARD.limit}（--budget 0 关闭）"
+
+
 def _make_backend(kind: str):
+    inner = _make_raw_backend(kind)
+    if inner is None or _GUARD is None:
+        return inner
+    from .llm.budget import BudgetedBackend
+
+    return BudgetedBackend(inner, _GUARD)
+
+
+def _make_raw_backend(kind: str):
     import os
 
     if kind == "scripted":
@@ -278,6 +306,7 @@ def _report_cache(*backends) -> None:
 
 
 def _run_demo(args: argparse.Namespace) -> int:
+    _set_budget(args.budget)
     from .demo import build
 
     lines: list[str] = []
@@ -344,6 +373,7 @@ def _inspect(args: argparse.Namespace) -> int:
 
 
 def _run_composite(args: argparse.Namespace) -> int:
+    _set_budget(args.budget)
     from .demo_composite import build
 
     lines: list[str] = []
@@ -435,6 +465,7 @@ def _serve(args: argparse.Namespace) -> int:
 
     from .server import check_bind_host, create_app, exposure_warning, is_loopback_host
 
+    _set_budget(args.budget)
     # 准入检查在建 app 之前：拒绝要发生在任何端口被占用、任何 key 被读取之前。
     refusal = check_bind_host(args.host, acknowledged=args.i_know_its_exposed)
     if refusal:
@@ -451,7 +482,7 @@ def _serve(args: argparse.Namespace) -> int:
         max_cycles=args.max_cycles,
         ui_dist=str(ui_dist) if ui_dist.is_dir() else None,
     )
-    print(f"store: {args.db}   backend: {args.backend}")
+    print(f"store: {args.db}   backend: {args.backend}   {budget_note()}")
     print(f"UI: {'http://{}:{}'.format(args.host, args.port) if ui_dist.is_dir() else '（ui/dist 不存在，先 cd ui && npm run build）'}")
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
@@ -547,6 +578,7 @@ def _models(args: argparse.Namespace) -> int:
 
 def _plan(args: argparse.Namespace) -> int:
     """从一个自然语言目标拆出可派发的子任务（§12 M7 7.3 / 7.4）。"""
+    _set_budget(args.budget)
     import tempfile
     from pathlib import Path
 
@@ -875,6 +907,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     d.add_argument("--docker", action="store_true", help="用 Docker 沙箱跑工具调用")
+    d.add_argument("--budget", type=int, default=1_000_000, dest="budget",
+                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。0 = 关闭")
     d.set_defaults(func=_run_demo)
 
     m = sub.add_parser("models", help="拿各家的 /v1/models 对一遍 PROVIDERS 表")
@@ -902,6 +936,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--workspace", default=None,
                    help="任务 workspace 根目录（默认每次拆解一个临时目录）")
     s.add_argument("--max-cycles", type=int, default=8, dest="max_cycles")
+    s.add_argument("--budget", type=int, default=1_000_000, dest="budget",
+                   help="token 硬上限（应用层，不依赖 LiteLLM）。0 = 关闭。"
+                        "**服务是长驻的，这个额度跨整个进程生命周期、用完要重启** —— 它防的正是「跑一夜把余额烧光」")
     s.set_defaults(func=_serve)
 
     i = sub.add_parser("inspect", help="导出某个 SQLite 库里的任务与决策")
@@ -920,6 +957,8 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"拆解复核的供应商（§12 M7 7.1）。auto：真实后端时用 "
                         f"{DEFAULT_REVIEWER}、脚本后端时不复核；none 退回同模型复核")
     c.add_argument("--max-cycles", type=int, default=4, dest="max_cycles")
+    c.add_argument("--budget", type=int, default=1_000_000, dest="budget",
+                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。0 = 关闭")
     c.set_defaults(func=_run_composite)
 
     b = sub.add_parser("bench", help="M2 参数实测跑批（§12 M2）")
@@ -952,6 +991,8 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--run", action="store_true",
                     help="拆解通过后直接派发执行 —— 从自然语言目标一路跑到产出。花真钱")
     pl.add_argument("--max-cycles", type=int, default=4, dest="max_cycles")
+    pl.add_argument("--budget", type=int, default=1_000_000, dest="budget",
+                   help="会话 token 硬上限（应用层，不依赖 LiteLLM）。0 = 关闭")
     pl.set_defaults(func=_plan)
 
     rv = sub.add_parser("bench-review", help="跨模型复核对照实测（§12 M7 7.2）")

@@ -406,7 +406,7 @@ class Architect:
         review_findings: list[str] = []
         if reason is None and verdict.action == "MODIFY_TASK" and self.review_writes:
             verdict, reason, review_findings = self._review_write(
-                spec, signals, ctx, verdict, history
+                state, signals, ctx, verdict, history
             )
 
         decider = Decider.LLM
@@ -498,7 +498,7 @@ class Architect:
 
     def _review_write(
         self,
-        spec: TaskSpec,
+        state: TaskState,
         signals: list[Signal],
         ctx: AgentContext,
         verdict: ArchitectVerdict,
@@ -518,19 +518,31 @@ class Architect:
         两侧失败走同一条路（§11.13 的教训）：复核者调不动模型时不抛出去，
         当作「没人复核得了」交给人 —— 手上明明有一版改动，不该因此崩掉。
         """
+        spec = state.spec
         reviewer = self.reviewer_backend or self.backend
         findings: list[str] = []
 
-        for attempt in range(1, self.policy.max_regenerate + 2):
+        # 同模型复核（用户只配了一家）时把重做压到一轮。跨模型驳回能带来生成者
+        # 没有的信息，重做有价值；同模型驳回后重做，是**同一套先验再试一次** ——
+        # M7 实测重生成的收益本来就在衰减（第 1 次救回 62%、第 2 次再救 33%），
+        # 共享盲点只会衰减得更快。省下的那一轮直接交给人更划算。
+        independent = self.reviewer_backend is not None
+        max_redo = self.policy.max_regenerate if independent else 1
+
+        for attempt in range(1, max_redo + 2):
             try:
                 ok, findings, tokens = reviewer.review_spec_change(spec, signals, verdict)
             except ModelError as exc:
                 return verdict, f"复核者无法给出结论：{exc}", []
+            # **两个计数器都要加。** self.tokens_used 是架构师自己的账，
+            # state.tokens_used 才是 `budget_escalation_ratio` 读的那个 ——
+            # 只加前者的话，复核循环烧的钱对预算检查是隐形的（M8 首版的缺陷）。
             self.tokens_used += tokens
+            state.tokens_used += tokens
 
             if ok:
                 return verdict, None, []
-            if attempt > self.policy.max_regenerate:
+            if attempt > max_redo:
                 break
 
             try:
@@ -540,6 +552,7 @@ class Architect:
             except ModelError as exc:
                 return verdict, f"复核驳回后架构师无法重做：{exc}", findings
             self.tokens_used += tokens
+            state.tokens_used += tokens
 
             if verdict.action != "MODIFY_TASK":
                 # 重做之后不再改 spec 了（改成 CONTINUE / ABANDON 之类）——
