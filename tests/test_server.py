@@ -300,6 +300,91 @@ class TestServer(unittest.TestCase):
                 self.assertEqual(r.status_code, 202, r.text)
                 self.assertEqual(r.json()["root_id"], plan_id)
 
+    def test_the_journey_a_human_actually_takes(self):
+        """实测走过的那条路，逐跳钉住 —— 它踩到了两个界面上无解的坑。
+
+        发布 → 拆解 → 派发 → 子任务挂起 → 在复合线程上答复。
+
+        坑一：**派发成功的那一刻，root 线程还没有任何 tasks 行**（子任务要等各自
+        的 Orchestrator 起跑）。详情回 404，而界面正好在这一刻切过去 ——
+        整页变成「连不上服务」，刷新一下又好了。线程的存在性看事件，不看 tasks 行。
+
+        坑二：**子任务折在父线程里，侧栏点不到**。它挂起时复合详情只给了一串
+        `pending_children` 的 id，拿不到升级原因和系统建议 —— 于是渲染不出裁决
+        表单，任务停着而人无处答复。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+
+            def decompose(_goal, _feedback):
+                return [
+                    SubtaskDraft(
+                        id="t1_build",
+                        goal="造出 a.txt",
+                        acceptance=[{"id": "c1", "description": "a.txt 被造出来",
+                                     "command": ["python", "-c", "import sys;sys.exit(1)"]}],
+                        scope=["a.txt"],
+                    )
+                ]
+
+            backend = ScriptedBackend(
+                {(1, 0): Finish(output={}, summary="做完了")},
+                decompose_for=decompose,
+                # 验收命令必然失败 -> TEST_FAILED -> 裁决 ABANDON -> 必然升级
+                # -> ChatGate 立即返回 None -> 子任务 AWAITING_HUMAN
+                verdict_for=lambda *_: ArchitectVerdict(
+                    action="ABANDON", rationale="做不下去了", complexity_score=0.9
+                ),
+            )
+            client = self._app(backend, tmp)
+            with client:
+                plan_id = client.post(
+                    "/api/tasks", json={"goal": "做一个造文件的小工具"}
+                ).json()["plan_id"]
+
+                # 坑一的前半：拆解还在跑，线程就该看得见了（人的原话已经落库）
+                r = client.get(f"/api/tasks/{plan_id}")
+                self.assertEqual(r.status_code, 200, "有事件就是有线程，不能 404")
+                self.assertEqual(r.json()["root_goal"], "做一个造文件的小工具")
+                self.assertIn(
+                    plan_id, [t["task_id"] for t in client.get("/api/tasks").json()],
+                    "刚发布的任务必须出现在列表里，否则人以为没发出去",
+                )
+
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("status")
+                    == "ACCEPTED",
+                    what="拆解完成",
+                )
+                root_id = client.post(
+                    f"/api/plans/{plan_id}/dispatch", json={}
+                ).json()["root_id"]
+
+                # 坑一的后半：派发成功的这一刻立刻拉详情（界面就是这么干的）
+                r = client.get(f"/api/tasks/{root_id}")
+                self.assertEqual(r.status_code, 200, "派发瞬间的真空期不能回 404")
+
+                # 坑二：子任务挂起之后，复合详情要给得出裁决材料
+                def child_waiting():
+                    d = client.get(f"/api/tasks/{root_id}").json()
+                    return d if d.get("pending_children") else None
+
+                detail = _wait_for(child_waiting, what="子任务挂起")
+                child = detail["pending_children"][0]
+                self.assertIsNotNone(
+                    detail["pending"][child],
+                    "只有一串 id 的话，界面渲染不出表单，人无处答复",
+                )
+                self.assertIn("ABANDON", detail["pending"][child]["reason"])
+                self.assertIn(child, detail["progress"], "还要看得出它跑到哪了")
+
+                # 在复合线程上答复，裁决发给**子任务**
+                r = client.post(
+                    f"/api/tasks/{child}/ruling",
+                    json={"action": "ABANDON", "rationale": "确实做不下去"},
+                )
+                self.assertEqual(r.status_code, 202, r.text)
+
     def test_plan_rejection_stays_undispatchable(self):
         """「否决」之后不能再派发 —— 否则那个按钮就是个摆设。"""
         with tempfile.TemporaryDirectory() as td:
@@ -326,6 +411,145 @@ class TestServer(unittest.TestCase):
                 self.assertEqual(
                     client.post(f"/api/plans/{plan_id}/dispatch", json={}).status_code, 409
                 )
+
+    # ---------------------------------------------------------- #
+    # 工作区与「接手已有项目」（§12 M10）
+    # ---------------------------------------------------------- #
+
+    def _plan_backend(self):
+        return ScriptedBackend(
+            {},
+            decompose_for=lambda _g, _f: [
+                SubtaskDraft(
+                    id="t1", goal="改一改",
+                    acceptance=[{"id": "c1", "description": "改好了"}],
+                    scope=["app.py"],
+                )
+            ],
+        )
+
+    def test_new_task_gets_its_own_subdirectory(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = self._app(self._plan_backend(), Path(td))
+            with client:
+                plan_id = client.post(
+                    "/api/tasks", json={"goal": "做点东西", "workspace": td}
+                ).json()["plan_id"]
+                plan = _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json()
+                    if client.get(f"/api/plans/{plan_id}").json().get("workspace")
+                    else None,
+                    what="拆解开始",
+                )
+                self.assertEqual(plan["workspace"], str(Path(td) / plan_id))
+                self.assertFalse(plan["takeover"])
+
+    def test_takeover_writes_into_the_directory_itself(self):
+        """接手时落进子目录的话，改的就不是人手上那份代码，而是它的拷贝。"""
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "app.py").write_text("print(1)", encoding="utf-8")
+            client = self._app(self._plan_backend(), Path(td))
+            with client:
+                plan_id = client.post(
+                    "/api/tasks",
+                    json={"goal": "把 app.py 改好", "workspace": td, "mode": "takeover"},
+                ).json()["plan_id"]
+                plan = _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json()
+                    if client.get(f"/api/plans/{plan_id}").json().get("status")
+                    != "RUNNING"
+                    else None,
+                    what="拆解完成",
+                )
+                self.assertEqual(plan["workspace"], str(Path(td)))
+                self.assertTrue(plan["takeover"])
+
+    def test_takeover_shows_the_architect_what_is_already_there(self):
+        """**这就是「半路接手」和「从零开始」的全部区别。**
+
+        不把现状给生成者，它会把一个有内容的目录当空目录，从零重建一遍。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "app.py").write_text("print(1)", encoding="utf-8")
+            (Path(td) / "README.md").write_text("# 项目", encoding="utf-8")
+            backend = self._plan_backend()
+            client = self._app(backend, Path(td))
+            with client:
+                plan_id = client.post(
+                    "/api/tasks",
+                    json={"goal": "加一个 CLI", "workspace": td, "mode": "takeover"},
+                ).json()["plan_id"]
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("status")
+                    != "RUNNING",
+                    what="拆解完成",
+                )
+
+            existing = backend.decompose_existing[0]
+            self.assertIsNotNone(existing, "接手模式必须把现状送到生成者手上")
+            self.assertIn("app.py", existing)
+            self.assertIn("README.md", existing)
+            self.assertIn("不是一个空目录", existing)
+
+    def test_a_fresh_start_does_not_pay_for_a_snapshot(self):
+        """从零开始的目录本来就是空的，采集它只是白花提示词。"""
+        with tempfile.TemporaryDirectory() as td:
+            backend = self._plan_backend()
+            client = self._app(backend, Path(td))
+            with client:
+                plan_id = client.post(
+                    "/api/tasks", json={"goal": "做点东西", "workspace": td}
+                ).json()["plan_id"]
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("status")
+                    != "RUNNING",
+                    what="拆解完成",
+                )
+            self.assertIsNone(backend.decompose_existing[0])
+
+    def test_a_bad_workspace_is_refused_before_anything_starts(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = self._app(self._plan_backend(), Path(td))
+            with client:
+                for bad in ("./out", str(Path(td) / "nope" / "deeper")):
+                    r = client.post(
+                        "/api/tasks", json={"goal": "x", "workspace": bad}
+                    )
+                    self.assertEqual(r.status_code, 400, f"{bad}: {r.text}")
+                r = client.post("/api/tasks", json={"goal": "x", "mode": "yolo"})
+                self.assertEqual(r.status_code, 400)
+
+    def test_settings_carry_the_role_providers_and_workspace(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = self._app(self._plan_backend(), Path(td))
+            with client:
+                got = client.get("/api/settings").json()
+                self.assertIn("providers", got)
+                self.assertEqual(
+                    sorted(got["providers"]), ["architect", "reviewer", "subagent"]
+                )
+                self.assertTrue(
+                    got["workspace_default"], "没配工作区时也要说得出东西落在哪"
+                )
+
+                # 只能选已经配了 key 的家 —— 选一家没 key 的会在起跑时才失败，
+                # 而那时人已经离开设置页了
+                r = client.put(
+                    "/api/settings", json={"providers": {"architect": "没这家"}}
+                )
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("还没配 API key", r.json()["error"])
+
+                # 复核者多一个 none：明确关掉独立复核，退回同模型复核
+                r = client.put("/api/settings", json={"providers": {"reviewer": "none"}})
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(
+                    client.get("/api/settings").json()["providers"]["reviewer"], "none"
+                )
+
+                r = client.put("/api/settings", json={"workspace": "./相对路径"})
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("绝对路径", r.json()["error"])
 
     # ---------------------------------------------------------- #
     # 写端的错误面
@@ -391,10 +615,16 @@ class TestServer(unittest.TestCase):
             with client:
                 runner = client.app.state.runner
 
-                # 不在运行中 -> 409，且提示里要指到 ruling 那条路
+                # 不在运行中 -> 409，且提示要告诉用户「那该怎么办」。
+                # **判据是用户看得懂**：原来这句话写的是「请用 ruling
+                # （action=ABANDON）」—— ruling / step 边界这些是系统内部的说法，
+                # 用户没有理由知道它们（实测反馈就卡在这句话上）。
                 r = client.post("/api/tasks/task_nope/cancel", json={})
                 self.assertEqual(r.status_code, 409)
-                self.assertIn("ruling", r.json()["error"])
+                msg = r.json()["error"]
+                self.assertIn("放弃", msg, "要指出「在卡片里选放弃」这条路")
+                for jargon in ("ruling", "step", "AWAITING_HUMAN"):
+                    self.assertNotIn(jargon, msg, f"给用户看的话里不该有 {jargon}")
 
                 # **body 是可选的**（契约写的是 `{reason?}`）。原来的判据是
                 # `req.headers.get("content-length")` —— 那是字符串，"0" 为真，

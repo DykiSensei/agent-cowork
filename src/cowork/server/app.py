@@ -9,9 +9,10 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
-from ..cli import PROVIDERS
+from ..cli import PROVIDERS, available_providers
 from ..llm.effort import LEVELS as EFFORT_LEVELS
 from ..store import SqliteStore
+from ..workspace import resolve_workspace
 from .runner import Runner
 from .settings_io import DEFAULTS, GLOBAL_KEYS, effective_env, key_hint, update_env
 from .tap import EventHub, TapStore
@@ -100,9 +101,18 @@ def create_app(
         goal = (body.get("goal") or "").strip()
         if not goal:
             return err(400, "goal 不能为空")
+        mode = (body.get("mode") or "new").strip()
+        if mode not in ("new", "takeover"):
+            return err(400, f"mode 只能是 new / takeover，收到 {mode!r}")
         try:
-            plan_id = runner.start_plan(goal)
-        except RuntimeError as exc:
+            plan_id = runner.start_plan(
+                goal,
+                ws=(body.get("workspace") or "").strip() or None,
+                takeover=mode == "takeover",
+            )
+        except ValueError as exc:      # 工作区路径不能用（WorkspaceError）
+            return err(400, str(exc))
+        except RuntimeError as exc:    # 没配 key 之类
             return err(400, str(exc))
         return {"plan_id": plan_id}
 
@@ -118,7 +128,15 @@ def create_app(
         if not instruction:
             return err(400, "instruction 不能为空")
         if not runner.intervene(task_id, instruction):
-            return err(409, "任务不在运行中 —— 介入只对运行中的任务生效（下一个 step 边界）")
+            # 文案是给**用户**看的，不是给我们自己看的：「step 边界」是这套系统
+            # 内部的说法，用户没有理由知道它。说清楚三件事就够 ——
+            # 现在是什么状态、这条消息去哪了、接下来该干什么。
+            return err(
+                409,
+                "这个任务现在没有在跑，所以这句话没有送出去。"
+                "如果它在等你拍板，请在上方的卡片里选一个处理方式；"
+                "如果它已经结束了，可以发布一个新任务。",
+            )
         return {"accepted": True}
 
     @app.post("/api/tasks/{task_id}/cancel", status_code=202)
@@ -129,8 +147,9 @@ def create_app(
             # 否则界面只能给用户一个「409」
             return err(
                 409,
-                "任务不在运行中。已经挂起的任务请用 ruling（action=ABANDON），"
-                "已经终局的任务不需要取消",
+                "这个任务现在没有在跑，没什么可停的。"
+                "如果它在等你拍板，在上方卡片里选「放弃这个任务」；"
+                "如果它已经结束了，就不用停了。",
             )
         return {"accepted": True}
 
@@ -285,6 +304,10 @@ def create_app(
                 k: env.get(GLOBAL_KEYS[f"models.{k}"], v)
                 for k, v in DEFAULTS["models"].items()
             },
+            "providers": {
+                k: env.get(GLOBAL_KEYS[f"providers.{k}"], v)
+                for k, v in DEFAULTS["providers"].items()
+            },
             "effort": {
                 k: env.get(GLOBAL_KEYS[f"effort.{k}"], v)
                 for k, v in DEFAULTS["effort"].items()
@@ -292,6 +315,9 @@ def create_app(
             "review_writes": env.get(
                 GLOBAL_KEYS["review_writes"], DEFAULTS["review_writes"]
             ),
+            "workspace": env.get(GLOBAL_KEYS["workspace"], ""),
+            # 界面要显示「没配的话东西会落在哪」—— 这个问题得有答案
+            "workspace_default": str(runner.workspace_root()),
         }
         return out
 
@@ -313,6 +339,15 @@ def create_app(
                     if value not in ("on", "off"):
                         return err(400, f"review_writes 只能是 on / off，收到 {raw!r}")
                     pairs[env_name] = value
+                elif flat == "workspace":
+                    value = str(raw or "").strip()
+                    if value:
+                        # 路径不能用要当场说，别等到下一个任务起跑才炸
+                        try:
+                            value = str(resolve_workspace(value))
+                        except ValueError as exc:
+                            return err(400, str(exc))
+                    pairs[env_name] = value
                 else:
                     pairs[env_name] = str(raw or "").strip()
                 continue
@@ -320,6 +355,18 @@ def create_app(
                 value = str(body[section][key] or "").strip()
                 if section == "effort" and value not in EFFORT_LEVELS:
                     return err(400, f"未知推理挡位: {value!r}")
+                if section == "providers" and value:
+                    # 只能选**已经配了 key 的**那几家：选一家没 key 的，
+                    # 任务会在起跑时才失败，而那时人已经离开设置页了。
+                    # 复核者多一个 none（明确关掉独立复核，退回同模型）。
+                    allowed = set(available_providers())
+                    if key == "reviewer":
+                        allowed.add("none")
+                    if value not in allowed:
+                        return err(
+                            400,
+                            f"{value!r} 这家还没配 API key（可选：{sorted(allowed)}）",
+                        )
                 pairs[env_name] = value
         if pairs:
             try:

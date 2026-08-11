@@ -54,6 +54,11 @@ def thread_list(store) -> list[dict[str, Any]]:
     父任务本身可能不在 tasks 表里（`Scheduler` 拿到的是一组现成的 spec，
     没有人建过那个父任务），那就用 parent_id 合成一条 —— 否则复合任务在
     列表里会整个消失。
+
+    **「还没有任何子任务」的线程也要收**：`POST /tasks` 一落地就写了人的原话
+    （一条 `human` 事件），但子任务要等派发之后各自的 Orchestrator 起跑才有
+    tasks 行。中间那一段（拆解中、刚派发）线程只存在于 events 里 —— 不收的话
+    用户刚发布的任务在侧栏里根本不出现，而它明明正在花钱。
     """
     states = list(store.list_tasks())
     by_id = {s.spec.id: s for s in states}
@@ -73,8 +78,42 @@ def thread_list(store) -> list[dict[str, Any]]:
             continue  # 父任务是真实存在的任务，上面已经收了
         rows.append(_synthetic_parent(parent_id, kids, _root_goal(store, parent_id)))
 
+    seen = {r["task_id"] for r in rows}
+    for tid in _event_only_threads(store):
+        if tid in seen or tid in by_id:
+            continue
+        rows.append(_pending_thread(store, tid))
+
     rows.sort(key=lambda r: (r["updated_at"] or 0, r["task_id"]), reverse=True)
     return rows
+
+
+def _event_only_threads(store) -> list[str]:
+    """有事件的线程 id。老 Store 没有这个方法就当没有（返回空）。"""
+    getter = getattr(store, "event_task_ids", None)
+    return list(getter()) if getter else []
+
+
+def _pending_thread(store, task_id: str) -> dict[str, Any]:
+    """只有事件、还没有任何任务行的线程 —— 「已发布，还没跑起来」。
+
+    状态给 PENDING 而不是 RUNNING：这时候确实还没有任何 Subagent 在跑。
+    拆解本身是架构师在花钱，那件事的进度在详情页的时间线里看得到。
+    """
+    events = _events(store, task_id, 0)
+    goal = _root_goal(store, task_id)
+    title = goal.splitlines()[0][:80] if goal else "新任务（拆解中）"
+    return {
+        "task_id": task_id,
+        "title": title,
+        "status": TaskStatus.PENDING.value,
+        "composite": True,
+        "tokens_used": 0,
+        "revision": 1,
+        "current_step": 0,
+        "terminal": False,
+        "updated_at": events[0].created_at if events else None,
+    }
 
 
 def _root_goal(store, task_id: str) -> str:
@@ -136,10 +175,15 @@ def task_detail(store, task_id: str, *, after_seq: int = 0) -> dict[str, Any] | 
     `after_seq` 传上次拿到的最大 seq 就是增量拉取，够 SSE 断线重连用。
     """
     children = [s for s in store.list_tasks() if s.spec.parent_id == task_id]
-    if children:
+    state = store.load_task(task_id)
+    # 「线程存在但还没有任何任务行」也要给得出详情：`POST /tasks` 之后到
+    # 子任务起跑之间有一段真空期，而界面在派发成功那一刻就会切过来。
+    # 那时候回 404 的话，前端拿到的是一个错误 —— 实测就是这样：刚发布完
+    # 整页变成「连不上服务」，刷新一下又好了（那时子任务已经起来了）。
+    # **线程的存在性看事件，不看 tasks 行**（同 §11.18 那条：事件是线程级的）。
+    if children or (state is None and _events(store, task_id, 0)):
         return _composite_detail(store, task_id, children, after_seq)
 
-    state = store.load_task(task_id)
     if state is None:
         return None
     signals = {s.id: s.to_dict() for s in store.signals_for(task_id)}
@@ -148,6 +192,8 @@ def task_detail(store, task_id: str, *, after_seq: int = 0) -> dict[str, Any] | 
     return {
         "kind": "single",
         "state": state.to_dict(),
+        # 单任务也要有「此刻在做什么」—— 复合任务那边是一份 map，这边是一份
+        "progress": task_progress(store, state),
         "events": events,
         # 正文按 id 索引给出：事件里只有 ref_id，界面拿它查这两张表。
         # 内联进事件会让同一条信号在响应里出现两次，而它们会很长。
@@ -177,6 +223,18 @@ def _composite_detail(
     return {
         "kind": "composite",
         "state": None,
+        # **每个在等人的子任务，等的是什么**。原来只给 `pending_children`
+        # 一串 id：界面知道「有人在等」，却拿不到升级原因和系统建议，
+        # 于是复合线程上根本渲染不出裁决表单 —— 而子任务被折进父线程、
+        # 侧栏里点不到，人因此完全无处答复（实测卡在这里）。
+        "pending": {
+            k.spec.id: pending_ruling(store, k.spec.id)
+            for k in children
+            if k.status is TaskStatus.AWAITING_HUMAN
+        },
+        # 「此刻各自在做什么」：进度、成本、最后一个动作。
+        # 没有它的时候界面上只有一个状态点，人看不出系统是在干活还是卡住了。
+        "progress": {k.spec.id: task_progress(store, k) for k in children},
         # 人最初说的那句话。它也在 events 里（第一条 human 事件），这里再给一份是
         # 因为界面的标题栏要它，而标题栏不该去翻时间线
         "root_goal": _root_goal(store, task_id),
@@ -191,6 +249,82 @@ def _composite_detail(
             k.spec.id for k in children if k.status is TaskStatus.AWAITING_HUMAN
         ],
     }
+
+
+def task_progress(store, state: TaskState) -> dict[str, Any]:
+    """这个任务此刻在做什么 —— 界面上「进度」那一栏的全部素材。
+
+    **只回答确定性的问题**：跑到第几步、烧了多少、最后一个动作是什么。
+    不做任何判断（「是不是卡住了」「顺不顺利」），那要么归架构师、要么归人。
+
+    最后一个动作从最新 checkpoint 的 `reasoning_trace` 末尾取 —— 那是 Subagent
+    真正干过的事，比日志行准。终局任务不读 checkpoint：它已经不在做任何事，
+    而 checkpoint 里带着整份上下文，读它只是白花 IO。
+
+    动作按**结构**返回、不拼成句子：措辞归界面层（`ui/src/copy.ts` 那一套），
+    同一份数据在专业版和简洁版要说成两种话。
+    """
+    spec = state.spec
+    out: dict[str, Any] = {
+        "task_id": spec.id,
+        "goal": spec.goal,
+        "status": state.status.value,
+        "terminal": state.status in TERMINAL,
+        "revision": spec.revision,
+        "agent_id": state.agent_id,
+        "current_step": state.current_step,
+        "max_steps": spec.max_steps,
+        "tokens_used": state.tokens_used,
+        "token_budget": spec.token_budget,
+        "scope": list(spec.scope),
+        # 产物落在哪 —— 「我的东西在哪」得有答案，而它只在 spec.sandbox 里
+        "workspace": spec.sandbox.workspace if spec.sandbox else "",
+        "last_action": None,
+        "last_result": None,
+        "produced": [],
+    }
+    if state.status in TERMINAL or not state.checkpoint_id:
+        return out
+
+    loader = getattr(store, "load_checkpoint", None)
+    cp = loader(state.checkpoint_id) if loader else None
+    if cp is None:
+        return out
+    ctx = cp.agent_context
+    out["produced"] = [a.content_ref for a in ctx.produced]
+    for entry in reversed(ctx.reasoning_trace):
+        role = entry.get("role")
+        if role == "assistant" and out["last_action"] is None:
+            action = entry.get("action") or {}
+            out["last_action"] = {
+                "step": entry.get("step"),
+                "kind": action.get("kind"),
+                "name": action.get("name"),
+                # 工具的第一个参数就是「对什么东西动手」——路径或命令
+                "target": _action_target(action),
+                "thought": action.get("thought") or "",
+            }
+        elif role == "tool" and out["last_result"] is None:
+            out["last_result"] = {
+                "step": entry.get("step"),
+                "name": entry.get("name"),
+                "ok": entry.get("ok"),
+                "exit_code": entry.get("exit_code"),
+                # 失败时人最想看的就是这段，成功时不给（stdout 可能很长）
+                "stderr": (entry.get("stderr") or "")[-400:] if not entry.get("ok") else "",
+            }
+        if out["last_action"] and out["last_result"]:
+            break
+    return out
+
+
+def _action_target(action: dict[str, Any]) -> str:
+    args = action.get("args") or {}
+    if "path" in args:
+        return str(args["path"])
+    if "command" in args:
+        return " ".join(str(x) for x in args["command"])
+    return action.get("summary") or ""
 
 
 def _last_payload(store, task_id: str, kind: str) -> dict[str, Any] | None:

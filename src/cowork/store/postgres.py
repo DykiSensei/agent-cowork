@@ -299,6 +299,12 @@ class PostgresStore:
                 continue  # 另一个写入者抢到了这个号，重取
         raise RuntimeError(f"events 取号连续 5 次撞号: task_id={ev.task_id}")
 
+    def event_task_ids(self) -> list[str]:
+        """有事件的线程 id（理由见 SqliteStore 的同名方法）。"""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT task_id FROM events")
+            return [r["task_id"] for r in cur.fetchall()]
+
     def events_for(self, task_id: str, after_seq: int = 0) -> list[TaskEvent]:
         with self.conn.cursor() as cur:
             cur.execute(

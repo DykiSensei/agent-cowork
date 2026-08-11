@@ -321,6 +321,131 @@ class TestCompositeDetail(unittest.TestCase):
         self.assertTrue(rows[0]["composite"])
 
 
+class TestThreadIsMoreThanItsTasks(unittest.TestCase):
+    """线程的存在性看**事件**，不看 tasks 行。
+
+    `POST /tasks` 一落地就写了人的原话，而子任务要等派发之后各自的 Orchestrator
+    起跑才有 tasks 行。中间那一段（拆解中、刚派发）线程只活在 events 里。
+
+    实测撞到的就是这段真空期：派发成功、界面切到新线程，详情回 404，
+    **整页变成「连不上服务」，刷新一下又好了**（那时子任务已经起来了）。
+    """
+
+    def setUp(self):
+        self.store = SqliteStore()
+        self.root = "task_root1"
+        self.store.append_event(
+            TaskEvent(task_id=self.root, kind="human", text="做一个 CSV 转换器")
+        )
+
+    def test_detail_is_available_before_any_subtask_exists(self):
+        detail = views.task_detail(self.store, self.root)
+
+        self.assertIsNotNone(detail, "有事件就是有线程，不能回 None（那会变成 404）")
+        self.assertEqual(detail["kind"], "composite")
+        self.assertEqual(detail["tasks"], {})
+        self.assertEqual(detail["root_goal"], "做一个 CSV 转换器")
+        self.assertEqual(detail["pending"], {})
+
+    def test_it_shows_up_in_the_list_too(self):
+        """详情有、列表没有的话，人刚发布的任务在侧栏里根本不出现。"""
+        rows = views.thread_list(self.store)
+
+        self.assertEqual([r["task_id"] for r in rows], [self.root])
+        self.assertEqual(rows[0]["title"], "做一个 CSV 转换器")
+        self.assertFalse(rows[0]["terminal"])
+
+    def test_a_task_that_really_does_not_exist_is_still_none(self):
+        self.assertIsNone(views.task_detail(self.store, "task_nope"))
+
+
+class TestCompositePendingAndProgress(unittest.TestCase):
+    """复合线程上，人要能看出「谁在等我、等什么」和「各自在做什么」。
+
+    子任务被折进父线程（侧栏里点不到），所以这两样东西**只能**从复合详情里给。
+    原来只有一串 `pending_children` 的 id：界面知道有人在等，却拿不到升级原因和
+    系统建议，于是渲染不出裁决表单 —— 实测就卡在这里，任务停着而人无处答复。
+    """
+
+    def setUp(self):
+        self.store = SqliteStore()
+        self.root = "task_rootc"
+        kid = TaskState(spec=spec("t_kid", parent=self.root), status=TaskStatus.AWAITING_HUMAN)
+        kid.checkpoint_id = None
+        self.store.save_task(kid)
+        self.kid = kid
+        # 挂起那条占位裁决 —— pending_ruling 要靠它给出「等的是什么」
+        from cowork.types import Decider, DecisionRecord
+
+        self.store.save_decision(
+            DecisionRecord(
+                task_id="t_kid", trigger=[], decider=Decider.LLM, action=Action.CONTINUE,
+                rationale="需要人决策但无介入入口，任务挂起。",
+                escalation_reason="决策是 ABANDON —— 放弃对该任务不可逆，需人确认",
+                suggestion={"action": "ABANDON", "rationale": "证据为空",
+                            "complexity_score": 0.9, "spec_changes": {}},
+            )
+        )
+
+    def test_pending_carries_the_ruling_material_per_child(self):
+        detail = views.task_detail(self.store, self.root)
+
+        self.assertEqual(detail["pending_children"], ["t_kid"])
+        pending = detail["pending"]["t_kid"]
+        self.assertIn("ABANDON", pending["reason"])
+        self.assertEqual(pending["suggestion"]["action"], "ABANDON")
+
+    def test_progress_says_what_each_child_is_doing(self):
+        detail = views.task_detail(self.store, self.root)
+        p = detail["progress"]["t_kid"]
+
+        self.assertEqual(p["status"], "AWAITING_HUMAN")
+        self.assertEqual(p["max_steps"], self.kid.spec.max_steps)
+        self.assertEqual(p["goal"], "干活")
+
+    def test_progress_reports_the_last_action_from_the_checkpoint(self):
+        """「在做什么」取自 reasoning_trace 末尾 —— 那是它真干过的事，比日志准。"""
+        from cowork.types import Checkpoint
+
+        ctx = AgentContext(task_spec=self.kid.spec)
+        ctx.reasoning_trace = [
+            {"role": "assistant", "step": 3,
+             "action": {"kind": "tool_call", "name": "write_file",
+                        "args": {"path": "out.py", "content": "<40 chars>"},
+                        "thought": "先把骨架写出来"}},
+            {"role": "tool", "step": 3, "name": "write_file", "ok": True, "exit_code": 0},
+        ]
+        cp = Checkpoint(task_id="t_kid", step=3, agent_context=ctx)
+        self.store.save_checkpoint(cp)
+        running = TaskState(spec=self.kid.spec, status=TaskStatus.RUNNING,
+                            checkpoint_id=cp.id, current_step=3)
+        self.store.save_task(running)
+
+        p = views.task_detail(self.store, self.root)["progress"]["t_kid"]
+        self.assertEqual(p["last_action"]["name"], "write_file")
+        self.assertEqual(p["last_action"]["target"], "out.py")
+        self.assertEqual(p["last_action"]["thought"], "先把骨架写出来")
+        self.assertTrue(p["last_result"]["ok"])
+
+    def test_terminal_tasks_do_not_pay_for_a_checkpoint_load(self):
+        """终局任务已经不在做任何事，而 checkpoint 里带着整份上下文。"""
+        done = TaskState(spec=self.kid.spec, status=TaskStatus.COMPLETED,
+                         checkpoint_id="ckpt_whatever")
+        self.store.save_task(done)
+
+        loads = []
+        real = self.store.load_checkpoint
+        self.store.load_checkpoint = lambda cid: (loads.append(cid), real(cid))[1]
+        try:
+            p = views.task_progress(self.store, done)
+        finally:
+            self.store.load_checkpoint = real
+
+        self.assertEqual(loads, [])
+        self.assertIsNone(p["last_action"])
+        self.assertTrue(p["terminal"])
+
+
 class TestPendingRuling(unittest.TestCase):
     """「等你拍板」那张卡片要的东西，能不能从存储里取出来。"""
 

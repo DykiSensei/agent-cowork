@@ -377,6 +377,17 @@ class SqliteStore:
         return ev
 
     @_synchronized
+    def event_task_ids(self) -> list[str]:
+        """有事件的线程 id。
+
+        存在的理由：**线程的存在性看事件，不看 tasks 行**。一次拆解在派发之前
+        只有 events（人的原话写在 root 上），子任务要等各自的 Orchestrator
+        起跑才有 tasks 行 —— 中间那段真空期里，列表不查这张表就看不见它。
+        """
+        rows = self.conn.execute("SELECT DISTINCT task_id FROM events").fetchall()
+        return [r["task_id"] for r in rows]
+
+    @_synchronized
     def events_for(self, task_id: str, after_seq: int = 0) -> list[TaskEvent]:
         """按 seq 取事件。`after_seq` 给 SSE 增量推送用：只要比它新的。"""
         rows = self.conn.execute(
