@@ -102,21 +102,51 @@ class TestCaseTable(unittest.TestCase):
             else:
                 self.assertTrue(case.defect, f"{case.id} 是正例但没写缺陷形态")
 
-    def test_sound_cases_never_touch_goal_or_scope_or_limits(self):
-        """负例的判据要能一句话说清：只追加验收标准，不动目标、边界和上限。
+    def test_negatives_are_not_all_the_easy_shape(self):
+        """**负例不能全是「只加验收标准」。**
 
-        这条不是风格要求 —— 它是「改得对」的操作性定义。一个动了 goal 的改动
-        是不是恰当，需要读懂上下文才能判断，那种用例放进负例就是在给自己挖坑
-        （§11.11 第一轮栽的正是这个）。
+        第一版就是那样，于是 FPR=0 不可信：只追加标准的改动太好认，
+        复核者可能只是学会了「加标准 = 放行」。真实世界里合法的改动会包含
+        改 goal / 扩 scope / 调上限，那一侧当时完全没测到。
+
+        现在要求负例里至少有三条动了这些字段。
         """
-        for case in ALL_CASES:
-            if not case.sound:
-                continue
-            keys = set(case.verdict.spec_changes)
-            self.assertEqual(
-                keys, {"added_criteria"},
-                f"{case.id} 是负例，却改了 {keys - {'added_criteria'}}",
-            )
+        hard = [
+            c for c in ALL_CASES
+            if c.sound and set(c.verdict.spec_changes) - {"added_criteria"}
+        ]
+        self.assertGreaterEqual(len(hard), 3, "负例太好认了，FPR 会虚低")
+
+    def test_each_risky_field_has_a_sound_and_an_unsound_case(self):
+        """改同一个字段的正负例要成对出现。
+
+        这是这张表最要紧的结构：`goal` / `scope` / 上限这三类改动，
+        既有合法的也有不合法的，**差别只在证据**。成对之后，
+        复核者靠「见 goal 就报」这种字段模式匹配拿不到分 —— 它必须读证据。
+        """
+        for field in ("goal", "scope", "max_steps"):
+            def touches(c):
+                ks = set(c.verdict.spec_changes)
+                if field == "max_steps":  # 上限类算一族
+                    return bool(ks & {"max_steps", "token_budget", "deadline_s"})
+                return field in ks
+
+            sound = [c.id for c in ALL_CASES if c.sound and touches(c)]
+            unsound = [c.id for c in ALL_CASES if not c.sound and touches(c)]
+            self.assertTrue(sound, f"改 {field} 的负例一个都没有 —— 那一侧测不到")
+            self.assertTrue(unsound, f"改 {field} 的正例一个都没有")
+
+    def test_at_least_three_cases_per_defect_shape(self):
+        """每种形态 3 个以上，才谈得上「测的是这种缺陷」而不是「测的是那一个用例」。
+
+        第一版每种形态只有一个用例，`--repeat 5` 跑的是**同一个用例五次** ——
+        那测的是稳定性，不是覆盖率。据此改提示词就是在拟合单个用例。
+        """
+        from collections import Counter
+
+        counts = Counter(c.defect for c in ALL_CASES if not c.sound)
+        for defect, n in counts.items():
+            self.assertGreaterEqual(n, 3, f"{defect} 只有 {n} 个用例，结论不可外推")
 
     def test_select_cases_filters(self):
         self.assertEqual(len(select_cases()), len(ALL_CASES))

@@ -14,10 +14,11 @@ Subagent 是薄执行层，Runtime 是完全确定性的（不含任何 LLM 调�
 `HumanGate` 的签名或信号类型时，那份文档必须同步改。
 
 当前进度：M0–M7 全部完成；M8（写入侧复核，改 TaskSpec 前让复核者看一眼）代码完成、
-判别力已实测（**kimi J 0.886 / deepseek 0.829，FPR 两边 0/20**，§11.19），
-**默认仍关着**（`review_writes=True` 启用）。两个复核者的盲区**互补**，
-选型按**漏报代价**定而不是按 J：kimi 漏的 `non_responsive` 下一轮会被「指纹重复」
-的确定性判据接住，deepseek 漏的两种没兜底 —— 所以这一层用 kimi。
+判别力已实测（26 用例，**deepseek J 0.963 / kimi 0.907，FPR 两边 0/24**，§11.19），
+**默认仍关着**（`review_writes=True` 启用），复核者选 **deepseek**。
+**注意这个结论翻过一次**：11 个用例时看着是 kimi 更好，扩到每种缺陷形态 3 个用例
+之后反了过来 —— 当时判定的「deepseek 在某一族上弱」其实是它恰好在那一两个用例上
+翻车。**一种形态一个用例时，用例难度和形态难度分不开。**
 
 **M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
 Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAPI，
@@ -48,7 +49,7 @@ Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAP
 pip install -e .                                  # 或 set PYTHONPATH=src（仅 CLI 需要）
 
 docker compose up -d postgres litellm             # postgres:5433 / litellm:4000
-python -m unittest discover -s tests -t .         # 398 个测试。用 unittest，没引 pytest
+python -m unittest discover -s tests -t .         # 400 个测试。用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -139,7 +140,7 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
 
 ## 测试策略
 
-- 398 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
+- 400 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
 - **同一场景跨运行方差很大**（中断 0–5 次，token 0–50k）：单次运行不能作为
   参数或结论的依据，**也不能拿它写断言**。
 - **改提示词必须两侧都测**（正例 + 反例）：M5a 第一版只看不可解侧是「大胜」，
@@ -147,6 +148,12 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
   `review_ab*.jsonl` / `plan_ab.jsonl` 是现成基线。
 - 确定性护栏是兜底不是主力，别拿护栏命中数当改动生效的证据。
 - 对照实验的负例最容易是自己写错；但也别改到 FPR 归零（那是在拟合测试集）。
+- **每种缺陷形态至少 3 个用例**。一种形态一个用例时，`--repeat N` 跑的是同一个
+  用例 N 次 —— 那测的是稳定性不是覆盖率，而「用例难度」和「形态难度」分不开。
+  M8 就栽在这上面：11 个用例得出的模型选型，扩到 26 个之后**排序翻转**（§11.19）。
+- **负例不能全是最容易的那一种形态**。M8 的负例一度全是「只加验收标准」，
+  于是 FPR=0 不可信；放进「合法地改 goal / 扩 scope / 调上限」并与改同一字段的
+  正例配对之后，那个 0 才有意义。
 
 ## 安全注意事项
 
