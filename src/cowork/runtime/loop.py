@@ -225,7 +225,7 @@ class StepLoop:
 
             if isinstance(action, ToolCall):
                 try:
-                    result = self._exec_tool(action)
+                    result = self._exec_tool(action, spec)
                 except ScopeViolation as exc:
                     ctx.reasoning_trace.append(
                         {"role": "runtime", "step": step, "error": str(exc)}
@@ -260,6 +260,19 @@ class StepLoop:
                     )
                     self.store.save_artifact(art)
                     ctx.produced.append(art)
+                elif action.name in ("delete_file", "move_file") and result.ok:
+                    # 产出集要跟着现实走：删掉的文件不再是产出，移动过的换个路径。
+                    # 不同步的话，验收和 PROBE 会去读一个已经不在的路径，
+                    # 而 `_produced_excerpts()` 读不到只会静默跳过 —— 又一个无声的坑。
+                    gone = action.args["path"]
+                    ctx.produced = [a for a in ctx.produced if a.content_ref != gone]
+                    if action.name == "move_file":
+                        art = Artifact(
+                            task_id=spec.id, kind="file", content_ref=action.args["to"],
+                            summary=f"step {step} 从 {gone} 移动而来",
+                        )
+                        self.store.save_artifact(art)
+                        ctx.produced.append(art)
 
                 last_ckpt = checkpoint()
 
@@ -338,13 +351,38 @@ class StepLoop:
 
     # ------------------------------------------------------------------ #
 
-    def _exec_tool(self, call: ToolCall):
+    def _exec_tool(self, call: ToolCall, spec):
+        """派发一次工具调用。
+
+        **`spec.tools` 是执行白名单，不只是一份声明。** 它以前只被
+        `escalation._irreversible_marker` 读（找 rm/curl 这类标记），而这里硬编码
+        了全部工具 —— 于是「这个任务只给读权限」这种表达根本做不到：写上
+        `tools=["read_file"]` 照样能 `run`。声明和执行必须是同一份，否则前者是
+        装饰（同 `hard_signals` 那条，见 §11.20）。
+        """
+        if spec.tools and call.name not in spec.tools:
+            raise ScopeViolation(
+                call.name, f"不在这个任务的 tools {list(spec.tools)} 里"
+            )
         if call.name == "write_file":
             return self.sandbox.write_file(call.args["path"], call.args["content"])
         if call.name == "read_file":
             return self.sandbox.read_file(call.args["path"])
         if call.name == "list_files":
-            return self.sandbox.list_files(call.args.get("path") or ".")
+            return self.sandbox.list_files(
+                call.args.get("path") or ".",
+                recursive=bool(call.args.get("recursive")),
+            )
+        if call.name == "search_files":
+            return self.sandbox.search_files(
+                call.args["pattern"], call.args.get("glob") or "**/*"
+            )
+        if call.name == "delete_file":
+            return self.sandbox.delete_file(call.args["path"])
+        if call.name == "move_file":
+            return self.sandbox.move_file(call.args["path"], call.args["to"])
+        if call.name == "fetch_url":
+            return self.sandbox.fetch_url(call.args["url"])
         if call.name == "run":
             return self.sandbox.run(list(call.args["command"]))
         raise ScopeViolation(call.name, "未声明的工具")

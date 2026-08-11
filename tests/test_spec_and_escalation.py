@@ -69,16 +69,48 @@ class TestSpecConstraints(unittest.TestCase):
         漏报一条真实的失败，比多报一条超出预期的失败贵得多。
 
         钉住它是因为两种读法都说得通，而选错的代价是静默丢信号。
+        **断言的是行为不是源码文本**：上一版查 loop.py 里有没有出现
+        "hard_signals" 这个词，结果一句注释就把它弄红了 —— 那种断言测的是措辞。
         """
-        import inspect
+        import shutil
+        import tempfile
 
-        from cowork.runtime import loop as loop_module
+        from cowork.actions import ToolCall
+        from cowork.llm.scripted import ScriptedBackend
+        from cowork.runtime.bus import SignalBus
+        from cowork.runtime.loop import StepLoop
+        from cowork.runtime.sandbox import Sandbox
+        from cowork.store import SqliteStore
+        from cowork.types import AgentContext, SandboxProfile, TaskState
 
-        gen = TaskSpec(goal="写一篇调研", acceptance=[Criterion("c", "d")],
-                       task_class=TaskClass.GENERATIVE, probe_interval_s=30)
-        self.assertNotIn(SignalType.TOOL_FAILURE, gen.hard_signals)
-        # 循环里没有任何一处拿 spec.hard_signals 做判断
-        self.assertNotIn("hard_signals", inspect.getsource(loop_module))
+        gen_ws = tempfile.mkdtemp(prefix="cowork-gen-")
+        try:
+            gen = TaskSpec(
+                goal="写一篇调研", acceptance=[Criterion("c", "d")],
+                task_class=TaskClass.GENERATIVE, probe_interval_s=30,
+                sandbox=SandboxProfile(workspace=gen_ws, allowed_binaries=("python",)),
+                scope=["out.md"],
+            )
+            self.assertNotIn(SignalType.TOOL_FAILURE, gen.hard_signals,
+                             "GENERATIVE 的声明里本来就没有它")
+
+            store = SqliteStore()
+            store.save_task(TaskState(spec=gen))
+            loop = StepLoop(bus=SignalBus(),
+                            sandbox=Sandbox(gen.sandbox, gen.scope), store=store)
+            agent = ScriptedBackend({
+                (1, 0): ToolCall(
+                    name="run",
+                    args={"command": ["python", "-c", "import sys;sys.exit(3)"]},
+                    thought="跑一下",
+                ),
+            })
+            outcome = loop.run(AgentContext(task_spec=gen), agent)
+
+            # 声明里没有 TOOL_FAILURE，但它真的发生了 —— 就该照样中断
+            self.assertIs(outcome.preempting_signal.type, SignalType.TOOL_FAILURE)
+        finally:
+            shutil.rmtree(gen_ws, ignore_errors=True)
 
     def test_bump_increments_revision(self):
         s = TaskSpec(goal="g", acceptance=[Criterion("c", "d")],

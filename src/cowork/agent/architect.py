@@ -103,7 +103,13 @@ class SpecTemplate:
 
     sandbox: SandboxProfile
     parent_id: str | None = None
-    tools: tuple[str, ...] = ("write_file", "read_file", "list_files", "run")
+    # 默认工具面。**`fetch_url` 不在里面** —— 取回的第三方内容会进
+    # reasoning_trace 再进下一轮提示词，那是一条提示词注入通道，
+    # 要由人在设置页显式打开（`COWORK_ALLOW_NETWORK`），不能是默认。
+    tools: tuple[str, ...] = (
+        "write_file", "read_file", "list_files", "search_files",
+        "delete_file", "move_file", "run",
+    )
     model: str = "claude-opus-5"
     max_steps: int = 12
     deadline_s: float = 300.0

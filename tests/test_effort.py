@@ -124,9 +124,7 @@ class TestBackendWiring(unittest.TestCase):
         b = self._backend(architect_effort="max", subagent_effort="low")
         spec = TaskSpec(goal="g", acceptance=[Criterion("c1", "d")],
                         task_class=TaskClass.TOOL_CALL)
-        b.client.replies = ['{"kind":"finish","thought":"","tool":"","path":"",'
-                            '"content":"","command":[],"output_json":"{}",'
-                            '"summary":"s","signal_type":"","detail":""}']
+        b.client.replies = [_action_json(kind="finish", output_json="{}", summary="s")]
         b.next_step(AgentContext(task_spec=spec))
         self.assertEqual(b.client.calls[-1]["reasoning_effort"], "low")
 
@@ -188,6 +186,25 @@ def _sig():
     from cowork.types import Signal
 
     return Signal(type=SignalType.AMBIGUITY, task_id="t1", source=SignalSource.SUBAGENT)
+
+
+def _action_json(**over) -> str:
+    """一条合规的动作回复。
+
+    **按 ACTION_SCHEMA 的 required 自动补全**，不要手写字段列表 ——
+    加一个工具就要加参数字段，手写的固定回复会在那时静默过期
+    （这条测试就这么红过一次）。
+    """
+    import json
+
+    from cowork.llm.anthropic_backend import ACTION_SCHEMA
+
+    blank: dict = {}
+    for key in ACTION_SCHEMA["required"]:
+        kind = ACTION_SCHEMA["properties"][key]["type"]
+        blank[key] = {"string": "", "array": [], "boolean": False}[kind]
+    blank.update(over)
+    return json.dumps(blank, ensure_ascii=False)
 
 
 class _Fake:

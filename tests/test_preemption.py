@@ -33,7 +33,8 @@ class LoopFixture(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.ws, ignore_errors=True)
 
-    def make(self, steps, *, scope=("out.py",), max_steps=6, acceptance=None):
+    def make(self, steps, *, scope=("out.py",), max_steps=6, acceptance=None,
+             tools=None):
         spec = TaskSpec(
             goal="写文件",
             acceptance=acceptance or [Criterion("c1", "写出来就行")],
@@ -41,6 +42,11 @@ class LoopFixture(unittest.TestCase):
             sandbox=SandboxProfile(workspace=str(self.ws), allowed_binaries=("python",)),
             scope=list(scope),
             max_steps=max_steps,
+            # 默认给全套：这些用例大多在测工具本身，不测白名单
+            tools=list(tools) if tools is not None else [
+                "write_file", "read_file", "list_files", "search_files",
+                "delete_file", "move_file", "run",
+            ],
         )
         self.store.save_task(__import__("cowork").TaskState(spec=spec))
         sandbox = Sandbox(spec.sandbox, spec.scope)
@@ -285,6 +291,147 @@ class TestFilesystemErrorsStayInsideTheLoop(LoopFixture):
         self.assertIs(outcome.status, TaskStatus.INTERRUPTED)
         self.assertIs(outcome.preempting_signal.type, SignalType.TOOL_FAILURE)
         self.assertIn("写入失败", outcome.preempting_signal.raw_evidence)
+
+
+class TestExpandedToolSurface(LoopFixture):
+    """M10 加的四个工具。每一个都是在补一条「模型会绕路」的缺口（§11.6f 的模式）。"""
+
+    def test_search_files_replaces_ten_read_files(self):
+        """接手已有项目时最贵的那一步：定位代码。
+
+        没有它只能 list_files + read_file 逐个试，而单个子任务默认 12 步。
+        """
+        (self.ws / "pkg").mkdir()
+        (self.ws / "pkg" / "parser.py").write_text(
+            "def parse_line(s):\n    return s.split(',')\n", encoding="utf-8")
+        (self.ws / "pkg" / "cli.py").write_text("import parser\n", encoding="utf-8")
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="search_files", args={"pattern": r"def parse_line"},
+                             thought="找它定义在哪"),
+            (1, 1): Finish(output={}, summary="找到了"),
+        })
+        loop.run(ctx, agent)
+
+        hit = [r for r in ctx.reasoning_trace if r.get("role") == "tool"][0]
+        self.assertTrue(hit["ok"])
+        self.assertIn("pkg/parser.py:1:", hit["stdout"])
+        self.assertNotIn("cli.py", hit["stdout"])
+
+    def test_search_skips_tooling_noise(self):
+        (self.ws / "node_modules").mkdir()
+        (self.ws / "node_modules" / "x.js").write_text("needle", encoding="utf-8")
+        (self.ws / "real.txt").write_text("needle", encoding="utf-8")
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="search_files", args={"pattern": "needle"}, thought=""),
+            (1, 1): Finish(output={}, summary=""),
+        })
+        loop.run(ctx, agent)
+        out = [r for r in ctx.reasoning_trace if r.get("role") == "tool"][0]["stdout"]
+        self.assertIn("real.txt", out)
+        self.assertNotIn("node_modules", out)
+
+    def test_search_miss_is_not_a_hard_failure(self):
+        """搜不到是有效结果，不是故障 —— 同 read_file 探测不存在的文件。"""
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="search_files", args={"pattern": "找不到我"},
+                             thought=""),
+            (1, 1): Finish(output={}, summary=""),
+        }, max_steps=4)
+        outcome = loop.run(ctx, agent)
+        self.assertIs(outcome.status, TaskStatus.COMPLETED, "不该因为搜不到就中断")
+
+    def test_delete_is_bound_by_scope(self):
+        """**这是 delete_file 存在的全部理由。**
+
+        没有它，模型删东西只能 `run python -c "os.remove(...)"` —— 而 run 在本地
+        沙箱里不受 scope 约束。缺一个受约束的删除，等于把删除推到唯一一条完全
+        不受约束的路上。
+        """
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="delete_file", args={"path": "protected.txt"},
+                             thought="删掉它"),
+        }, scope=("out.py",), max_steps=3)
+        outcome = loop.run(ctx, agent)
+
+        self.assertIs(outcome.preempting_signal.type, SignalType.SCOPE_VIOLATION)
+        self.assertTrue((self.ws / "protected.txt").exists(), "越界的删除不能真的发生")
+
+    def test_delete_updates_the_produced_set(self):
+        """删掉的文件不再是产出 —— 不同步的话验收和 PROBE 会去读一个不在的路径。"""
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="write_file", args={"path": "out.py", "content": "x"},
+                             thought=""),
+            (1, 1): ToolCall(name="delete_file", args={"path": "out.py"}, thought=""),
+            (1, 2): Finish(output={}, summary=""),
+        })
+        loop.run(ctx, agent)
+        self.assertEqual([a.content_ref for a in ctx.produced], [])
+
+    def test_move_needs_both_ends_in_scope(self):
+        """搬到 scope 外等于删，从 scope 外搬进来等于写 —— 两端都要判。"""
+        (self.ws / "out.py").write_text("x", encoding="utf-8")
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="move_file",
+                             args={"path": "out.py", "to": "escaped.py"}, thought=""),
+        }, scope=("out.py",), max_steps=3)
+        outcome = loop.run(ctx, agent)
+        self.assertIs(outcome.preempting_signal.type, SignalType.SCOPE_VIOLATION)
+
+    def test_move_rewrites_the_produced_path(self):
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="write_file", args={"path": "a.py", "content": "x"},
+                             thought=""),
+            (1, 1): ToolCall(name="move_file", args={"path": "a.py", "to": "b.py"},
+                             thought=""),
+            (1, 2): Finish(output={}, summary=""),
+        }, scope=("a.py", "b.py"))
+        loop.run(ctx, agent)
+        self.assertEqual([a.content_ref for a in ctx.produced], ["b.py"])
+
+    def test_recursive_listing_costs_one_step_instead_of_many(self):
+        (self.ws / "a" / "b").mkdir(parents=True)
+        (self.ws / "a" / "b" / "deep.txt").write_text("x", encoding="utf-8")
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="list_files", args={"path": ".", "recursive": True},
+                             thought=""),
+            (1, 1): Finish(output={}, summary=""),
+        })
+        loop.run(ctx, agent)
+        out = [r for r in ctx.reasoning_trace if r.get("role") == "tool"][0]["stdout"]
+        self.assertIn("a/b/deep.txt", out)
+
+    def test_tools_is_a_real_allowlist_now(self):
+        """`spec.tools` 以前只是声明：写上 ["read_file"] 照样能 run。
+
+        声明和执行必须是同一份，否则前者是装饰（同 hard_signals 那条的反面 ——
+        那个字段的语义是「预期」，这个字段的语义是「许可」）。
+        """
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="run", args={"command": ["python", "-c", "pass"]},
+                             thought=""),
+        }, tools=("read_file",), max_steps=3)
+        outcome = loop.run(ctx, agent)
+
+        self.assertIs(outcome.preempting_signal.type, SignalType.SCOPE_VIOLATION)
+        self.assertIn("tools", outcome.preempting_signal.payload["reason"])
+
+    def test_network_is_off_unless_the_task_says_so(self):
+        """fetch_url 取回的是第三方文本，会进 trace 再进下一轮提示词。
+
+        那是一条提示词注入通道，所以它必须由人显式打开，不能是默认。
+        """
+        from cowork.agent.architect import SpecTemplate
+        from cowork.types import SandboxProfile
+
+        default = SpecTemplate(sandbox=SandboxProfile(workspace=str(self.ws)))
+        self.assertNotIn("fetch_url", default.tools)
+
+        loop, agent, ctx = self.make({
+            (1, 0): ToolCall(name="fetch_url", args={"url": "http://example.com"},
+                             thought=""),
+        }, tools=("read_file",), max_steps=3)
+        outcome = loop.run(ctx, agent)
+        self.assertIs(outcome.preempting_signal.type, SignalType.SCOPE_VIOLATION)
 
 
 class TestSoftSignalsDoNotPreempt(LoopFixture):
