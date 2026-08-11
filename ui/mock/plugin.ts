@@ -40,6 +40,12 @@ const EFFORT_LEVELS = ["off", "low", "medium", "high", "max"];
 const DEFAULT_SETTINGS = {
   base_url_override: "",
   models: { architect: "", subagent: "", triage: "" },
+  // 每个角色用哪一家（空 = 自动）。和 models 是两件事：那是模型 id，这是「谁来干」
+  providers: { architect: "", reviewer: "", subagent: "" },
+  workspace: "",
+  // 反斜杠要转义：`"C:\Users\..."` 在 TS 里 `\U` 是个未知转义，会被静默吞掉，
+  // 变成 `C:Usersyou...` —— 编译不报错，只是路径成了废话
+  workspace_default: "C:\\Users\\you\\cowork-workspaces",
   effort: { architect: "high", subagent: "medium", cheap: "off" },
   // 字符串 on/off 而不是布尔：它落到 .env，空串在那里 = 未设置 = 回落到默认
   review_writes: "on",
@@ -70,6 +76,8 @@ interface MockPlan {
   goal: string;
   asked: number;
   accepted?: boolean;
+  takeover?: boolean;
+  workspace?: string;
 }
 let mockPlan: MockPlan | null = null;
 
@@ -106,6 +114,8 @@ function mockPlanResult(p: MockPlan): unknown {
       independent: true,
     },
     dispatchable: accepted,
+    workspace: p.takeover ? p.workspace : `${p.workspace}\\${p.id}`,
+    takeover: Boolean(p.takeover),
     ruling_note: accepted ? "人确认拆解" : "",
     dispatched_root: null,
     available_providers: { deepseek: "deepseek-v4", kimi: "kimi-k3" },
@@ -158,11 +168,18 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
     // 端点在这里必须存在，否则 `npm run dev` 里那个按钮是死的，而真实服务上它是活的
     // —— mock 和服务层分叉正是 fixtures 这套东西要防的事。
     if (req.method === "POST" && url.pathname === "/api/tasks") {
-      const body = JSON.parse((await drain(req)) || "{}") as { goal?: string };
+      const body = JSON.parse((await drain(req)) || "{}") as
+        { goal?: string; workspace?: string; mode?: string };
       if (!(body.goal ?? "").trim()) {
         return sendJson(res, 400, { error: "goal 不能为空" });
       }
-      mockPlan = { id: `plan_mock${Date.now().toString(36)}`, goal: body.goal!, asked: 0 };
+      mockPlan = {
+        id: `plan_mock${Date.now().toString(36)}`,
+        goal: body.goal!,
+        asked: 0,
+        takeover: body.mode === "takeover",
+        workspace: body.workspace || DEFAULT_SETTINGS.workspace_default,
+      };
       return sendJson(res, 202, { plan_id: mockPlan.id });
     }
 

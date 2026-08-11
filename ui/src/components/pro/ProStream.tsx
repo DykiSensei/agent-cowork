@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { ActionResult } from "../../api";
 import { fmtTime, proSignalBody } from "../../copy";
+import Progress from "../Progress";
 import { translate } from "../../translate";
 import type {
   DecisionRecord,
@@ -183,10 +184,15 @@ function DecisionCard({ d }: { d: DecisionRecord }) {
 function AwaitCard({
   pending,
   ts,
+  title,
+  taskId,
   onSubmit,
 }: {
   pending: PendingRuling;
   ts: number | null;
+  /** 复合线程上等人的是某个子任务 */
+  title?: string;
+  taskId?: string;
   onSubmit: (action: string, rationale: string) => Promise<ActionResult>;
 }) {
   const sg = pending.suggestion;
@@ -228,8 +234,10 @@ function AwaitCard({
       <div className="await-card">
         <div className="await-hd">
           ⚑ AWAITING_HUMAN · 轮到你了
+          {taskId && <span className="mono t">{taskId}</span>}
           {ts != null && <span className="t">{fmtTime(ts)}</span>}
         </div>
+        {title && <div className="await-which">{title}</div>}
         <div className="esc" style={{ borderTop: "none" }}>
           <span className="flag">升级原因</span>
           <span>{pending.reason}</span>
@@ -417,18 +425,30 @@ export default function ProStream({
   const [failed, setFailed] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const events = useMemo(() => translate(detail), [detail]);
+
+  // 介入 / 取消要发给**正在跑的那个任务**。复合线程自己不是任务
+  // （root 没有 tasks 行），发给它必然 409。
+  const targets =
+    detail.kind === "composite"
+      ? Object.values(detail.progress)
+          .filter((p) => p.status === "RUNNING" || p.status === "INTERRUPTED")
+          .map((p) => ({ id: p.task_id, label: p.goal }))
+      : detail.state.status === "RUNNING" || detail.state.status === "INTERRUPTED"
+        ? [{ id: taskId, label: detail.state.goal }]
+        : [];
+  const [pick, setPick] = useState<string | null>(null);
+  const target = targets.find((t) => t.id === pick) ?? targets[0] ?? null;
+  const isRunning = targets.length > 0;
   const isAwaiting =
-    detail.kind === "single" && detail.state?.status === "AWAITING_HUMAN";
-  // 取消只对运行中的任务成立：AWAITING_HUMAN 走 ruling(ABANDON)，终局无可取消
-  const isRunning =
-    detail.kind === "single" &&
-    (detail.state?.status === "RUNNING" || detail.state?.status === "INTERRUPTED");
+    detail.kind === "composite"
+      ? detail.pending_children.length > 0
+      : detail.state.status === "AWAITING_HUMAN";
 
   const submitCancel = () => {
-    if (stopping) return;
+    if (stopping || !target) return;
     setStopping(true);
     setFailed(null);
-    void onCancel(taskId, "在界面上取消")
+    void onCancel(target.id, "在界面上取消")
       .then((r) => {
         if (!r.ok) setFailed(r.error ?? "没能取消");
       })
@@ -439,9 +459,9 @@ export default function ProStream({
     e.preventDefault();
     const input = e.currentTarget.querySelector("input")!;
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || !target) return;
     setFailed(null);
-    void onIntervene(taskId, text).then((r) => {
+    void onIntervene(target.id, text).then((r) => {
       if (!r.ok) {
         // 输入框不清 —— 这条指令没送到，人多半想改改再发
         setFailed(r.error ?? "没能送出去");
@@ -455,6 +475,8 @@ export default function ProStream({
 
   return (
     <main className="stream">
+      {/* 进度钉在时间线上方：时间线回答「发生过什么」，它回答「此刻怎么样」 */}
+      <Progress detail={detail} />
       <div className="msgs">
         {events.map((ev, i) => {
           switch (ev.kind) {
@@ -476,7 +498,11 @@ export default function ProStream({
                   key={i}
                   pending={ev.pending}
                   ts={ev.ts}
-                  onSubmit={(action, rationale) => onRuling(taskId, action, rationale)}
+                  title={ev.title}
+                  taskId={ev.taskId}
+                  onSubmit={(action, rationale) =>
+                    onRuling(ev.taskId ?? taskId, action, rationale)
+                  }
                 />
               );
             case "plan":
@@ -500,12 +526,29 @@ export default function ProStream({
       </div>
       {failed && <div className="sysbar bad show">服务端拒绝了：{failed}</div>}
       <div className="composer">
+        {targets.length > 1 && (
+          <div className="target-row">
+            发给：
+            <select value={target?.id} onChange={(e) => setPick(e.target.value)}>
+              {targets.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.id} · {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <form className="row" onSubmit={submitIntervene}>
           <input
-            placeholder="介入指令 —— 会成为新的 goal，是命令不是聊天（HUMAN_INTERVENTION 硬信号）"
+            placeholder={
+              isRunning
+                ? "介入指令 —— 会成为新的 goal，是命令不是聊天（HUMAN_INTERVENTION 硬信号）"
+                : "没有正在运行的任务可介入"
+            }
             autoComplete="off"
+            disabled={!isRunning}
           />
-          <button className="btn" type="submit">
+          <button className="btn" type="submit" disabled={!isRunning}>
             介入
           </button>
           {isRunning && (
@@ -521,9 +564,12 @@ export default function ProStream({
           )}
         </form>
         <div className="hint">
-          {detail.kind === "composite" ? (
+          {detail.kind === "composite" && isRunning ? (
             <span>
-              <b>复合任务的介入</b>应路由到对应子任务的 Orchestrator（路由选择未实现）。
+              <b>复合任务的介入路由到具体子任务</b>
+              （root 没有 tasks 行，发给它必然 409）。当前发给{" "}
+              <span className="mono">{target?.id}</span>
+              ，在它的下一个 step 边界生效。
             </span>
           ) : isAwaiting ? (
             <span>

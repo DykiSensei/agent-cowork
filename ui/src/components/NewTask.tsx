@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+
 import type { FormEvent } from "react";
-import { createTask, dispatchPlan, fetchPlan, rulePlan } from "../api";
+import { createTask, dispatchPlan, fetchPlan, fetchSettings, rulePlan } from "../api";
 import type { PlanView } from "../types";
 
 /**
@@ -107,11 +108,26 @@ export default function NewTask({
   onClose: () => void;
 }) {
   const [goal, setGoal] = useState("");
+  const [mode, setMode] = useState<"new" | "takeover">("new");
+  const [ws, setWs] = useState("");
+  const [wsDefault, setWsDefault] = useState("");
   const [planId, setPlanId] = useState<string | null>(null);
   const [plan, setPlan] = useState<PlanView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 默认工作区从设置页来 —— 「我的产物会落在哪」要在**发布之前**就看得见，
+  // 而不是跑完了再去找
+  useEffect(() => {
+    void fetchSettings()
+      .then((s) => {
+        setWsDefault(s.workspace || s.workspace_default);
+        if (!s.workspace) return;
+        setWs(s.workspace);
+      })
+      .catch(() => {});
+  }, []);
 
   // 拆解在服务端是一条后台线程，没有「拆完了」的推送保证 —— SSE 的 plan 事件到了
   // 会刷新，但轮询是那条保底：拿到终局就停，所以它不会一直转下去。
@@ -144,7 +160,7 @@ export default function NewTask({
     if (!text || busy) return;
     setBusy(true);
     setError(null);
-    void createTask(text)
+    void createTask(text, { workspace: ws.trim() || undefined, mode })
       .then((r) => {
         if (!r.ok || !r.plan_id) {
           setError(r.error ?? "服务端没有返回 plan_id");
@@ -193,12 +209,73 @@ export default function NewTask({
     return (
       <form className="nt" onSubmit={submit}>
         <div className="nt-hd">发布一个任务</div>
+        <p className="nt-lead">
+          说清你要什么就行 —— 系统会先把它拆成几步、自己复核一遍，
+          拆解通过之后才开始花钱执行。
+        </p>
+
+        {/* 从零开始 / 接手已有项目：**这不是一个选项，是两件事**。
+            接手时产物直接写进你选的目录（否则改不到已有文件），
+            而且架构师会先拿到那儿的文件清单再拆 —— 不给的话它会把一个
+            有内容的目录当空目录，从零重建一遍。 */}
+        <div className="nt-modes">
+          {(
+            [
+              ["new", "从零开始", "在一个空目录里做一件新的事"],
+              ["takeover", "接手已有项目", "目录里已经有代码/文档，在它基础上继续"],
+            ] as const
+          ).map(([m, label, hint]) => (
+            <button
+              type="button"
+              key={m}
+              className={`nt-mode${mode === m ? " on" : ""}`}
+              onClick={() => setMode(m)}
+            >
+              <b>{label}</b>
+              <span>{hint}</span>
+            </button>
+          ))}
+        </div>
+
+        <label className="nt-ws">
+          <span className="nt-ws-k">
+            {mode === "takeover" ? "接手哪个文件夹" : "产物放在哪"}
+          </span>
+          <input
+            className="nt-ws-input"
+            placeholder={wsDefault || "例：D:\\work\\my-project"}
+            value={ws}
+            onChange={(e) => setWs(e.target.value)}
+            spellCheck={false}
+          />
+        </label>
+        <div className="nt-ws-note">
+          {mode === "takeover" ? (
+            <>
+              产物**直接写进这个目录**，已有文件会被就地修改。
+              架构师会先看一眼里面有什么，再决定怎么拆。
+            </>
+          ) : (
+            <>
+              每个任务一个子目录：<code>{(ws || wsDefault) || "…"}\&lt;任务id&gt;\</code>
+              。留空就用设置页里的默认工作区。
+            </>
+          )}
+        </div>
+
         <textarea
           className="nt-input"
-          placeholder="一句话说清你要什么。系统会先拆解、复核，拆解通过后才开始执行。"
+          placeholder={
+            "例：把 data/ 下的 CSV 转成一份 Markdown 报告，" +
+            "包含每列的缺失率和一张分布表。\n\n" +
+            "写得越具体，拆出来的验收标准越准。Ctrl/⌘+Enter 提交。"
+          }
           value={goal}
           onChange={(e) => setGoal(e.target.value)}
-          rows={3}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit(e);
+          }}
+          rows={8}
           autoFocus
         />
         {error && <div className="nt-line bad">{error}</div>}
@@ -221,6 +298,11 @@ export default function NewTask({
     <div className="nt">
       <div className="nt-hd">发布一个任务</div>
       <div className="nt-goal">{goal}</div>
+      {plan?.workspace && (
+        <div className="nt-ws-note">
+          {plan.takeover ? "接手" : "产物落在"}：<code>{plan.workspace}</code>
+        </div>
+      )}
       {plan ? <StatusLine plan={plan} /> : <div className="nt-line">正在拆解…</div>}
       {plan && <ReviewNotes plan={plan} />}
       {plan && <SpecList plan={plan} />}

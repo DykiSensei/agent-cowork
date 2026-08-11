@@ -30,6 +30,29 @@ const MODEL_ROLES: { key: keyof Settings["models"]; label: string; env: string }
   { key: "triage", label: "分诊模型", env: "COWORK_TRIAGE_MODEL" },
 ];
 
+/** 三个角色分别用哪一家。**和上面的模型 id 覆盖是两件事** —— 这是「谁来干」。 */
+const PROVIDER_ROLES: {
+  key: keyof Settings["providers"];
+  label: string;
+  hint: string;
+}[] = [
+  {
+    key: "architect",
+    label: "生成者 / 架构师",
+    hint: "拆解、中断决策、验收、分诊都走它 —— 整条链最有杠杆的那几次调用",
+  },
+  {
+    key: "reviewer",
+    label: "复核者",
+    hint: "只看不改：复核拆解和写入。换一家才叫独立复核（§11.11）",
+  },
+  {
+    key: "subagent",
+    label: "Subagent",
+    hint: "真正干活的。留空 = 跟架构师同一家",
+  },
+];
+
 /** 探测结果 → 一句人话。四种状态的结论不同，不能都说成「失败」。 */
 const PROBE_TEXT: Record<ProbeResult["status"], string> = {
   ok: "可用",
@@ -210,6 +233,87 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
 
         {settings && (
           <>
+            <h2>谁来干哪一段</h2>
+            <p className="set-note">
+              只能从**已经填了 key** 的供应商里选（上面显示「已填」的那些）。
+              留空 = 自动：架构师用启动时那家，复核者自动挑一家**不同的**，
+              Subagent 跟架构师同一家。
+            </p>
+            <div className="set-card">
+              {PROVIDER_ROLES.map((r) => {
+                const ready = (providers ?? []).filter((p) => p.configured);
+                const value = settings.providers[r.key];
+                const sameAsArchitect =
+                  r.key === "reviewer" &&
+                  value &&
+                  value !== "none" &&
+                  value === settings.providers.architect;
+                return (
+                  <div className="set-row" key={r.key}>
+                    <span className="set-k">
+                      {r.label} <span className="set-env">{r.hint}</span>
+                    </span>
+                    <select
+                      className="set-text"
+                      value={value}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          providers: { ...settings.providers, [r.key]: e.target.value },
+                        })
+                      }
+                    >
+                      <option value="">自动</option>
+                      {r.key === "reviewer" && (
+                        <option value="none">关掉独立复核（退回同模型）</option>
+                      )}
+                      {ready.map((p) => (
+                        <option key={p.name} value={p.name}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    {sameAsArchitect && (
+                      <span className="set-warn" title="§11.11">
+                        和架构师同一家 —— 那不是独立复核
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+              {(providers ?? []).filter((p) => p.configured).length < 2 && (
+                <p className="set-note" style={{ margin: "2px 0 0" }}>
+                  只填了一家 key，所以现在选谁都是同一家。独立复核要至少两家。
+                </p>
+              )}
+            </div>
+
+            <h2>工作区</h2>
+            <p className="set-note">
+              任务的产物落在这里。从零开始的任务进 <code>&lt;工作区&gt;\&lt;任务id&gt;\</code>，
+              接手已有项目时直接写进你在发布页指定的那个目录。
+            </p>
+            <div className="set-card">
+              <div className="set-row">
+                <span className="set-k">
+                  默认工作区 <span className="mono set-env">COWORK_WORKSPACE</span>
+                </span>
+                <input
+                  className="set-text"
+                  placeholder={settings.workspace_default}
+                  value={settings.workspace}
+                  onChange={(e) =>
+                    setSettings({ ...settings, workspace: e.target.value })
+                  }
+                  spellCheck={false}
+                />
+              </div>
+              <p className="set-note" style={{ margin: "2px 0 0" }}>
+                留空就用 <code>{settings.workspace_default}</code>。
+                要绝对路径 —— 相对路径会落在服务进程的当前目录下，那多半不是你想放东西的地方。
+              </p>
+            </div>
+
             <h2>全局模型与推理挡位</h2>
             <p className="set-note">
               留空 = 用供应商预设。挡位词表统一 off / low / medium / high / max，

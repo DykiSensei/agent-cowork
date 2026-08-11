@@ -3,7 +3,7 @@
  * 数据形状不变，只是呈现层的一张映射表。
  */
 
-import type { DecisionRecord, Signal, TaskStatus } from "./types";
+import type { DecisionRecord, Signal, TaskProgress, TaskStatus } from "./types";
 
 export const STATUSES: TaskStatus[] = [
   "PENDING",
@@ -120,4 +120,44 @@ export function fmtTime(ts: number | null | undefined): string {
 
 export function fmtTok(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
+}
+
+// --------------------------------------------------------------------- //
+// 「此刻在做什么」（views.task_progress → 一句人话）
+// --------------------------------------------------------------------- //
+
+/**
+ * 后端只回结构（`kind` / `name` / `target`），措辞在这里。
+ *
+ * 为什么不让后端拼句子：同一个动作在专业版要显示成 `write_file out.py`，
+ * 在简洁版要显示成「正在写 out.py」—— 两种话，一份数据。
+ */
+const TOOL_VERB: Record<string, string> = {
+  write_file: "正在写",
+  read_file: "正在读",
+  list_files: "正在看目录",
+  run: "正在执行",
+};
+
+export function liteDoingText(p: TaskProgress): string {
+  if (p.status === "AWAITING_HUMAN") return "停下来等你拍板";
+  if (p.status === "COMPLETED") return "做完了";
+  if (p.status === "FAILED") return "没跑成";
+  if (p.status === "ABANDONED") return "已放弃";
+  if (p.status === "PENDING") return "排队等前面的步骤做完";
+  const a = p.last_action;
+  if (!a) return "刚开始，还没动手";
+  if (a.kind === "finish") return "在收尾，等验收";
+  if (a.kind === "soft_signal") return "报告了一个疑点，接着干";
+  const verb = TOOL_VERB[a.name ?? ""] ?? "正在操作";
+  return a.target ? `${verb} ${a.target}` : verb;
+}
+
+/** 专业版：把动作还原成它本来的样子，不做人话化。 */
+export function proDoingText(p: TaskProgress): string {
+  const a = p.last_action;
+  if (!a) return p.status;
+  if (a.kind === "finish") return "finish → 等验收";
+  if (a.kind === "soft_signal") return "soft_signal";
+  return `${a.name ?? "?"}${a.target ? ` ${a.target}` : ""}`;
 }

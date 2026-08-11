@@ -9,6 +9,7 @@ import {
   liteSignalTitle,
   liteWaitText,
 } from "../../copy";
+import Progress from "../Progress";
 import { translate } from "../../translate";
 import type {
   DecisionRecord,
@@ -77,9 +78,12 @@ function YourDecisionCard({ d }: { d: DecisionRecord }) {
 
 function WaitCard({
   pending,
+  title,
   onSubmit,
 }: {
   pending: PendingRuling;
+  /** 复合线程上等人的是某个子任务 —— 要说清楚是哪一步在等 */
+  title?: string;
   onSubmit: (action: string) => Promise<ActionResult>;
 }) {
   const [done, setDone] = useState<string | null>(null);
@@ -109,7 +113,10 @@ function WaitCard({
   ];
   return (
     <div className="l-wait">
-      <div className="l-wait-t">这件事需要你定一下</div>
+      <div className="l-wait-t">
+        这件事需要你定一下
+        {title && <span className="l-wait-which">{title}</span>}
+      </div>
       <p>{liteWaitText(pending.reason)}</p>
       {suggestion && (
         <div className="l-suggest">
@@ -240,17 +247,30 @@ export default function LiteStream({
   const [stopping, setStopping] = useState(false);
   const events = useMemo(() => translate(detail), [detail]);
 
-  // 只在「还在跑」的时候给停止按钮。已经挂起的任务要走「等你拍板」那张卡，
-  // 已经终局的没什么可停 —— 给一个必然 409 的按钮比不给更糟。
-  const running =
-    detail.kind === "single" &&
-    (detail.state?.status === "RUNNING" || detail.state?.status === "INTERRUPTED");
+  // **介入要发给正在跑的那个东西。** 复合线程自己不是任务（root 没有 tasks 行），
+  // 发给它必然 409 —— 实测就撞在这里：底下聊天框发不出去，而提示里全是黑话。
+  // 所以这里先算出「这句话该发给谁」：单任务发给它自己，复合发给在跑的子任务。
+  const targets =
+    detail.kind === "composite"
+      ? Object.values(detail.progress)
+          .filter((p) => p.status === "RUNNING" || p.status === "INTERRUPTED")
+          .map((p) => ({ id: p.task_id, label: p.goal }))
+      : detail.state.status === "RUNNING" || detail.state.status === "INTERRUPTED"
+        ? [{ id: taskId, label: detail.state.goal }]
+        : [];
+  const [pick, setPick] = useState<string | null>(null);
+  const target = targets.find((t) => t.id === pick) ?? targets[0] ?? null;
+  const running = targets.length > 0;
+  const waiting =
+    detail.kind === "composite"
+      ? detail.pending_children.length > 0
+      : detail.state.status === "AWAITING_HUMAN";
 
   const submitCancel = () => {
-    if (stopping) return;
+    if (stopping || !target) return;
     setStopping(true);
     setFailed(null);
-    void onCancel(taskId, "")
+    void onCancel(target.id, "")
       .then((r) => {
         if (!r.ok) setFailed(r.error ?? "没能停下来");
       })
@@ -261,9 +281,9 @@ export default function LiteStream({
     e.preventDefault();
     const input = e.currentTarget.querySelector("input")!;
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || !target) return;
     setFailed(null);
-    void onIntervene(taskId, text).then((r) => {
+    void onIntervene(target.id, text).then((r) => {
       if (!r.ok) {
         // **不清空输入框**：那句话还没送到，人可能想改改再发一次
         setFailed(r.error ?? "没能送出去");
@@ -277,6 +297,8 @@ export default function LiteStream({
 
   return (
     <main className="l-stream">
+      {/* 「现在在干什么」—— 时间线说的是发生过什么，这里说的是此刻怎么样 */}
+      <Progress detail={detail} lite />
       <div className="l-scroll">
         <div className="l-col">
           {events.map((ev, i) => {
@@ -308,7 +330,10 @@ export default function LiteStream({
                   <WaitCard
                     key={i}
                     pending={ev.pending}
-                    onSubmit={(action) => onRuling(taskId, action, "")}
+                    title={ev.title}
+                    // 复合线程上要发给**那个子任务**：root 没有 tasks 行，
+                    // 发给它只会得到一个 404
+                    onSubmit={(action) => onRuling(ev.taskId ?? taskId, action, "")}
                   />
                 );
               case "plan":
@@ -332,10 +357,30 @@ export default function LiteStream({
           已告诉它，等它做完手头这一小步就照你说的办。
         </div>
         {failed && <div className="l-fail">{failed}</div>}
+        {targets.length > 1 && (
+          <div className="l-target">
+            这句话说给：
+            <select value={target?.id} onChange={(e) => setPick(e.target.value)}>
+              {targets.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="row">
           <form className="row" style={{ display: "contents" }} onSubmit={submitIntervene}>
-            <input placeholder="插一句话，改变它接下来的做法…" autoComplete="off" />
-            <button type="submit">发送</button>
+            <input
+              placeholder={
+                running ? "插一句话，改变它接下来的做法…" : "现在没有在跑的步骤"
+              }
+              autoComplete="off"
+              disabled={!running}
+            />
+            <button type="submit" disabled={!running}>
+              发送
+            </button>
           </form>
           {running && (
             <button type="button" className="l-stop" onClick={submitCancel} disabled={stopping}>
@@ -344,8 +389,19 @@ export default function LiteStream({
           )}
         </div>
         <div className="l-hint">
-          你的话会直接变成它的新指令，不是闲聊。
-          {running && "「停下来」是彻底不做了，它会把手头这一小步做完就收工。"}
+          {/* **说不能做什么的时候，同时说该做什么。** 实测反馈：卡在「等你处理」
+              时聊天框发不出去，而提示只说了「任务不在运行中（下一个 step 边界）」
+              —— 既没说该去哪答复，也没人知道 step 边界是什么。 */}
+          {running ? (
+            <>
+              你的话会直接变成它的新指令，不是闲聊。它会把手头这一小步做完再照办
+              （通常一两秒）。「停下来」是彻底不做了，已经写出来的东西会留着。
+            </>
+          ) : waiting ? (
+            <>它停下来在等你拍板 —— 请在上面那张卡片里选一个处理方式，这里发消息没用。</>
+          ) : (
+            <>这条任务已经结束了，发消息不会有人收。想接着做请发布一个新任务。</>
+          )}
         </div>
       </div>
     </main>

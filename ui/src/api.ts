@@ -91,11 +91,22 @@ export function postRuling(taskId: string, action: string, rationale: string) {
 // 发布任务 → 拆解 → 裁决 → 派发（M6 §6 的 POST /tasks 与 /plans/*）
 // --------------------------------------------------------------------- //
 
-/** 发布一个目标。回来的不是任务而是**一次拆解**（plan_id）。 */
+/**
+ * 发布一个目标。回来的不是任务而是**一次拆解**（plan_id）。
+ *
+ * `mode`：`new` 从零开始（产物落在 <工作区>/<任务id>/），
+ * `takeover` 接手已有项目（**直接写进你选的那个目录**，否则改不到已有文件；
+ * 架构师会先拿到那儿的文件清单再拆）。
+ */
 export async function createTask(
   goal: string,
+  opts: { workspace?: string; mode?: "new" | "takeover" } = {},
 ): Promise<ActionResult & { plan_id?: string }> {
-  const r = await send("/api/tasks", { goal });
+  const r = await send("/api/tasks", {
+    goal,
+    workspace: opts.workspace || undefined,
+    mode: opts.mode ?? "new",
+  });
   if (!r.ok) return r;
   return { ok: true, plan_id: (r.data as { plan_id?: string })?.plan_id };
 }

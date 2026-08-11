@@ -170,6 +170,9 @@ export interface PlanView {
   ruling_note?: string;
   dispatched_root?: string | null;
   available_providers?: Record<string, string>;
+  /** 产物落在哪。新任务是 <工作区>/<任务id>/，接手是工作区本身。 */
+  workspace?: string;
+  takeover?: boolean;
 }
 
 /** views.thread_list() 的列表项。 */
@@ -185,6 +188,45 @@ export interface ThreadSummary {
   updated_at: number | null;
 }
 
+/**
+ * 「这个任务此刻在做什么」（views.task_progress）。
+ *
+ * 只有确定性的东西：跑到第几步、烧了多少、最后一个动作是什么。
+ * **动作是结构不是句子** —— 措辞归界面层（copy.ts），同一份数据在专业版和
+ * 简洁版要说成两种话。
+ */
+export interface TaskProgress {
+  task_id: string;
+  goal: string;
+  status: TaskStatus;
+  terminal: boolean;
+  revision: number;
+  agent_id: string | null;
+  current_step: number;
+  max_steps: number;
+  tokens_used: number;
+  token_budget: number | null;
+  scope: string[];
+  /** 产物落在哪（spec.sandbox.workspace）。 */
+  workspace: string;
+  last_action: {
+    step: number | null;
+    kind: string | null;
+    name: string | null;
+    /** 对什么东西动手：路径或命令 */
+    target: string;
+    thought: string;
+  } | null;
+  last_result: {
+    step: number | null;
+    name: string | null;
+    ok: boolean | null;
+    exit_code: number | null;
+    stderr: string;
+  } | null;
+  produced: string[];
+}
+
 interface DetailBase {
   events: TaskEvent[];
   signals: Record<string, Signal>;
@@ -195,6 +237,7 @@ export interface SingleDetail extends DetailBase {
   kind: "single";
   state: TaskState;
   pending: PendingRuling | null;
+  progress: TaskProgress;
 }
 
 export interface CompositeDetail extends DetailBase {
@@ -206,6 +249,13 @@ export interface CompositeDetail extends DetailBase {
   review: ReviewData | null;
   tasks: Record<string, TaskState>;
   pending_children: string[];
+  /**
+   * 每个在等人的子任务，等的是什么。**复合线程上唯一的裁决入口** ——
+   * 子任务折在父线程里，侧栏点不到它们。
+   */
+  pending: Record<string, PendingRuling | null>;
+  /** 每个子任务此刻在做什么。 */
+  progress: Record<string, TaskProgress>;
 }
 
 /** GET /api/tasks/:id（views.task_detail）。 */
@@ -252,6 +302,16 @@ export interface ProbeResult {
 export interface Settings {
   base_url_override: string;
   models: { architect: string; subagent: string; triage: string };
+  /**
+   * 每个角色用哪一家（从已配 key 的供应商里选，空 = 自动）。
+   * **和 models 是两件事**：那是模型 id 的覆盖，这是「谁来干」。
+   * `reviewer` 多一个 `"none"` —— 明确关掉独立复核，退回同模型复核。
+   */
+  providers: { architect: string; reviewer: string; subagent: string };
+  /** 默认工作区（产物落点的根）。空 = 用 workspace_default。 */
+  workspace: string;
+  /** 没配工作区时东西会落在哪 —— 只读，服务端算出来的。 */
+  workspace_default: string;
   effort: { architect: string; subagent: string; cheap: string };
   /**
    * 写入侧复核（§12 M8）。**字符串 "on" / "off"，不是布尔** ——
@@ -270,6 +330,14 @@ export type StreamEvent =
   | { kind: "log"; text: string; ts: number | null; soft?: boolean }
   | { kind: "signal"; signal: Signal }
   | { kind: "decision"; decision: DecisionRecord }
-  | { kind: "awaiting"; pending: PendingRuling; ts: number | null }
+  // taskId / title 只在复合线程上出现：那时候等人的是**某个子任务**，
+  // 裁决要发给它而不是发给这条线程（root 根本没有 tasks 行）
+  | {
+      kind: "awaiting";
+      pending: PendingRuling;
+      ts: number | null;
+      taskId?: string;
+      title?: string;
+    }
   | { kind: "plan"; plan: PlanData; tasks: Record<string, TaskState>; pendingChildren: string[] }
   | { kind: "terminal"; status: TaskStatus; title?: string; chips: string[] };

@@ -78,7 +78,11 @@ export default function LiteApp(props: AppProps) {
             onRuling={props.onRuling}
           />
         ) : (
-          <main className="l-stream" />
+          // 选中了但详情还没到（刚派发的线程有一小段真空期）。
+          // 给一句话而不是一片空白 —— 空白会被当成「坏了」。
+          <main className="l-stream l-waiting">
+            {props.selected ? "正在准备这条任务…" : "左边选一条任务，或者发布一个新的。"}
+          </main>
         )}
       </div>
     </div>

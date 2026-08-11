@@ -87,7 +87,9 @@ export default function ProApp(props: AppProps) {
             onRuling={props.onRuling}
           />
         ) : (
-          <main className="stream" />
+          <main className="stream waiting">
+            {props.selected ? "正在准备这条线程…" : "选一条线程，或者发布一个新任务。"}
+          </main>
         )}
 
         {props.detail && <ProMetaPanel detail={props.detail} />}

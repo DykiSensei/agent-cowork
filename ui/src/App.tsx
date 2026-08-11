@@ -108,7 +108,13 @@ export default function App() {
       .then((d) => {
         if (alive) setDetail(d);
       })
-      .catch((e: unknown) => setError(String(e)));
+      // **详情拿不到不是致命错误，不要换掉整个页面。**
+      // 刚派发的线程会有一小段真空期（服务端已修，但网络抖动、旧库同样会走到
+      // 这里）。实测撞到的形态：拆解完成、界面切到新线程，整页变成
+      // 「连不上服务」，刷新一下又好了 —— 而任务其实一直在正常跑。
+      .catch(() => {
+        if (alive) setDetail(null);
+      });
     return () => {
       alive = false;
     };

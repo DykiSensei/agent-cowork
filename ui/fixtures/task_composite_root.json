@@ -1,6 +1,81 @@
 {
  "kind": "composite",
  "state": null,
+ "pending": {},
+ "progress": {
+  "t1_parse": {
+   "task_id": "t1_parse",
+   "goal": "在 parse.py 里实现 parse_line(s)，把 'name,42' 解析成 ('name', 42)。",
+   "status": "COMPLETED",
+   "terminal": true,
+   "revision": 1,
+   "agent_id": "agent_1721eaa7fd8e",
+   "current_step": 2,
+   "max_steps": 8,
+   "tokens_used": 800,
+   "token_budget": 60000,
+   "scope": [
+    "parse.py"
+   ],
+   "last_action": null,
+   "last_result": null,
+   "produced": []
+  },
+  "t2_format": {
+   "task_id": "t2_format",
+   "goal": "在 formatter.py 里实现 format_row(row)，把 ('a', 1) 渲染成 'a = 1'。",
+   "status": "COMPLETED",
+   "terminal": true,
+   "revision": 1,
+   "agent_id": "agent_8c76dceb055d",
+   "current_step": 2,
+   "max_steps": 8,
+   "tokens_used": 800,
+   "token_budget": 60000,
+   "scope": [
+    "formatter.py"
+   ],
+   "last_action": null,
+   "last_result": null,
+   "produced": []
+  },
+  "t3_report": {
+   "task_id": "t3_report",
+   "goal": "在 report.py 里实现 render(lines)：对每行调用 parse.parse_line，再用 formatter.format_row 渲染，最后用换行连接。",
+   "status": "COMPLETED",
+   "terminal": true,
+   "revision": 1,
+   "agent_id": "agent_9074f2a79442",
+   "current_step": 2,
+   "max_steps": 8,
+   "tokens_used": 800,
+   "token_budget": 60000,
+   "scope": [
+    "report.py"
+   ],
+   "last_action": null,
+   "last_result": null,
+   "produced": []
+  },
+  "t4_check": {
+   "task_id": "t4_check",
+   "goal": "跑一遍 verify_all.py 确认三个模块都好了，然后把 'all green' 写进 checked.txt。",
+   "status": "COMPLETED",
+   "terminal": true,
+   "revision": 1,
+   "agent_id": "agent_5f7186d36602",
+   "current_step": 2,
+   "max_steps": 8,
+   "tokens_used": 800,
+   "token_budget": 60000,
+   "scope": [
+    "checked.txt"
+   ],
+   "last_action": null,
+   "last_result": null,
+   "produced": []
+  }
+ },
  "root_goal": "做一个能统计词频的小工具，带缓存和命令行入口",
  "plan": {
   "layers": [
@@ -34,16 +109,16 @@
    "revision": 1,
    "goal": "在 parse.py 里实现 parse_line(s)，把 'name,42' 解析成 ('name', 42)。",
    "status": "COMPLETED",
-   "agent_id": "agent_bcf18edd2a63",
+   "agent_id": "agent_1721eaa7fd8e",
    "current_step": 2,
-   "checkpoint_id": "ckpt_1b469c502f28",
+   "checkpoint_id": "ckpt_32f249fe4bfb",
    "interrupt_count": 0,
    "artifacts": [
-    "art_4f05e25fa96a"
+    "art_3e3cc56cd337"
    ],
    "signal_log": [],
    "tokens_used": 800,
-   "started_at": 1786436360.8055933,
+   "started_at": 1786457672.3373682,
    "spec": {
     "id": "t1_parse",
     "parent_id": "task_composite_root",
@@ -86,7 +161,7 @@
     "probe_interval_s": null,
     "model": "claude-opus-5",
     "sandbox": {
-     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-cwr8mns2",
+     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-bhztxm1u",
      "allowed_binaries": [
       "python"
      ],
@@ -116,16 +191,16 @@
    "revision": 1,
    "goal": "在 formatter.py 里实现 format_row(row)，把 ('a', 1) 渲染成 'a = 1'。",
    "status": "COMPLETED",
-   "agent_id": "agent_8014b631c76a",
+   "agent_id": "agent_8c76dceb055d",
    "current_step": 2,
-   "checkpoint_id": "ckpt_bde2ac840c53",
+   "checkpoint_id": "ckpt_b0d287a3e715",
    "interrupt_count": 0,
    "artifacts": [
-    "art_6f4e7e73ccd3"
+    "art_fb47a167d52e"
    ],
    "signal_log": [],
    "tokens_used": 800,
-   "started_at": 1786436360.8061123,
+   "started_at": 1786457672.337525,
    "spec": {
     "id": "t2_format",
     "parent_id": "task_composite_root",
@@ -168,7 +243,7 @@
     "probe_interval_s": null,
     "model": "claude-opus-5",
     "sandbox": {
-     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-cwr8mns2",
+     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-bhztxm1u",
      "allowed_binaries": [
       "python"
      ],
@@ -198,16 +273,16 @@
    "revision": 1,
    "goal": "在 report.py 里实现 render(lines)：对每行调用 parse.parse_line，再用 formatter.format_row 渲染，最后用换行连接。",
    "status": "COMPLETED",
-   "agent_id": "agent_c96dd1528142",
+   "agent_id": "agent_9074f2a79442",
    "current_step": 2,
-   "checkpoint_id": "ckpt_e30ee531efec",
+   "checkpoint_id": "ckpt_c33abf59aa42",
    "interrupt_count": 0,
    "artifacts": [
-    "art_eabaab4c89f4"
+    "art_daccd86e7ee2"
    ],
    "signal_log": [],
    "tokens_used": 800,
-   "started_at": 1786436360.9485047,
+   "started_at": 1786457672.499934,
    "spec": {
     "id": "t3_report",
     "parent_id": "task_composite_root",
@@ -250,7 +325,7 @@
     "probe_interval_s": null,
     "model": "claude-opus-5",
     "sandbox": {
-     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-cwr8mns2",
+     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-bhztxm1u",
      "allowed_binaries": [
       "python"
      ],
@@ -283,16 +358,16 @@
    "revision": 1,
    "goal": "跑一遍 verify_all.py 确认三个模块都好了，然后把 'all green' 写进 checked.txt。",
    "status": "COMPLETED",
-   "agent_id": "agent_c61779a358d3",
+   "agent_id": "agent_5f7186d36602",
    "current_step": 2,
-   "checkpoint_id": "ckpt_0c8f1ac8a44f",
+   "checkpoint_id": "ckpt_acde8fee85ee",
    "interrupt_count": 0,
    "artifacts": [
-    "art_fb28fc85a088"
+    "art_5dba5093ac29"
    ],
    "signal_log": [],
    "tokens_used": 800,
-   "started_at": 1786436361.0675526,
+   "started_at": 1786457672.611674,
    "spec": {
     "id": "t4_check",
     "parent_id": "task_composite_root",
@@ -334,7 +409,7 @@
     "probe_interval_s": null,
     "model": "claude-opus-5",
     "sandbox": {
-     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-cwr8mns2",
+     "workspace": "C:\\Users\\15381\\AppData\\Local\\Temp\\cowork-composite-bhztxm1u",
      "allowed_binaries": [
       "python"
      ],
@@ -363,17 +438,17 @@
  },
  "events": [
   {
-   "id": "ev_bba4812fa84f",
+   "id": "ev_d5970f5eeca3",
    "task_id": "task_composite_root",
    "seq": 1,
    "kind": "human",
    "text": "做一个能统计词频的小工具，带缓存和命令行入口",
    "ref_id": null,
    "payload": {},
-   "created_at": 1786436360.7788599
+   "created_at": 1786457672.3041966
   },
   {
-   "id": "ev_a42fb70df2ee",
+   "id": "ev_915aa474bcc6",
    "task_id": "task_composite_root",
    "seq": 2,
    "kind": "plan",
@@ -396,10 +471,10 @@
     "decomposable": true,
     "issues": []
    },
-   "created_at": 1786436360.7837846
+   "created_at": 1786457672.3079643
   },
   {
-   "id": "ev_09ce3223f742",
+   "id": "ev_43d38b5b4f1a",
    "task_id": "task_composite_root",
    "seq": 3,
    "kind": "review",
@@ -413,57 +488,57 @@
     "reviewer": "scripted-composite",
     "independent": false
    },
-   "created_at": 1786436360.7881162
+   "created_at": 1786457672.3136704
   },
   {
-   "id": "ev_64d721822580",
+   "id": "ev_0671a535862b",
    "task_id": "task_composite_root",
    "seq": 4,
    "kind": "log",
    "text": "[REVIEW] 复核者 scripted-composite（拆解者自己）",
    "ref_id": null,
    "payload": {},
-   "created_at": 1786436360.7920914
+   "created_at": 1786457672.3194954
   },
   {
-   "id": "ev_565a85fd82d8",
+   "id": "ev_06b61f90fae5",
    "task_id": "task_composite_root",
    "seq": 5,
    "kind": "log",
    "text": "[REVIEW] 验收标准反推：覆盖完整",
    "ref_id": null,
    "payload": {},
-   "created_at": 1786436360.7957673
+   "created_at": 1786457672.3246198
   },
   {
-   "id": "ev_215a10bb6af0",
+   "id": "ev_2c24f704f317",
    "task_id": "task_composite_root",
    "seq": 6,
    "kind": "log",
    "text": "[LAYER] 1/3 并行 2: ['t1_parse', 't2_format']",
    "ref_id": null,
    "payload": {},
-   "created_at": 1786436360.8004475
+   "created_at": 1786457672.3301518
   },
   {
-   "id": "ev_8d62f2290a63",
+   "id": "ev_702308bfc256",
    "task_id": "task_composite_root",
    "seq": 7,
    "kind": "log",
    "text": "[LAYER] 2/3 并行 1: ['t3_report']",
    "ref_id": null,
    "payload": {},
-   "created_at": 1786436360.9436717
+   "created_at": 1786457672.4924567
   },
   {
-   "id": "ev_ff1b54832514",
+   "id": "ev_e956dd1ed66f",
    "task_id": "task_composite_root",
    "seq": 8,
    "kind": "log",
    "text": "[LAYER] 3/3 并行 1: ['t4_check']",
    "ref_id": null,
    "payload": {},
-   "created_at": 1786436361.0618565
+   "created_at": 1786457672.6059241
   }
  ],
  "signals": {},

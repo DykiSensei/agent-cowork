@@ -128,6 +128,60 @@ const cases = [
   ],
 ];
 
+// --------------------------------------------------------------------- //
+// 复合线程：子任务折在父线程里，侧栏点不到 —— 这里是人唯一的答复入口
+// --------------------------------------------------------------------- //
+
+const composite = (over = {}) => ({
+  kind: "composite",
+  state: null,
+  root_goal: "做一个转换器",
+  plan: null,
+  review: null,
+  tasks: { t_kid: { spec: { goal: "解析 CSV" } } },
+  events: [ev(1, "human", { text: "做一个转换器" })],
+  signals: {},
+  decisions: {},
+  pending_children: ["t_kid"],
+  pending: {
+    t_kid: { reason: "决策是 ABANDON", suggestion: null, decision_id: null,
+             checkpoint_id: "ckpt_1" },
+  },
+  progress: {},
+  ...over,
+});
+
+cases.push(
+  [
+    "复合线程上，每个在等人的子任务出一张卡（实测卡死在这里：任务停着而人无处答复）",
+    () => {
+      const out = translate(composite());
+      const card = out.find((e) => e.kind === "awaiting");
+      assert.ok(card, "没有这张卡，人就只能去改数据库");
+      assert.equal(card.taskId, "t_kid", "裁决要发给子任务，发给 root 会 404");
+      assert.equal(card.title, "解析 CSV", "要说清是哪一步在等");
+    },
+  ],
+  [
+    "没人在等的复合线程不出卡",
+    () =>
+      assert.ok(
+        !translate(composite({ pending_children: [], pending: {} })).some(
+          (e) => e.kind === "awaiting",
+        ),
+      ),
+  ],
+  [
+    "pending 里没有材料时宁可不出卡，也不出一张空卡",
+    () =>
+      assert.ok(
+        !translate(composite({ pending: { t_kid: null } })).some(
+          (e) => e.kind === "awaiting",
+        ),
+      ),
+  ],
+);
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

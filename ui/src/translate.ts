@@ -170,6 +170,25 @@ export function translate(detail: TaskDetail): StreamEvent[] {
     out.unshift({ kind: "human", text: firstGoal, ts: null });
   }
 
+  // **复合线程上「等你拍板」的卡片**。
+  //
+  // 子任务被折进父线程（侧栏里点不到它们），所以这是人唯一的答复入口。
+  // 它不挂在某条事件上：挂起发生在子任务自己的时间线里，而这条时间线是 root 的
+  // —— 所以按「谁在等」直接追加到末尾，一个等人的子任务一张卡。
+  if (detail.kind === "composite") {
+    for (const tid of detail.pending_children) {
+      const pending = detail.pending[tid];
+      if (!pending) continue;
+      out.push({
+        kind: "awaiting",
+        pending,
+        ts: null,
+        taskId: tid,
+        title: detail.tasks[tid]?.spec.goal ?? tid,
+      });
+    }
+  }
+
   // 复合任务的终局卡：root 时间线没有 status 事件，按子任务状态合成
   if (detail.kind === "composite") {
     const tasks = Object.values(detail.tasks);

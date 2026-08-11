@@ -6,10 +6,10 @@
   "description": "agent-cowork M6 群聊界面层（ChatSurface）。简洁/专业双模式。",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && node check/translate.mjs && vite build",
+    "build": "tsc --noEmit && npm run check && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "check": "node check/translate.mjs"
+    "check": "node check/translate.mjs && node check/render.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
