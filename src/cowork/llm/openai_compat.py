@@ -34,17 +34,14 @@ from .prompts import with_extra
 from .anthropic_backend import (
     ACTION_SCHEMA,
     ARCHITECT_SYSTEM,
-    DECOMPOSE_MAX_TOKENS,
     DECOMPOSE_SCHEMA,
     DECOMPOSE_SYSTEM,
     PROBE_SCHEMA,
     PROBE_SYSTEM,
     PROFILE_SCHEMA,
     PROFILE_SYSTEM,
-    REVIEW_MAX_TOKENS,
     REVIEW_SCHEMA,
     REVIEW_SYSTEM,
-    SPEC_REVIEW_MAX_TOKENS,
     SPEC_REVIEW_SCHEMA,
     SPEC_REVIEW_SYSTEM,
     SUBAGENT_SYSTEM,
@@ -137,7 +134,17 @@ class OpenAICompatBackend:
         subagent_model: str | None = None,
         architect_model: str = "deepseek-chat",
         triage_model: str | None = None,
-        max_tokens: int = 4096,
+        # **默认不发 `max_tokens`**（M11）：0 / None = 不设上限，由端点自己的
+        # 默认值兜底。
+        #
+        # 为什么彻底取消：推理型模型的 thinking 计在**同一个额度**里，方差极大
+        # （实测 2093~12000，有一次把 12000 全烧在思考上、正文 0 字符），而
+        # Subagent 默认挡位是 medium（开着思考）。任何一个猜出来的数字都会在
+        # 「这次想得多」的时候把正文挤没 —— 症状是产不出东西，且看起来像模型
+        # 变笨了，不像额度设小了。成本改看界面上的 token 计数。
+        #
+        # 想设仍然可以：显式传一个正数。
+        max_tokens: int | None = None,
         max_retries: int = 2,
         repair_rounds: int = 1,
         decompose_system: str | None = None,
@@ -222,7 +229,6 @@ class OpenAICompatBackend:
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens or self.max_tokens,
             "messages": messages,
         }
         if effort is not None:
@@ -242,6 +248,11 @@ class OpenAICompatBackend:
             # 不认识的字段在严格端点上是 400。
             digest = hashlib.sha256(sys_prompt.encode("utf-8")).hexdigest()[:16]
             kwargs["prompt_cache_key"] = f"cowork-{digest}"
+        # 只在显式设了上限时才发这个字段。**不发 ≠ 发 0** —— 后者在多数端点上
+        # 是「一个 token 都不许生成」，会直接把每次调用变成空回复。
+        cap = max_tokens if max_tokens is not None else self.max_tokens
+        if cap:
+            kwargs["max_tokens"] = cap
         if not any(m in model for m in _NO_JSON_MODE):
             kwargs["response_format"] = {"type": "json_object"}
 
@@ -271,10 +282,16 @@ class OpenAICompatBackend:
             # 报错也必须说清是截断 —— 截断的 JSON 报出来是「不是合法 JSON」，
             # 照着那个错误去查提示词会查错方向。
             if getattr(resp.choices[0], "finish_reason", None) == "length":
+                # 我们默认不发 max_tokens，所以截断多半来自**端点自己的**默认
+                # 上限 —— 报错要说清是哪一种，否则人会去翻一个我们根本没设的值
+                limit = kwargs.get("max_tokens")
                 errors = [
-                    f"输出被 max_tokens={kwargs['max_tokens']} 截断"
-                    f"（正文 {len(text)} 字符，模型的 thinking 也计在这个额度里）"
+                    f"输出被 max_tokens={limit} 截断" if limit
+                    else "输出被端点自身的默认上限截断（我们没有设 max_tokens）"
                 ]
+                errors[0] += (
+                    f"（正文 {len(text)} 字符，模型的 thinking 也计在这个额度里）"
+                )
                 if attempt >= self.repair_rounds:
                     break
                 kwargs["messages"] = messages  # 原样重掷，不带残文
@@ -423,7 +440,6 @@ class OpenAICompatBackend:
             system=with_extra(REVIEW_SYSTEM, "reviewer"),
             user=_render_review_context(root_goal, specs),
             schema=REVIEW_SCHEMA,
-            max_tokens=REVIEW_MAX_TOKENS,
             effort=self.architect_effort,
         )
         return data["sufficient"], list(data["missing"]), tokens
@@ -436,7 +452,6 @@ class OpenAICompatBackend:
             system=with_extra(SPEC_REVIEW_SYSTEM, "reviewer"),
             user=_render_spec_review_context(spec, signals, verdict),
             schema=SPEC_REVIEW_SCHEMA,
-            max_tokens=SPEC_REVIEW_MAX_TOKENS,
             effort=self.architect_effort,
         )
         return data["ok"], list(data["findings"]), tokens
@@ -452,7 +467,6 @@ class OpenAICompatBackend:
             schema=DECOMPOSE_SCHEMA,
             # 拆解是这里最长的一次输出：6 个子任务 × 若干条带命令的验收标准，
             # 加上推理型模型自己要烧掉的那部分，4096 实测不够（见 §11.12）。
-            max_tokens=DECOMPOSE_MAX_TOKENS,
             effort=self.architect_effort,
         )
         return _parse_drafts(data), tokens

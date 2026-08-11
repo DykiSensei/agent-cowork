@@ -24,12 +24,12 @@ await build({
     contents: `
       export { renderToStaticMarkup } from "react-dom/server";
       export { default as React } from "react";
-      export { default as LiteStream } from "./src/components/lite/LiteStream";
+      export { default as LiteStream, markAnswered } from "./src/components/lite/LiteStream";
       export { default as Progress } from "./src/components/Progress";
       export { default as Details } from "./src/components/Details";
       export { default as NewTask } from "./src/components/NewTask";
       export { SearchCard } from "./src/components/Settings";
-      export { SpecList } from "./src/components/NewTask";
+      export { SpecList, PlanProgressView } from "./src/components/NewTask";
     `,
     resolveDir: process.cwd(),
     loader: "ts",
@@ -279,6 +279,64 @@ check("没撞白名单时不出现放行按钮", () => {
   );
   const html = render(React.createElement(m.LiteStream, props(entry[1])));
   assert.ok(!html.includes("并继续"), "普通挂起不该冒出一个放行按钮");
+});
+
+// 8. 拆解进度：摆真实的量，不合成百分比
+check("拆解进行中时说得出「第几轮 / 在干嘛 / 烧了多少 / 多久了」", () => {
+  const html = render(
+    React.createElement(m.PlanProgressView, {
+      plan: {
+        plan_id: "p1",
+        status: "RUNNING",
+        started_at: Date.now() / 1000 - 130,
+        progress: { phase: "reviewing", attempt: 2, max_attempts: 3, tokens: 8400 },
+      },
+    }),
+  );
+  assert.ok(html.includes("复核者在挑毛病"), "没说当前在干嘛");
+  assert.ok(html.includes("第 2 / 最多 3 轮"), "没给轮次和真分母");
+  assert.ok(html.includes("8,400"), "没给 token 计数");
+  assert.ok(html.includes("已用"), "没给已用时间");
+  assert.ok(!html.includes("%"), "不该出现合成的百分比");
+});
+
+check("比历史最慢还久时要说出来，并说清关掉不影响它跑", () => {
+  const html = render(
+    React.createElement(m.PlanProgressView, {
+      plan: {
+        plan_id: "p1",
+        status: "RUNNING",
+        // 第 1 轮实测最慢 349 秒
+        started_at: Date.now() / 1000 - 600,
+        progress: { phase: "generating", attempt: 1, max_attempts: 3, tokens: 5000 },
+      },
+    }),
+  );
+  assert.ok(html.includes("还久了"), "超出历史区间要点出来");
+  assert.ok(html.includes("不影响它继续跑"), "要打消「关掉会不会丢」的顾虑");
+});
+
+// 9. 答过的裁决不能再弹一次（ruling 是 202，restore 期间服务端如实还在报挂起）
+check("同一次裁决答过之后不再要求处理", async () => {
+  const entry = details.find(
+    ([, d]) => d.kind === "single" && d.state.status === "AWAITING_HUMAN",
+  );
+  const detail = entry[1];
+  const did = detail.pending?.decision_id;
+  assert.ok(did, "这份 fixture 该有 decision_id —— 抑制就是按它记的");
+
+  // 第一次：正常出卡
+  assert.ok(
+    render(React.createElement(m.LiteStream, props(detail))).includes(
+      "这件事需要你定一下",
+    ),
+    "第一次该出卡",
+  );
+  // 标记成已答（等价于用户点过），再渲一次
+  m.markAnswered(did, "放弃");
+  const after = render(React.createElement(m.LiteStream, props(detail)));
+  assert.ok(after.includes("已告诉系统"), "答过之后该显示已处理");
+  assert.ok(!after.includes("这件事需要你定一下"), "不该再要求处理一次");
 });
 
 console.log(`\n${failed === 0 ? "全部通过" : `${failed} 项失败`}`);

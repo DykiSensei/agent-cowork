@@ -571,6 +571,22 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
               </div>
               <div className="set-row">
                 <span className="set-k">
+                  单个子任务最多走几步{" "}
+                  <span className="set-env">0 = 不限。步数挡的是「原地打转」</span>
+                </span>
+                <input
+                  className="set-text"
+                  placeholder="60"
+                  value={settings.max_steps ?? ""}
+                  onChange={(e) =>
+                    setSettings({ ...settings, max_steps: e.target.value })
+                  }
+                  inputMode="numeric"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="set-row">
+                <span className="set-k">
                   允许联网抓取{" "}
                   <span className="set-env">fetch_url —— 取网页正文，不是搜索</span>
                 </span>

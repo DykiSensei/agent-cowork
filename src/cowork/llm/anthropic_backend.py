@@ -652,7 +652,10 @@ class AnthropicBackend:
         # Subagent 是在干活 —— 让它们共用一个挡位等于承认这件事无所谓。
         effort: str = "high",
         subagent_effort: str = "medium",
-        max_tokens: int = 16000,
+        # **Anthropic 这边取消不了**：Messages API 的 `max_tokens` 是必填字段，
+        # 不发直接 400。所以这里只能给一个足够大的值，而不能像 OpenAI 兼容那侧
+        # 那样彻底不发。这条不对称要记着 —— 换后端时症状会不一样。
+        max_tokens: int = 32_000,
         base_url: str | None = None,
         api_key: str | None = None,
         max_retries: int = 2,

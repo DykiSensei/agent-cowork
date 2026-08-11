@@ -40,6 +40,8 @@ GLOBAL_KEYS = {
     # 工具面的两个闸门。**都归人，不归架构师** —— 让被隔离方给自己配隔离边界
     # 是没有意义的（同 SpecTemplate 那条）。
     "allowed_binaries": "COWORK_ALLOWED_BINARIES",
+    # 一个子任务最多走几步（0 = 不限）。归人：任务多大只有人知道
+    "max_steps": "COWORK_MAX_STEPS",
     "allow_network": "COWORK_ALLOW_NETWORK",
     "review_writes": "COWORK_REVIEW_WRITES",
     # search_web 用哪家搜索 API。**只有供应商名在这里** ——
@@ -74,6 +76,7 @@ DEFAULTS = {
     # 留空 = `types.DEFAULT_BINARIES`（各语言运行时）。这里给的是**显示用的**默认，
     # 真正的回落在 `runner._allowed_binaries()`
     "allowed_binaries": "",
+    "max_steps": "60",
     # 默认关：取回的第三方内容会进 reasoning_trace 再进下一轮提示词，
     # 那是一条提示词注入通道
     "allow_network": "off",

@@ -391,6 +391,7 @@ def create_app(
             "allowed_binaries": env.get(
                 GLOBAL_KEYS["allowed_binaries"], DEFAULTS["allowed_binaries"]
             ),
+            "max_steps": env.get(GLOBAL_KEYS["max_steps"], DEFAULTS["max_steps"]),
             "allow_network": env.get(
                 GLOBAL_KEYS["allow_network"], DEFAULTS["allow_network"]
             ),
@@ -462,6 +463,19 @@ def create_app(
                     value = str(raw).strip().lower()
                     if value not in ("on", "off"):
                         return err(400, f"allow_network 只能是 on / off，收到 {raw!r}")
+                    pairs[env_name] = value
+                elif flat == "max_steps":
+                    value = str(raw or "").strip()
+                    if value:
+                        # 非数字当场拒 —— 落进 .env 之后只会被静默当成默认值，
+                        # 而人以为自己设过了
+                        try:
+                            n = int(value)
+                        except ValueError:
+                            return err(400, f"max_steps 要一个整数，收到 {raw!r}")
+                        if n < 0:
+                            return err(400, "max_steps 不能是负数（0 = 不限）")
+                        value = str(n)
                     pairs[env_name] = value
                 elif flat == "workspace":
                     value = str(raw or "").strip()

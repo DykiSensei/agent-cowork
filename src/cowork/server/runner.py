@@ -52,6 +52,13 @@ class PlanEntry:
     # 「我的产物在哪」原来在这套系统里没有答案（落在随机临时目录，界面也不显示）
     workspace: str = ""
     takeover: bool = False
+    # 拆解跑到哪一步了（M11）。这个循环实测中位 110~381 秒，而它对外原来只有
+    # 「开始」和「终局」两个事件 —— 中间那几分钟在界面上是真空，于是「慢」和
+    # 「卡死」长得一模一样。阶段是确定性的，报它不花任何模型调用。
+    progress: dict | None = None
+    # 第一轮生成出来的草稿。**复核之前就给出去** —— 人能先读、先想怎么改，
+    # 而「看得见真东西」比任何转圈动画都更能回答「它在干嘛」。
+    draft_specs: list | None = None
 
 
 class Runner:
@@ -158,6 +165,22 @@ class Runner:
         if not raw:
             return DEFAULT_BINARIES
         return tuple(x.strip() for x in raw.split(",") if x.strip()) or DEFAULT_BINARIES
+
+    def _max_steps(self) -> int:
+        """一个子任务最多走几步。**0 = 不限**，由人在设置页定（M11）。
+
+        原来是代码里写死的 12 —— 那个数是 M1 拿脚本后端定的，真实任务
+        「读几个文件 + 写几个 + 跑一遍测试」轻松就超，于是 STEP_LIMIT 成了最常见
+        的中断原因，而它和任务做得对不对无关、只和任务多大有关。
+        任务多大只有人知道，所以这个数归人。
+        """
+        import os
+
+        raw = (os.environ.get("COWORK_MAX_STEPS") or "").strip()
+        try:
+            return max(0, int(raw)) if raw else 60
+        except ValueError:
+            return 60
 
     def _allow_network(self) -> bool:
         """两个联网工具开不开。**默认关** —— 见 `SpecTemplate.tools` 的说明。"""
@@ -276,6 +299,7 @@ class Runner:
                     workspace=str(ws), allowed_binaries=self._allowed_binaries()
                 ),
                 parent_id=plan_id,
+                max_steps=self._max_steps(),
             )
             net = self._network_tools()
             if net:
@@ -290,8 +314,23 @@ class Runner:
                 f"[PLAN] 生成者 {getattr(backend, 'name', '?')}"
                 f" / 复核者 {getattr(reviewer, 'name', '（同生成者）') if reviewer else '（同生成者）'}"
             )
+            def on_progress(info: dict) -> None:
+                drafts = info.pop("specs", None)
+                with self._lock:
+                    entry.progress = info
+                    if drafts:
+                        entry.draft_specs = drafts
+                # 推一声让界面立刻刷新，不用等下一次轮询
+                self.hub.publish_threadsafe({"type": "plan", "plan_id": plan_id})
+                log(
+                    f"[PLAN] 第 {info['attempt']}/{info['max_attempts']} 轮"
+                    f"{'生成中' if info['phase'] == 'generating' else '复核中'}"
+                    f"（已用 {info['tokens']} token）"
+                )
+
             result = architect.plan(
-                goal, template, existing=existing or None, log=log
+                goal, template, existing=existing or None, log=log,
+                on_progress=on_progress,
             )
             log(
                 f"[PLAN] 终局 {result.status}：{len(result.specs)} 个子任务，"
@@ -316,6 +355,14 @@ class Runner:
                 "goal": entry.goal,
                 "status": "ERROR" if entry.error else "RUNNING",
                 "error": entry.error,
+                # 还在跑的时候也要有东西看：跑到哪一步、烧了多少、开始多久了，
+                # 以及第一轮的草稿（如果已经生成出来）
+                "progress": entry.progress,
+                "started_at": entry.created_at,
+                "specs": entry.draft_specs,
+                "draft": True,
+                "workspace": entry.workspace,
+                "takeover": entry.takeover,
             }
         out = entry.result.to_dict()
         out.update(

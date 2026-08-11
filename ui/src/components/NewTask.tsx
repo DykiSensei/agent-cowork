@@ -27,13 +27,106 @@ import FolderPicker from "./FolderPicker";
 
 const POLL_MS = 1500;
 
+/**
+ * 各轮次的耗时基线，出自 `plan_ab.jsonl` 的 37 次真实拆解。
+ *
+ * **按轮数分开，不能用一个总的中位数**：1 轮中位 110 秒、2 轮 286 秒、3 轮 381 秒
+ * —— 混在一起算出来的 243 秒对任何一轮都不准。
+ * 样本很小（n=20/10/6），所以措辞是「以往大概」，不是承诺。
+ */
+const PLAN_BASELINE: Record<number, { median: number; max: number }> = {
+  1: { median: 110, max: 349 },
+  2: { median: 286, max: 574 },
+  3: { median: 381, max: 748 },
+};
+
+const PHASE_TEXT: Record<string, string> = {
+  generating: "架构师在拆这个目标",
+  reviewing: "复核者在挑毛病",
+};
+
+/**
+ * 拆解的实时进度。
+ *
+ * 原来这里只有一行「正在拆解这个目标…」，而这个循环实测要 110~381 秒 ——
+ * 中间几分钟里「慢」和「卡死」在界面上长得一模一样，人只能猜。
+ *
+ * 摆四样**真实的量**，一个合成的百分比都没有：跑到第几轮（分母是
+ * `max_regenerate`，真的有上限）、这一轮在干嘛、烧了多少 token（在动 = 活着）、
+ * 已经多久（对着历史分位，让「久」有刻度）。
+ */
+export function PlanProgressView({ plan }: { plan: PlanView }) {
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now() / 1000), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const p = plan.progress;
+  const elapsed = plan.started_at ? Math.max(0, Math.round(now - plan.started_at)) : null;
+  const base = p ? PLAN_BASELINE[Math.min(p.attempt, 3)] : undefined;
+  const slow = Boolean(elapsed && base && elapsed > base.max);
+
+  const steps: { key: string; label: string }[] = [
+    { key: "generating", label: "生成拆解" },
+    { key: "reviewing", label: "复核" },
+  ];
+
+  return (
+    <div className="nt-prog">
+      <div className="nt-prog-hd">
+        {p ? PHASE_TEXT[p.phase] ?? "正在拆解" : "正在准备"}
+        {p && p.max_attempts > 1 && (
+          <span className="nt-prog-round">
+            第 {p.attempt} / 最多 {p.max_attempts} 轮
+          </span>
+        )}
+      </div>
+
+      <div className="nt-prog-steps">
+        {steps.map((s) => {
+          const state = !p
+            ? "todo"
+            : s.key === p.phase
+              ? "now"
+              : steps.findIndex((x) => x.key === p.phase) >
+                  steps.findIndex((x) => x.key === s.key)
+                ? "done"
+                : "todo";
+          return (
+            <span className={`nt-prog-step ${state}`} key={s.key}>
+              {s.label}
+            </span>
+          );
+        })}
+      </div>
+
+      <div className="nt-prog-meta">
+        {p ? `${p.tokens.toLocaleString()} token` : "还没开始调模型"}
+        {elapsed !== null && ` · 已用 ${fmtSec(elapsed)}`}
+        {base && ` · 这一轮以往大概 ${fmtSec(base.median)}`}
+      </div>
+
+      {slow && (
+        <div className="nt-prog-slow">
+          比以往同轮次的最慢一次（{fmtSec(base!.max)}）还久了。
+          多半只是这个目标更难拆，但也可能是模型那边卡住了 ——
+          关掉这一屏不影响它继续跑，任务不会因此丢。
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fmtSec(s: number): string {
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  return `${m} 分 ${String(s % 60).padStart(2, "0")} 秒`;
+}
+
 function StatusLine({ plan }: { plan: PlanView }) {
   if (plan.status === "RUNNING") {
-    return (
-      <div className="nt-line waiting">
-        正在拆解这个目标…（一次真实调用，约 10–35k token）
-      </div>
-    );
+    return <PlanProgressView plan={plan} />;
   }
   if (plan.status === "ERROR") {
     return <div className="nt-line bad">拆解失败：{plan.error}</div>;
@@ -446,12 +539,18 @@ export default function NewTask({
       )}
       {plan ? <StatusLine plan={plan} /> : <div className="nt-line">正在拆解…</div>}
       {plan && <ReviewNotes plan={plan} />}
+      {plan?.draft && plan.specs?.length ? (
+        <div className="nt-line nt-draftnote">
+          下面是刚生成出来的**草稿**，复核者还在看 —— 它可能还会变。
+          先摆出来是因为读它比看转圈有用。
+        </div>
+      ) : null}
       {plan && (
         <SpecList
           plan={plan}
           edited={edited}
-          // 派发之后就不能再改了 —— 那时任务已经在跑
-          onEdit={plan.dispatched_root ? null : setEdited}
+          // 草稿还会被复核改写，这时候改它没有意义；派发之后同样不能改
+          onEdit={plan.draft || plan.dispatched_root ? null : setEdited}
         />
       )}
       {edited && (

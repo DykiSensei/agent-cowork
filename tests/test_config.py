@@ -216,6 +216,60 @@ class TestMultilineSettings(unittest.TestCase):
             self.assertEqual(decode_multiline(name, raw), raw)
 
 
+class TestNoTokenCap(unittest.TestCase):
+    """**默认不发 `max_tokens`**（M11）。
+
+    任何猜出来的数字都会在「这次想得多」的时候把正文挤没：thinking 和正文在
+    同一个额度里竞争，而 Subagent 默认开着思考。成本改看界面上的 token 计数。
+    """
+
+    def _kwargs(self, **backend_kw) -> dict:
+        """抓一次真实请求的 kwargs，不打网络。"""
+        from unittest import mock
+
+        from cowork.llm.openai_compat import OpenAICompatBackend
+
+        be = OpenAICompatBackend(
+            base_url="http://x/v1", api_key="k", architect_model="m",
+            subagent_model="m", triage_model="m", **backend_kw,
+        )
+        captured: dict = {}
+
+        class _Resp:
+            choices = [
+                type("C", (), {
+                    "message": type("M", (), {"content": '{"verdicts": []}'})(),
+                    "finish_reason": "stop",
+                })()
+            ]
+            usage = None
+
+        def fake_create(**kw):
+            captured.update(kw)
+            return _Resp()
+
+        with mock.patch.object(be.client.chat.completions, "create", fake_create):
+            be._call(
+                model="m", system="s", user="u",
+                schema={"type": "object", "properties": {}},
+            )
+        return captured
+
+    def test_max_tokens_is_not_sent_by_default(self):
+        self.assertNotIn(
+            "max_tokens", self._kwargs(),
+            "默认不该给端点设上限 —— 猜出来的数字会把正文挤没",
+        )
+
+    def test_an_explicit_cap_is_still_honoured(self):
+        """想设仍然设得上：这是取消默认值，不是删掉能力。"""
+        self.assertEqual(self._kwargs(max_tokens=1234).get("max_tokens"), 1234)
+
+    def test_zero_is_treated_as_unlimited_not_as_zero(self):
+        """**不发 ≠ 发 0**：后者在多数端点上是「一个 token 都不许生成」。"""
+        self.assertNotIn("max_tokens", self._kwargs(max_tokens=0))
+
+
 class TestRolePromptExtra(unittest.TestCase):
     """追加而不是替换 —— 内置提示词里带着输出契约和工具清单。"""
 

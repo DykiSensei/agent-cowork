@@ -78,6 +78,19 @@ function YourDecisionCard({ d }: { d: DecisionRecord }) {
   );
 }
 
+/**
+ * 已经答过的裁决：decision_id → 人当时的选择。
+ *
+ * 放在模块级而不是组件里，因为这张卡会随 detail 刷新而重建 ——
+ * 组件内的状态活不过一次刷新，而「我已经处理过了」必须活过。
+ */
+const ANSWERED = new Map<string, string>();
+
+/** 给行为检查用：模拟「人已经答过这条裁决」。 */
+export function markAnswered(decisionId: string, label: string): void {
+  ANSWERED.set(decisionId, label);
+}
+
 function WaitCard({
   pending,
   title,
@@ -91,12 +104,30 @@ function WaitCard({
     specChanges?: Record<string, unknown>,
   ) => Promise<ActionResult>;
 }) {
-  const [done, setDone] = useState<string | null>(null);
+  // **已经答过的那次裁决，不能再弹一次。**
+  //
+  // `POST /ruling` 是 202：服务端收下之后才起线程去 restore，而 restore 里有
+  // 模型调用。也就是说从点下按钮到 status 真的翻掉，中间有一段真空 ——
+  // 这期间服务端**如实**还在报 AWAITING_HUMAN，轮询/SSE 一刷新，卡片就又回来了，
+  // 看起来像「我明明处理过了」。组件自己的 done 也扛不住：父层换了 detail
+  // 之后这张卡会重建，本地状态跟着没。
+  //
+  // 所以记在模块级、按 `decision_id` 记：人答的是**那一个问题**。
+  // 下一次升级会带一个新的 decision_id，卡片照常出现 —— 抑制不会粘住。
+  const answeredKey = pending.decision_id ?? "";
+  const [done, setDone] = useState<string | null>(
+    () => (answeredKey && ANSWERED.get(answeredKey)) || null,
+  );
   // 服务端可能不收这条裁决（任务已经不在挂起、并发答复过了）。
   // 那时候必须说出来 —— 显示「已告诉系统」而实际没记下，比报错难查得多。
   const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const suggestion = pending.suggestion;
+
+  const remember = (label: string) => {
+    if (answeredKey) ANSWERED.set(answeredKey, label);
+    setDone(label);
+  };
 
   if (done) {
     return (
@@ -145,7 +176,7 @@ function WaitCard({
                 allow_binary: pending.blocked_binary!,
               })
                 .then((r) => {
-                  if (r.ok) setDone(`已允许 ${pending.blocked_binary}，接着跑`);
+                  if (r.ok) remember(`已允许 ${pending.blocked_binary}，接着跑`);
                   else setFailed(r.error ?? "没能提交");
                 })
                 .finally(() => setBusy(false));
@@ -171,7 +202,7 @@ function WaitCard({
               setFailed(null);
               void onSubmit(a)
                 .then((r) => {
-                  if (r.ok) setDone(LITE_ACTION[a]);
+                  if (r.ok) remember(LITE_ACTION[a]);
                   else setFailed(r.error ?? "没能提交");
                 })
                 .finally(() => setBusy(false));

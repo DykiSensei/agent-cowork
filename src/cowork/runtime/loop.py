@@ -148,7 +148,10 @@ class StepLoop:
                 return interrupted(pending)
 
             # ---- 资源类硬信号（对所有 task_class 都可用）----
-            if (step - start_step) + cycle_steps_used >= spec.max_steps:
+            # max_steps = 0 是「不限」（M11，设置页可配）。它和 token 上限不同：
+            # 步数还挡着「原地打转」那一类失效 —— 空转的每一步都很便宜，
+            # token 计数根本拦不住它。所以默认仍然给一个值，只是归人定。
+            if spec.max_steps and (step - start_step) + cycle_steps_used >= spec.max_steps:
                 return interrupted(
                     self.bus.emit_hard(
                         SignalType.STEP_LIMIT, spec.id,

@@ -111,7 +111,12 @@ class SpecTemplate:
         "delete_file", "move_file", "run",
     )
     model: str = "claude-opus-5"
-    max_steps: int = 12
+    # 0 = 不限。**M11 起默认 60**：12 是 M1 拿脚本后端定的，真实任务里
+    # 「读几个文件 + 写几个文件 + 跑一遍测试」轻松就过 12 步，于是 STEP_LIMIT
+    # 变成了最常见的中断原因 —— 而它和任务做得对不对毫无关系。
+    # 不设 0：步数上限还挡着「原地打转」这一类真实失效（token 上限管不住它，
+    # 因为空转的每一步都很便宜）。60 是够用又还能兜住死循环的量级。
+    max_steps: int = 60
     deadline_s: float = 300.0
     # 0 = 不限。**M11 起默认不限**：60k 在真实的大任务上频繁把 Subagent 打断，
     # 而打断的时机只取决于「这个任务比较费」，与它做得对不对无关。
@@ -833,6 +838,7 @@ class Architect:
         *,
         existing: str | None = None,
         log: Callable[[str], None] = lambda _m: None,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> DecompositionResult:
         """生成 → 复核 → 重生成 ≤N 次 → 升级给人（§12 M7 7.4）。
 
@@ -859,6 +865,26 @@ class Architect:
         if template.parent_id is None:
             template = replace(template, parent_id=ids.task_id())
 
+        def progress(phase: str, *, attempt: int, specs: list | None = None) -> None:
+            """报一次「现在在哪一步」。**纯确定性，不花任何模型调用。**
+
+            token 每次都带上：一个在动的数字就是活着的证明，而这条链上
+            没有别的东西能便宜地提供这个信号。
+            """
+            if on_progress is None:
+                return
+            on_progress(
+                {
+                    "phase": phase,
+                    "attempt": attempt,
+                    # 分母是真的：重生成有 max_regenerate 上限。没有真分母的
+                    # 地方就不要编一个百分比（同 pending_ruling 不编建议那条）
+                    "max_attempts": self.policy.max_regenerate + 1,
+                    "tokens": self.tokens_used - tokens_before,
+                    "specs": [s.to_dict() for s in specs] if specs else None,
+                }
+            )
+
         history: list[dict] = []
         fingerprints: list[str] = []
         specs: list[TaskSpec] = []
@@ -870,6 +896,12 @@ class Architect:
 
         while True:
             attempt += 1
+            # **顺利路径以前一句都不报。** 这个循环是这条链上最慢的一段
+            # （实测中位 110~381 秒，取决于跑几轮），而它对外只有开头和结尾两个
+            # 事件 —— 中间那几分钟在界面上是一段真空，于是「慢」和「卡死」
+            # 长得一模一样（§11.24 的那次实测反馈就是这么来的）。
+            # 阶段本身是确定性的，报出来不花任何模型调用。
+            progress("generating", attempt=attempt)
             try:
                 # existing 每一轮都要给：重生成同样是在已有基础上拆，
                 # 少给一轮就等于告诉它「这次是空目录」
@@ -884,6 +916,10 @@ class Architect:
                 review = None
                 break
 
+            # 草稿这一刻就在手上了 —— **提前给出去**，别等整个循环跑完。
+            # 人能先读、先想怎么改（拆解是可以改的），而且「看得见真东西」
+            # 比任何转圈动画都更能回答「它在干嘛」。
+            progress("reviewing", attempt=attempt, specs=specs)
             try:
                 review = self.review_decomposition(root_goal, specs)
             except ModelError as exc:

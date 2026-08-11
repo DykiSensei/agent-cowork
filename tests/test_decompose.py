@@ -358,5 +358,75 @@ class TestPlanEscalationRule(unittest.TestCase):
         self.assertEqual(r.to_dict()["status"], "ACCEPTED")
 
 
+class TestPlanProgress(unittest.TestCase):
+    """拆解的顺利路径要报进度（M11）。
+
+    以前 `plan()` 只在**失败**和**升级**时 log，顺利那条路一句不发 ——
+    而它实测要 110~381 秒。中间那几分钟在界面上是真空，于是「慢」和「卡死」
+    长得一模一样，人只能猜（这正是那次「疑似 bug」反馈的来源）。
+    """
+
+    def _plan(self, **kw):
+        import tempfile
+
+        from cowork.agent.architect import Architect, AutoApproveGate, SpecTemplate
+        from cowork.llm import SubtaskDraft
+        from cowork.policy import Policy
+        from cowork.store import SqliteStore
+        from cowork.types import SandboxProfile
+
+        def drafts(goal, feedback):
+            return [
+                SubtaskDraft(
+                    id="t1", goal="写脚本",
+                    acceptance=[{"id": "c1", "description": "能跑"}], scope=["a.py"],
+                )
+            ]
+
+        arch = Architect(
+            backend=ScriptedBackend({}, decompose_for=drafts),
+            store=SqliteStore(":memory:"), human_gate=AutoApproveGate(),
+            policy=Policy(),
+        )
+        tmpl = SpecTemplate(sandbox=SandboxProfile(workspace=tempfile.mkdtemp()))
+        return arch.plan("把 CSV 转成周报", tmpl, **kw)
+
+    def test_each_phase_is_reported(self):
+        seen: list[dict] = []
+        self._plan(on_progress=seen.append)
+
+        phases = [p["phase"] for p in seen]
+        self.assertIn("generating", phases)
+        self.assertIn("reviewing", phases, "复核这一段也要报 —— 它同样要花几十秒")
+        self.assertTrue(
+            phases.index("generating") < phases.index("reviewing"),
+            "顺序必须是先生成后复核",
+        )
+
+    def test_progress_carries_a_real_denominator(self):
+        """分母得是真的：重生成有 max_regenerate 上限。没真分母就别编。"""
+        seen: list[dict] = []
+        self._plan(on_progress=seen.append)
+
+        for p in seen:
+            self.assertGreaterEqual(p["max_attempts"], 1)
+            self.assertLessEqual(p["attempt"], p["max_attempts"])
+            self.assertIsInstance(p["tokens"], int)
+
+    def test_draft_specs_come_out_before_review_finishes(self):
+        """草稿在复核**之前**就给 —— 读它比看转圈有用。"""
+        seen: list[dict] = []
+        self._plan(on_progress=seen.append)
+
+        reviewing = [p for p in seen if p["phase"] == "reviewing"]
+        self.assertTrue(reviewing, "没有复核阶段")
+        self.assertTrue(reviewing[0]["specs"], "复核那一刻手上就该有草稿了")
+
+    def test_no_callback_is_fine(self):
+        """不给回调也要能跑 —— CLI 和 bench 都不需要这个。"""
+        result = self._plan()
+        self.assertTrue(result.specs)
+
+
 if __name__ == "__main__":
     unittest.main()

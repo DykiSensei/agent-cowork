@@ -49,8 +49,9 @@ const DEFAULT_SETTINGS = {
   effort: { architect: "high", subagent: "medium", cheap: "off" },
   // 字符串 on/off 而不是布尔：它落到 .env，空串在那里 = 未设置 = 回落到默认
   review_writes: "on",
-  allowed_binaries: "python",
+  allowed_binaries: "",
   allow_network: "off",
+  max_steps: "60",
   // 联网搜索（search_web）。**key 不在这里** —— 它只写不读，走
   // PUT /api/search/key，GET 只回末 4 位识别串。
   search: {
@@ -103,6 +104,14 @@ let mockPlan: MockPlan | null = null;
  * `views.task_detail()` 里的 spec 完全一致（都出自 make_fixtures.py）。
  * 状态刻意演 AWAITING_HUMAN：那是 M7 三种终局里唯一需要界面出按钮的一种。
  */
+/** 拆解草稿：和终局用同一批 spec，形状因此一致。 */
+function mockPlanSpecs(): unknown[] {
+  const detail = readFixture("task_comp.json") as
+    | { tasks?: Record<string, { spec?: unknown }> }
+    | null;
+  return Object.values(detail?.tasks ?? {}).map((t) => t.spec);
+}
+
 function mockPlanResult(p: MockPlan): unknown {
   const detail = readFixture("task_comp.json") as
     | { tasks?: Record<string, { spec?: unknown }> }
@@ -206,9 +215,27 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
         return sendJson(res, 404, { error: "没有这次拆解" });
       }
       mockPlan.asked += 1;
-      if (mockPlan.asked < 3) {
+      // 演进度：生成中 → 复核中 → 第二轮生成中 → 复核中 → 终局。
+      // 不演的话 mock 上永远看不到进度面板，而它正是要验的东西。
+      if (mockPlan.asked < 5) {
+        const n = mockPlan.asked - 1; // 0..3
         return sendJson(res, 200, {
-          plan_id: mockPlan.id, goal: mockPlan.goal, status: "RUNNING", error: null,
+          plan_id: mockPlan.id,
+          goal: mockPlan.goal,
+          status: "RUNNING",
+          error: null,
+          started_at: Date.now() / 1000 - 40 - n * 30,
+          progress: {
+            phase: n % 2 === 0 ? "generating" : "reviewing",
+            attempt: n < 2 ? 1 : 2,
+            max_attempts: 3,
+            tokens: 3200 * (n + 1),
+          },
+          // 第一轮生成完就把草稿摆出来 —— 读它比看转圈有用
+          specs: n >= 1 ? mockPlanSpecs() : null,
+          draft: true,
+          workspace: mockPlan.workspace ?? "",
+          takeover: Boolean(mockPlan.takeover),
         });
       }
       return sendJson(res, 200, mockPlanResult(mockPlan));

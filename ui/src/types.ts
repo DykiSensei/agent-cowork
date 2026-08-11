@@ -136,6 +136,18 @@ export interface PendingRuling {
   blocked_binary?: string | null;
 }
 
+/**
+ * 拆解的实时进度。**全部是确定性的量，没有合成的百分比** ——
+ * 轮数有上限但每轮耗时没有，百分比必然是编的。
+ */
+export interface PlanProgress {
+  phase: "generating" | "reviewing";
+  attempt: number;
+  /** 分母是真的：重生成有 max_regenerate 上限。 */
+  max_attempts: number;
+  tokens: number;
+}
+
 export interface PlanData {
   layers: string[][];
   max_parallel: number;
@@ -171,6 +183,12 @@ export interface PlanView {
   escalation_reason?: string | null;
   rationale?: string;
   specs?: TaskSpec[];
+  /** specs 是**复核前的草稿**（还会变）。终局的拆解没有这个标记。 */
+  draft?: boolean;
+  /** 拆解跑到哪一步了。只在 RUNNING 时有。 */
+  progress?: PlanProgress | null;
+  /** 服务端记的开始时刻（epoch 秒），用来算已用时间。 */
+  started_at?: number;
   review?: ReviewData | null;
   /** 人裁决过没有、能不能派发。派发过一次之后 dispatched_root 非空。 */
   dispatchable?: boolean;
@@ -328,8 +346,10 @@ export interface Settings {
   workspace: string;
   /** 没配工作区时东西会落在哪 —— 只读，服务端算出来的。 */
   workspace_default: string;
-  /** `run` 能调哪些可执行文件，逗号分隔。默认只有 python。 */
+  /** `run` 能调哪些可执行文件，逗号分隔。留空 = 各语言运行时。 */
   allowed_binaries: string;
+  /** 一个子任务最多走几步。**"0" = 不限**。字符串，同 review_writes 那条理由。 */
+  max_steps: string;
   /** 两个联网工具（fetch_url / search_web）的总闸（"on" / "off"）。**默认关**：
    * 取回的第三方内容会进 reasoning_trace 再进下一轮提示词，那是一条提示词注入通道。 */
   allow_network: string;
