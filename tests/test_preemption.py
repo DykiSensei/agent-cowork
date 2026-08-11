@@ -415,6 +415,32 @@ class TestExpandedToolSurface(LoopFixture):
         self.assertIs(outcome.preempting_signal.type, SignalType.SCOPE_VIOLATION)
         self.assertIn("tools", outcome.preempting_signal.payload["reason"])
 
+    def test_fetch_url_refuses_non_http_schemes(self):
+        """`file://` 能读任意本地文件 —— 那是绕开整个沙箱的一条路。"""
+        from cowork.runtime.sandbox import Sandbox
+        from cowork.types import SandboxProfile
+
+        sb = Sandbox(SandboxProfile(workspace=str(self.ws)), ["out.py"])
+        r = sb.fetch_url("file:///etc/passwd")
+        self.assertFalse(r.ok)
+        self.assertIn("只支持 http/https", r.stderr)
+
+    def test_fetch_url_encodes_non_ascii_urls(self):
+        """HTTP 头是 latin-1，中文域名直接发出去是 `UnicodeEncodeError` ——
+        一个模型看不懂的错误，它会以为是网站的问题，再试一次还是它。
+
+        断言只看「有没有编码」，不打网络：域名存不存在是另一回事。
+        """
+        from cowork.runtime.sandbox import Sandbox
+        from cowork.types import SandboxProfile
+
+        sb = Sandbox(SandboxProfile(workspace=str(self.ws)), ["out.py"])
+        r = sb.fetch_url("https://例子.中国/路 径")
+        self.assertFalse(r.ok)
+        self.assertFalse(r.hard_failure, "取不到是软失败，不该抢占")
+        self.assertNotIn("latin-1", r.stderr)
+        self.assertIn("xn--", r.stderr, "域名要被 IDNA 编码后再发")
+
     def test_network_is_off_unless_the_task_says_so(self):
         """fetch_url 取回的是第三方文本，会进 trace 再进下一轮提示词。
 

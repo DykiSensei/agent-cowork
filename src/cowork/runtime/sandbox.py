@@ -239,13 +239,29 @@ class Sandbox:
 
         注意这**不是搜索** —— 搜索要一个搜索 API 的 key，那是另一件事。
         """
-        from urllib.parse import urlparse
+        from urllib.parse import quote, urlparse, urlunparse
         from urllib.request import Request, urlopen
 
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             return ToolResult(ok=False, exit_code=2,
                               stderr=f"只支持 http/https，收到 {parsed.scheme!r}")
+        # **非 ASCII 的域名和路径要先编码**：HTTP 头是 latin-1，直接发中文域名
+        # 得到的是 `UnicodeEncodeError: 'latin-1' codec` —— 一个看不懂的错误，
+        # 而模型会以为是网站的问题，再试一次还是它。实测撞到。
+        try:
+            host = parsed.hostname or ""
+            netloc = host.encode("idna").decode("ascii") if not host.isascii() else parsed.netloc
+            if parsed.port and not host.isascii():
+                netloc = f"{netloc}:{parsed.port}"
+            url = urlunparse(parsed._replace(
+                netloc=netloc,
+                path=quote(parsed.path, safe="/%"),
+                query=quote(parsed.query, safe="=&%+"),
+            ))
+        except (UnicodeError, ValueError) as exc:
+            return ToolResult(ok=False, exit_code=2, hard_failure=False,
+                              stderr=f"这个网址的域名不合法: {exc}")
         req = Request(url, headers={"User-Agent": "cowork-agent/0.1"})
         try:
             with urlopen(req, timeout=FETCH_TIMEOUT_S) as resp:
