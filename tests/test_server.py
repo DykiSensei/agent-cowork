@@ -241,6 +241,92 @@ class TestServer(unittest.TestCase):
                 # 详情里 root_goal 单独给一份（标题栏不该去翻时间线）
                 self.assertEqual(detail["root_goal"], "做一个造文件的小工具")
 
+    def test_plan_awaiting_human_then_ruling_then_dispatch(self):
+        """界面上「发布任务」走的另一条分支：拆解没收敛 → 人拍板 → 派发。
+
+        `test_plan_dispatch_flow` 覆盖的是复核一次通过、直接 ACCEPTED 那条。
+        这条覆盖 AWAITING_HUMAN：**它不是错误**，是三种终局之一，界面要在这里
+        给出「就按这份拆解跑 / 否决」两个按钮，点下去才是 ruling → dispatch。
+        没有这条的话，界面上那两个按钮的语义没有任何东西钉着。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+
+            def decompose(_goal, _feedback):
+                return [
+                    SubtaskDraft(
+                        id="t1_build",
+                        goal="造出 a.txt",
+                        acceptance=[{"id": "c1", "description": "a.txt 被造出来"}],
+                        scope=["a.txt"],
+                    )
+                ]
+
+            backend = ScriptedBackend(
+                {(1, 0): Finish(output={}, summary="done")},
+                decompose_for=decompose,
+                # 复核一直报缺口 -> 重生成用尽 -> 升级给人 -> ChatGate 立即返回 None
+                review_for=lambda *_: (False, ["原始目标里的「一页」没有验收标准管它"]),
+            )
+            client = self._app(backend, tmp)
+            with client:
+                r = client.post("/api/tasks", json={"goal": "做一个造文件的小工具"})
+                plan_id = r.json()["plan_id"]
+
+                def settled():
+                    p = client.get(f"/api/plans/{plan_id}").json()
+                    return p if p.get("status") not in (None, "RUNNING") else None
+
+                plan = _wait_for(settled, what="拆解收敛")
+                self.assertEqual(plan["status"], "AWAITING_HUMAN")
+                self.assertFalse(plan["dispatchable"], "没人拍板之前不能派发")
+                self.assertTrue(plan["specs"], "要有一份拆解摆给人看，否则没什么可裁决的")
+                self.assertTrue(plan["escalation_reason"])
+
+                # 没拍板就派发 -> 409（界面上那个按钮此时也不该出现）
+                self.assertEqual(
+                    client.post(f"/api/plans/{plan_id}/dispatch", json={}).status_code, 409
+                )
+
+                # 「就按这份拆解跑」
+                r = client.post(
+                    f"/api/plans/{plan_id}/ruling",
+                    json={"accept": True, "rationale": "人确认按当前拆解执行"},
+                )
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertTrue(client.get(f"/api/plans/{plan_id}").json()["dispatchable"])
+
+                r = client.post(f"/api/plans/{plan_id}/dispatch", json={})
+                self.assertEqual(r.status_code, 202, r.text)
+                self.assertEqual(r.json()["root_id"], plan_id)
+
+    def test_plan_rejection_stays_undispatchable(self):
+        """「否决」之后不能再派发 —— 否则那个按钮就是个摆设。"""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            backend = ScriptedBackend(
+                {},
+                decompose_for=lambda _g, _f: [
+                    SubtaskDraft(
+                        id="t1", goal="g",
+                        acceptance=[{"id": "c1", "description": "d"}], scope=["a.txt"],
+                    )
+                ],
+                review_for=lambda *_: (False, ["缺口"]),
+            )
+            client = self._app(backend, tmp)
+            with client:
+                plan_id = client.post("/api/tasks", json={"goal": "g"}).json()["plan_id"]
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("status")
+                    == "AWAITING_HUMAN",
+                    what="拆解挂起",
+                )
+                client.post(f"/api/plans/{plan_id}/ruling", json={"accept": False})
+                self.assertEqual(
+                    client.post(f"/api/plans/{plan_id}/dispatch", json={}).status_code, 409
+                )
+
     # ---------------------------------------------------------- #
     # 写端的错误面
     # ---------------------------------------------------------- #
@@ -279,6 +365,18 @@ class TestServer(unittest.TestCase):
                 )
                 self.assertEqual(r.status_code, 400)
 
+                # 畸形 / 空 body 是 400（缺什么说什么），不是 500
+                for kw in ({}, {"content": b"not json"}, {"json": {}}):
+                    r = client.post(f"/api/tasks/{spec.id}/ruling", **kw)
+                    self.assertEqual(r.status_code, 400, r.text)
+                r = client.post("/api/tasks", content=b"{oops")
+                self.assertEqual(r.status_code, 400, r.text)
+
+                # 拆解裁决尤其不能把「字段缺失」落到 accept=False 上 ——
+                # 否决是有后果的，不该由一次畸形请求代人做出
+                r = client.post("/api/plans/plan_nope/ruling", json={})
+                self.assertEqual(r.status_code, 400, r.text)
+
     def test_cancel_endpoint(self):
         """取消的**接线**（端点 → runner → orchestrator.cancel）。
 
@@ -297,6 +395,18 @@ class TestServer(unittest.TestCase):
                 r = client.post("/api/tasks/task_nope/cancel", json={})
                 self.assertEqual(r.status_code, 409)
                 self.assertIn("ruling", r.json()["error"])
+
+                # **body 是可选的**（契约写的是 `{reason?}`）。原来的判据是
+                # `req.headers.get("content-length")` —— 那是字符串，"0" 为真，
+                # 于是 `curl -X POST` 这种带 Content-Length: 0 的请求会去解析
+                # 空 body，抛出去就是 500。可选就得真的可选。
+                for label, kw in (
+                    ("完全没有 body", {}),
+                    ("Content-Length: 0", {"headers": {"content-length": "0"},
+                                           "content": b""}),
+                ):
+                    r = client.post("/api/tasks/task_nope/cancel", **kw)
+                    self.assertEqual(r.status_code, 409, f"{label}: {r.text}")
 
                 orch = Orchestrator(
                     spec,

@@ -101,6 +101,69 @@ class TestRedact(unittest.TestCase):
         self.assertEqual(redact(""), "")
 
 
+class TestUpdateEnvWritesBack(unittest.TestCase):
+    """设置页写 .env（`server/settings_io.update_env`）。
+
+    这里不需要 fastapi —— 写文件那半是纯函数，而它正是密钥纪律的落点。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.f = self.tmp / ".env"
+        self._saved = os.environ.get("COWORK_ENV_FILE")
+        os.environ["COWORK_ENV_FILE"] = str(self.f)
+        self._touched = ["COWORK_T_KEY", "COWORK_LLM_BASE_URL"]
+        self._before = {k: os.environ.get(k) for k in self._touched}
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("COWORK_ENV_FILE", None)
+        else:
+            os.environ["COWORK_ENV_FILE"] = self._saved
+        for k, v in self._before.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_existing_key_is_replaced_in_place(self):
+        from cowork.server.settings_io import update_env
+
+        self.f.write_text("# 注释保留\nCOWORK_T_KEY=old\nOTHER=1\n", encoding="utf-8")
+        update_env({"COWORK_T_KEY": "new"})
+        text = self.f.read_text(encoding="utf-8")
+
+        self.assertIn("# 注释保留", text)
+        self.assertEqual(parse_env(text)["COWORK_T_KEY"], "new")
+        self.assertEqual(text.count("COWORK_T_KEY"), 1, "不该多写一行")
+
+    def test_export_prefixed_line_is_replaced_not_duplicated(self):
+        """`config.parse_env` 容忍 `export KEY=`，写回这边也必须认得出来。
+
+        不认的话每存一次设置就在文件末尾多一行同名 KEY —— 靠「后面的赢」结果
+        碰巧还是对的，但几轮之后没人看得懂这份 .env 到底哪一行在生效。
+        """
+        from cowork.server.settings_io import update_env
+
+        self.f.write_text("export COWORK_T_KEY=old\n", encoding="utf-8")
+        update_env({"COWORK_T_KEY": "new"})
+        text = self.f.read_text(encoding="utf-8")
+
+        self.assertEqual(text.count("COWORK_T_KEY"), 1, text)
+        self.assertEqual(parse_env(text)["COWORK_T_KEY"], "new")
+
+    def test_newline_in_value_is_refused(self):
+        """值里一个换行 = 往 .env 多写一行 = 任意环境变量注入。"""
+        from cowork.server.settings_io import update_env
+
+        self.f.write_text("", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            update_env(
+                {"COWORK_T_KEY": "sk-x\nCOWORK_LLM_BASE_URL=http://攻击者/"}
+            )
+        self.assertNotIn("攻击者", self.f.read_text(encoding="utf-8"))
+
+
 class TestSignalEvidenceIsRedacted(unittest.TestCase):
     def test_bus_redacts_on_emit(self):
         """所有信号的唯一入口，脱敏放在这一处。"""

@@ -317,13 +317,17 @@ class Scheduler:
             state.signal_log.append(sig.id)
             decision = self.architect.decide(state, [sig], run.context)
             self.store.save_decision(decision)
+            # **改完 state 要落库。** 仲裁把 interrupt_count / signal_log 加了一笔，
+            # 只改内存的话库里那一份就少记了一次中断 —— 而 §7.2 的
+            # `max_interrupts` 判据读的正是它，restore 出来的任务会少算。
+            self.store.save_task(state)
             run.decisions.append(decision)
             self.arbitration_log(sig, decision, result)
 
     def arbitration_log(self, sig: Signal, decision, result: CompositeResult) -> None:
         self.log(
             f"[ARBIT] {sig.payload['resource']} -> {decision.action.value}"
-            f"（decider={decision.decider.value}）: {decision.rationale[:80]}"
+            f"（decider={decision.decider.value}，仅记录不重跑）: {decision.rationale[:80]}"
         )
         result.arbitrations.append(
             {
@@ -334,5 +338,10 @@ class Scheduler:
                 "decider": decision.decider.value,
                 "escalation_reason": decision.escalation_reason,
                 "rationale": decision.rationale,
+                # **裁决被记录，但不会被应用。** 冲突是在任务跑完之后、层与层之间
+                # 检出的，此时改 spec 需要把那个任务重跑一遍，而那是调度层还没有的
+                # 能力（v0.1 的边界）。写成一个字段而不是留在注释里：读记录的人
+                # 必须能看出「MODIFY_TASK」这条有没有真的发生过。
+                "applied": False,
             }
         )

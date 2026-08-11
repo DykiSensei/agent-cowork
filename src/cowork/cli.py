@@ -547,10 +547,14 @@ def probe_provider(name: str, *, timeout: float = 10.0) -> dict:
         # 自己的 SDK，模型列表接口也不同 —— 只报「有 key」，不假装验证过
         return {"name": name, "status": "skipped",
                 "detail": "走 Anthropic SDK，不吃 /v1/models"}
-    if not p["base"]:
+    # **base_url 的解析必须和 `_make_raw_backend` 一模一样**（覆盖优先于预设）。
+    # 不一致的话，设置页填了 COWORK_LLM_BASE_URL 之后「测试连接」测的是官方端点、
+    # 跑任务打的是覆盖地址 —— 一个绿灯回答的是另一个问题。
+    base = os.environ.get("COWORK_LLM_BASE_URL") or p["base"]
+    if not base:
         return {"name": name, "status": "skipped", "detail": "没有 base_url"}
 
-    url = p["base"].rstrip("/") + "/models"
+    url = base.rstrip("/") + "/models"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -559,11 +563,12 @@ def probe_provider(name: str, *, timeout: float = 10.0) -> dict:
         return {"name": name, "status": "unreachable",
                 "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}
 
+    where = "" if base == p["base"] else f"（走覆盖地址 {base}）"
     missing = [m for m in wanted if m not in served]
     if missing:
         return {"name": name, "status": "mismatch",
-                "detail": f"服务端没有 {missing}；实际有 {sorted(served)[:6]}"}
-    return {"name": name, "status": "ok", "detail": f"{wanted} 都在服务端"}
+                "detail": f"服务端没有 {missing}；实际有 {sorted(served)[:6]}{where}"}
+    return {"name": name, "status": "ok", "detail": f"{wanted} 都在服务端{where}"}
 
 
 _PROBE_LABEL = {"ok": "OK", "mismatch": "对不上", "unreachable": "问不到", "skipped": "跳过"}

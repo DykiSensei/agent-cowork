@@ -143,6 +143,13 @@ class TaskSpec:
 
     output_schema: dict[str, Any] = field(default_factory=dict)
 
+    # 这一类任务**预期**能产生哪些硬信号（§3.2.1 的覆盖面）。
+    # **它是声明，不是过滤器** —— Runtime 不查这个集合就发信号，一个 GENERATIVE
+    # 任务真的把工具跑挂了照样出 TOOL_FAILURE。故意如此：漏报一条真实的失败，
+    # 比多报一条超出预期的失败贵得多。
+    # 它的读者是「谁需要知道这类任务的判据有多稀疏」——`__post_init__` 据此
+    # 把 GENERATIVE 强制成 PROBE（没有内容层判据就得主动探查），界面据此显示
+    # 覆盖面。所以看到时间线上有不在这个集合里的信号，不是 bug。
     hard_signals: frozenset[SignalType] = field(default=frozenset())
     silence_policy: SilencePolicy = SilencePolicy.TRUST
     probe_interval_s: float | None = None

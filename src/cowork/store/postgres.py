@@ -265,23 +265,39 @@ class PostgresStore:
     # -- events（M6 §9 第 4 条）-------------------------------------------- #
 
     def append_event(self, ev: TaskEvent) -> TaskEvent:
-        """seq 在库里分配：并行调度下多个 Orchestrator 同时写，调用方自己算必然撞号。"""
-        with self.conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(MAX(seq), 0) AS m FROM events WHERE task_id=%s",
-                (ev.task_id,),
-            )
-            ev.seq = cur.fetchone()["m"] + 1
-            cur.execute(
-                """INSERT INTO events (id, task_id, seq, kind, text, ref_id,
-                                       payload_json, created_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (
-                    ev.id, ev.task_id, ev.seq, ev.kind, ev.text, ev.ref_id,
-                    json.dumps(ev.payload), ev.created_at,
-                ),
-            )
-        return ev
+        """seq 在库里分配：并行调度下多个 Orchestrator 同时写，调用方自己算必然撞号。
+
+        **取号和写入必须是一条语句。** 原来是「先 SELECT MAX 再 INSERT」两步，
+        中间没有事务也没有锁（连接是 autocommit）—— 两个线程同时进来会算出同一个
+        seq，撞 `UNIQUE (task_id, seq)`，而调用方那层是
+        `except Exception: pass`（事件是旁路），于是**事件被静默丢掉**。
+        和当年那个外键坑是同一个组合：只在 PG 上发生 + 完全无声。
+
+        SQLite 那边靠 `_synchronized` 的进程内锁挡住了同样的竞争，但锁只管本进程；
+        这里用「INSERT ... SELECT」把取号放进同一条语句，再对唯一键冲突重试 ——
+        多进程连同一个库也成立。
+        """
+        from psycopg import errors as pg_errors
+
+        for _ in range(5):
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO events (id, task_id, seq, kind, text, ref_id,
+                                               payload_json, created_at)
+                           SELECT %s, %s, COALESCE(MAX(seq), 0) + 1, %s, %s, %s, %s, %s
+                             FROM events WHERE task_id = %s
+                           RETURNING seq""",
+                        (
+                            ev.id, ev.task_id, ev.kind, ev.text, ev.ref_id,
+                            json.dumps(ev.payload), ev.created_at, ev.task_id,
+                        ),
+                    )
+                    ev.seq = cur.fetchone()["seq"]
+                return ev
+            except pg_errors.UniqueViolation:
+                continue  # 另一个写入者抢到了这个号，重取
+        raise RuntimeError(f"events 取号连续 5 次撞号: task_id={ev.task_id}")
 
     def events_for(self, task_id: str, after_seq: int = 0) -> list[TaskEvent]:
         with self.conn.cursor() as cur:

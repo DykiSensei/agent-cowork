@@ -67,6 +67,25 @@ def create_app(
     def err(status: int, message: str) -> JSONResponse:
         return JSONResponse({"error": message}, status_code=status)
 
+    async def optional_body(req) -> dict:
+        """body 可选的端点用这个（契约里写成 `{reason?}` 的那些）。
+
+        原来的判据是 `req.headers.get("content-length")` —— 那是个**字符串**，
+        `"0"` 为真，于是 `Content-Length: 0`（curl -X POST 的默认形态）会去
+        解析空 body，抛出去就是 500。契约说可选，实现就得真的可选。
+        """
+        try:
+            raw = await req.body()
+        except Exception:  # noqa: BLE001 - 连接断了，当成没给 body
+            return {}
+        if not raw.strip():
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
     # ---------------- 线程 / 任务 ----------------
 
     @app.get("/api/tasks")
@@ -75,7 +94,9 @@ def create_app(
 
     @app.post("/api/tasks", status_code=202)
     async def create_task(req: Request):
-        body = await req.json()
+        # 全部入口都走 optional_body：body 不合法时该回 400（下面的字段校验会说
+        # 清楚缺什么），不该是 500
+        body = await optional_body(req)
         goal = (body.get("goal") or "").strip()
         if not goal:
             return err(400, "goal 不能为空")
@@ -92,7 +113,7 @@ def create_app(
 
     @app.post("/api/tasks/{task_id}/intervene", status_code=202)
     async def intervene(task_id: str, req: Request):
-        body = await req.json()
+        body = await optional_body(req)
         instruction = (body.get("instruction") or "").strip()
         if not instruction:
             return err(400, "instruction 不能为空")
@@ -102,7 +123,7 @@ def create_app(
 
     @app.post("/api/tasks/{task_id}/cancel", status_code=202)
     async def cancel_task(task_id: str, req: Request):
-        body = await req.json() if req.headers.get("content-length") else {}
+        body = await optional_body(req)
         if not runner.cancel(task_id, (body.get("reason") or "").strip()):
             # 挂起的任务不在这条路上 —— 那是 ruling(ABANDON)，提示里说清楚，
             # 否则界面只能给用户一个「409」
@@ -115,7 +136,7 @@ def create_app(
 
     @app.post("/api/tasks/{task_id}/ruling", status_code=202)
     async def rule_task(task_id: str, req: Request):
-        body = await req.json()
+        body = await optional_body(req)
         action = (body.get("action") or "").strip()
         if action not in ("CONTINUE", "MODIFY_TASK", "ABANDON", "REASSIGN"):
             return err(400, f"未知 action: {action!r}")
@@ -143,7 +164,11 @@ def create_app(
 
     @app.post("/api/plans/{plan_id}/ruling")
     async def rule_plan(plan_id: str, req: Request):
-        body = await req.json()
+        body = await optional_body(req)
+        if "accept" not in body and not body.get("specs"):
+            # 缺字段不能落到 accept=False 上 —— 那会把一次畸形请求变成「人否决了
+            # 这份拆解」，而否决是有后果的
+            return err(400, "要么给 accept（true/false），要么给一份 specs")
         try:
             runner.rule_plan(
                 plan_id,
@@ -159,7 +184,7 @@ def create_app(
 
     @app.post("/api/plans/{plan_id}/dispatch", status_code=202)
     async def dispatch_plan(plan_id: str, req: Request):
-        body = await req.json() if req.headers.get("content-length") else {}
+        body = await optional_body(req)
         try:
             root_id = runner.dispatch(plan_id, body.get("assignments"))
         except KeyError:
@@ -243,7 +268,7 @@ def create_app(
         p = PROVIDERS.get(name)
         if p is None or not p.get("key_env"):
             return err(404, f"未知供应商: {name!r}")
-        body = await req.json()
+        body = await optional_body(req)
         try:
             update_env({p["key_env"]: (body.get("api_key") or "").strip()})
         except ValueError as exc:
@@ -272,7 +297,7 @@ def create_app(
 
     @app.put("/api/settings")
     async def put_settings(req: Request):
-        body = await req.json()
+        body = await optional_body(req)
         pairs: dict[str, str] = {}
         for flat, env_name in GLOBAL_KEYS.items():
             section, _, key = flat.partition(".")

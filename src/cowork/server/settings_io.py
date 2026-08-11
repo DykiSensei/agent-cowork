@@ -94,7 +94,12 @@ def update_env(pairs: dict[str, str]) -> Path:
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
+        # `export KEY=...` 也要认出来 —— `config.parse_env` 容忍这个前缀，
+        # 这边不认的话就会在文件末尾再追加一行同名的 KEY=。两行都在时靠「后面的
+        # 赢」恰好还是对的，但每存一次设置就多一行，最后没人看得懂这份 .env。
         key = stripped.split("=", 1)[0].strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
         if key in remaining:
             lines[i] = f"{key}={remaining.pop(key)}"
     for key, value in remaining.items():

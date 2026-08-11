@@ -116,6 +116,28 @@ class TestConflictDetection(unittest.TestCase):
         keys = [(s.payload["resource"], tuple(s.payload["tasks"])) for s in result.conflicts]
         self.assertEqual(len(keys), len(set(keys)))
 
+    def test_arbitration_persists_the_state_it_mutated(self):
+        """仲裁给 interrupt_count / signal_log 加了一笔，那一笔要落库。
+
+        只改内存的话，库里那份就少记了一次中断 —— 而 §7.2 的 `max_interrupts`
+        和 restore 出来的任务读的正是库里那份。
+        """
+        result = self.sched.run(max_cycles=3)
+        owner = result.conflicts[0].payload["owner"]
+
+        stored = self.sched.store.load_task(owner)
+        self.assertEqual(stored.interrupt_count, result.results[owner].state.interrupt_count)
+        self.assertIn(result.conflicts[0].id, stored.signal_log)
+
+    def test_arbitration_records_that_it_was_not_applied(self):
+        """裁决被记录，但没有被应用 —— 记录里必须看得出这个区别。
+
+        冲突是在任务跑完之后检出的，此时 MODIFY_TASK 需要把那个任务重跑一遍，
+        而那是调度层还没有的能力。读记录的人不该以为 spec 真的改过了。
+        """
+        result = self.sched.run(max_cycles=3)
+        self.assertFalse(result.arbitrations[0]["applied"])
+
 
 class TestCrossLayerIsNotAConflict(unittest.TestCase):
     def test_sequential_handoff_is_normal(self):

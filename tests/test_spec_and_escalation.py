@@ -60,6 +60,26 @@ class TestSpecConstraints(unittest.TestCase):
                       "人的介入对任何 task_class 都必须可抢占")
         self.assertLess(len(gen.hard_signals), len(code.hard_signals))
 
+    def test_hard_signals_is_a_declaration_not_a_filter(self):
+        """**Runtime 不查这个集合就发信号** —— 这是刻意的，不是漏了。
+
+        `hard_signals` 说的是「这一类任务**预期**能产生哪些硬信号」，它的读者是
+        `__post_init__`（据此把 GENERATIVE 强制成 PROBE）和界面（显示覆盖面）。
+        真要拿它当过滤器，一个 GENERATIVE 任务把工具跑挂了就不会中断 ——
+        漏报一条真实的失败，比多报一条超出预期的失败贵得多。
+
+        钉住它是因为两种读法都说得通，而选错的代价是静默丢信号。
+        """
+        import inspect
+
+        from cowork.runtime import loop as loop_module
+
+        gen = TaskSpec(goal="写一篇调研", acceptance=[Criterion("c", "d")],
+                       task_class=TaskClass.GENERATIVE, probe_interval_s=30)
+        self.assertNotIn(SignalType.TOOL_FAILURE, gen.hard_signals)
+        # 循环里没有任何一处拿 spec.hard_signals 做判断
+        self.assertNotIn("hard_signals", inspect.getsource(loop_module))
+
     def test_bump_increments_revision(self):
         s = TaskSpec(goal="g", acceptance=[Criterion("c", "d")],
                      task_class=TaskClass.CODE, sandbox=SANDBOX)
