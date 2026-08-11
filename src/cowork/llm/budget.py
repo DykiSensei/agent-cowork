@@ -123,8 +123,10 @@ class BudgetedBackend:
     def review_spec_change(self, spec, signals, verdict):
         return self._call("review_spec_change", spec, signals, verdict)
 
-    def decompose(self, root_goal, *, feedback=None):
-        return self._call("decompose", root_goal, feedback=feedback)
+    def decompose(self, root_goal, *, feedback=None, existing=None):
+        return self._call(
+            "decompose", root_goal, feedback=feedback, existing=existing
+        )
 
     def profile_tasks(self, specs):
         return self._call("profile_tasks", specs)

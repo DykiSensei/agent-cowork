@@ -235,5 +235,73 @@ class TestAvailableProviders(unittest.TestCase):
         self.assertNotIn("litellm", available_providers())
 
 
+class TestWrappersMatchTheProtocol(unittest.TestCase):
+    """**包一层 Backend 的类，签名必须跟着协议走。**
+
+    实测炸过：M10 给 `decompose` 加了 `existing`（接手已有项目要的工作区现状），
+    真实后端都改了，而 `RoutingBackend` / `BudgetedBackend` 这两个**包装类**
+    各自重新声明了一遍签名、没人跟着改 —— 于是只要配了按角色选供应商或开着
+    token 护栏（默认就开），拆解 100% 挂在
+    `TypeError: decompose() got an unexpected keyword argument 'existing'`。
+
+    单测全绿是因为它们都直接拿真实/脚本后端测，**没有一条测试是隔着包装层发起的**
+    （同 §11.20 那条：契约写了什么，就要有一条从调用方那侧发起的测试）。
+
+    这条用例比逐个修更值钱：它把「加一个参数要改几处」变成机器来记。
+    """
+
+    WRAPPERS = ("routing.RoutingBackend", "budget.BudgetedBackend")
+
+    def _wrapper_classes(self):
+        import importlib
+
+        for path in self.WRAPPERS:
+            mod, _, cls = path.partition(".")
+            yield path, getattr(importlib.import_module(f"cowork.llm.{mod}"), cls)
+
+    def test_no_wrapper_drops_a_protocol_parameter(self):
+        import inspect
+
+        from cowork.llm import Backend
+
+        for path, wrapper in self._wrapper_classes():
+            for name in dir(Backend):
+                if name.startswith("_"):
+                    continue
+                proto = getattr(Backend, name, None)
+                impl = getattr(wrapper, name, None)
+                if not callable(proto) or not callable(impl):
+                    continue
+                try:
+                    want = set(inspect.signature(proto).parameters) - {"self"}
+                    got = set(inspect.signature(impl).parameters) - {"self"}
+                except (TypeError, ValueError):  # pragma: no cover
+                    continue
+                if "kwargs" in got:
+                    continue  # 原样透传的不用逐个对
+                self.assertEqual(
+                    want - got, set(),
+                    f"{path}.{name} 少了协议里的参数 —— 调用方一传就是 TypeError",
+                )
+
+    def test_decompose_survives_both_wrappers(self):
+        """真的隔着两层包装调一次 —— 上面那条是形状，这条是行为。"""
+        from cowork.llm.budget import BudgetedBackend, CostGuard
+
+        inner = ScriptedBackend({}, decompose_for=lambda goal, feedback: [])
+        routed = RoutingBackend(inner, {})
+        wrapped = BudgetedBackend(routed, CostGuard(0))
+
+        for backend in (routed, wrapped):
+            drafts, tokens = backend.decompose(
+                "把 CSV 转成周报", feedback=["缺一条验收标准"], existing="README.md\n",
+            )
+            self.assertIsInstance(drafts, list)
+            self.assertIsInstance(tokens, int)
+
+        # 现状真的穿过了两层包装 —— 只对签名不够，值丢了照样是「当成空目录重建」
+        self.assertEqual(inner.decompose_existing, ["README.md\n"] * 2)
+
+
 if __name__ == "__main__":
     unittest.main()
