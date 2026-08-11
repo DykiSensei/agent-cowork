@@ -68,9 +68,16 @@ def assign_providers(
 class RoutingBackend:
     """按 `TaskSpec.model` 的供应商前缀分发 `next_step()`，其余角色固定走 default。"""
 
-    def __init__(self, default: Any, backends: dict[str, Any]) -> None:
+    def __init__(
+        self, default: Any, backends: dict[str, Any], *,
+        subagent_default: str | None = None,
+    ) -> None:
         self.default = default
         self.backends = dict(backends)
+        # 「所有干活的都用这一家」（设置页的角色选择）。它是 spec 没写前缀时的
+        # 落点，**不是覆盖** —— 单个任务上的按任务分配（§10.3.3）仍然更优先，
+        # 那是人对着任务画像做的更细的决定。
+        self.subagent_default = subagent_default
         # 用过哪几家 —— 跑完要能说清楚「这次实际是谁在干活」
         self.used: dict[str, int] = {}
 
@@ -83,6 +90,8 @@ class RoutingBackend:
 
     def next_step(self, ctx):
         provider, _ = split_model(ctx.task_spec.model)
+        if provider is None:
+            provider = self.subagent_default
         backend = self.backends.get(provider) if provider else None
         if backend is None:
             # 前缀不认识（配置里没这家 / 没写前缀）→ 回落默认，不报错。

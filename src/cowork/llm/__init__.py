@@ -206,13 +206,22 @@ class Backend(Protocol):
         ...
 
     def decompose(
-        self, root_goal: str, *, feedback: list[str] | None = None
+        self,
+        root_goal: str,
+        *,
+        feedback: list[str] | None = None,
+        existing: str | None = None,
     ) -> tuple[list[SubtaskDraft], int]:
         """把一个自然语言目标拆成子任务（§12 M7 7.3）。
 
         `feedback` 是**上一轮复核报出的缺口**，重生成时喂回去。它和
         `decide_interrupt(history=...)` 是同一个设计：没有它，生成者每一轮都在
         「第一次看到这个目标」的状态下重拆，复核意见等于没提（§11.9b 的教训）。
+
+        `existing` 是**工作区现状**（接手已有项目时给，见 `cowork.workspace`）。
+        没有它的话，一个有内容的目录会被当成空目录，架构师从零重建一遍 ——
+        而那正是「半路接手」和「从零开始」的全部区别。它和 feedback 一样只进
+        user 消息、不进 system：静态前缀一字不动，缓存命中率不受影响（§11.14）。
 
         模型只填**它有权决定的字段**：goal / acceptance / scope / depends_on /
         task_class。sandbox、tools、各类上限由调用方的模板决定 ——

@@ -355,8 +355,14 @@ DECOMPOSE_SCHEMA: dict[str, Any] = {
 }
 
 
-def _render_decompose_context(root_goal: str, feedback: list[str] | None) -> str:
+def _render_decompose_context(
+    root_goal: str, feedback: list[str] | None, existing: str | None = None
+) -> str:
     parts = [f"# 原始目标\n{root_goal}"]
+    if existing:
+        # 现状排在目标之后、复核意见之前：它是「这件事的前提」，
+        # 而复核意见是「上一轮哪儿没做对」，后者更该贴着输出（见下面那条注释）
+        parts.append(existing)
     if feedback:
         # 复核缺口放在最后：模型对上下文末尾的要求执行得更实在，而这一段是
         # 「必须修掉的东西」。同 _render_architect_context 里裁决历史的处理。
@@ -836,13 +842,14 @@ class AnthropicBackend:
         return data["ok"], list(data["findings"]), tokens
 
     def decompose(
-        self, root_goal: str, *, feedback: list[str] | None = None
+        self, root_goal: str, *, feedback: list[str] | None = None,
+        existing: str | None = None,
     ) -> tuple[list[SubtaskDraft], int]:
         # 用架构师主模型：拆解是这个系统里最有杠杆的一次判断，拆错了后面全白干。
         data, tokens = self._call(
             model=self.architect_model,
             system=DECOMPOSE_SYSTEM,
-            user=_render_decompose_context(root_goal, feedback),
+            user=_render_decompose_context(root_goal, feedback, existing),
             schema=DECOMPOSE_SCHEMA,
         )
         return _parse_drafts(data), tokens

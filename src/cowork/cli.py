@@ -194,11 +194,18 @@ def available_providers() -> dict[str, str]:
     return out
 
 
-def _make_routing_backend(default_kind: str, providers: dict[str, str]):
+def _make_routing_backend(
+    default_kind: str, providers: dict[str, str], *, subagent: str | None = None
+):
     """给每个可用供应商建一个后端，包成路由后端。
 
     只有一家时**不包**——多一层没有意义，而且 `RoutingBackend` 的名字会出现在
     日志和记录里，让人以为发生了跨供应商调度。
+
+    `subagent` 是「所有干活的都用这一家」（设置页那个下拉）。它只影响
+    `next_step()`：架构师的每一次调用仍然走 `default` —— §2.3 说它是单一实例、
+    持有连续上下文，按角色换供应商到此为止，再往下拆就不是一个决策点了。
+    单个任务上仍然可以用 `TaskSpec.model` 的前缀覆盖它（§10.3.3 的按任务分配）。
     """
     from .llm.routing import RoutingBackend
 
@@ -206,7 +213,7 @@ def _make_routing_backend(default_kind: str, providers: dict[str, str]):
     others = {k: (default if k == default_kind else _make_backend(k)) for k in providers}
     if len(others) < 2:
         return default
-    return RoutingBackend(default, others)
+    return RoutingBackend(default, others, subagent_default=subagent)
 
 
 # 会话级 token 护栏（§12 M9）。一次 CLI 调用共享一个 CostGuard ——

@@ -9,13 +9,12 @@ Store 是线程安全的，但**同一个任务不会并发跑两次**（ruling 
 
 from __future__ import annotations
 
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import ids, views
+from .. import ids, views, workspace
 from ..agent.architect import (
     Architect,
     DecompositionResult,
@@ -49,6 +48,10 @@ class PlanEntry:
     ruling_note: str = ""
     profiles: list | None = None
     dispatched_root: str | None = None
+    # 产物落在哪、是不是接手已有项目。**要能回给界面** ——
+    # 「我的产物在哪」原来在这套系统里没有答案（落在随机临时目录，界面也不显示）
+    workspace: str = ""
+    takeover: bool = False
 
 
 class Runner:
@@ -77,6 +80,20 @@ class Runner:
     # 后端
     # ------------------------------------------------------------------ #
 
+    def _role_provider(self, key: str, providers: dict[str, str]) -> str | None:
+        """设置页给某个角色指定的供应商。不认识 / 没配 key 的一律当没设。
+
+        **每次起跑时读**，和后端实例一样 —— 设置页改完对下一个任务立即生效。
+        """
+        import os
+
+        name = (os.environ.get(key) or "").strip()
+        if not name:
+            return None
+        if name == "none":
+            return "none"
+        return name if name in providers else None
+
     def _exec_backend(self):
         if self._backend_factory is not None:
             return self._backend_factory()
@@ -85,22 +102,35 @@ class Runner:
             raise RuntimeError(
                 "没有任何供应商的 API key —— 在设置页或 .env 里配一个"
             )
+        # 架构师那一家由设置页决定（§10.3.3 的「模型选择归人」在角色这一层的落地）：
+        # 它是唯一写入决策点，拆解 / 中断决策 / 验收 / 分诊全走它。
         default = (
-            self.default_backend
-            if self.default_backend in providers
-            else next(iter(providers))
+            self._role_provider("COWORK_ARCHITECT_PROVIDER", providers)
+            or (self.default_backend if self.default_backend in providers else None)
+            or next(iter(providers))
         )
         if len(providers) < 2:
             return _make_backend(default)
-        return _make_routing_backend(default, providers)
+        # Subagent 可以指定另一家：它干活、架构师做判断，这两件事适合的模型不一定同一个。
+        # 没指定就跟架构师同一家（RoutingBackend 的 default）。
+        return _make_routing_backend(
+            default,
+            providers,
+            subagent=self._role_provider("COWORK_SUBAGENT_PROVIDER", providers),
+        )
 
     def _reviewer_backend(self):
         # 注入了 backend_factory（测试/定制部署）时不自作主张配复核者 ——
         # 否则测试环境会对着真实供应商发请求
         if self._backend_factory is not None:
             return None
-        name = resolve_reviewer(self.default_backend, "auto")
-        if not name or name not in available_providers():
+        providers = available_providers()
+        picked = self._role_provider("COWORK_REVIEWER_PROVIDER", providers)
+        if picked == "none":
+            # 人明确关掉了独立复核 —— 退回同模型复核（M5b 的形态），不是不复核
+            return None
+        name = picked or resolve_reviewer(self.default_backend, "auto")
+        if not name or name not in providers:
             return None
         return _make_backend(name)
 
@@ -121,11 +151,31 @@ class Runner:
     # 拆解（POST /tasks）
     # ------------------------------------------------------------------ #
 
-    def start_plan(self, goal: str) -> str:
+    def workspace_root(self) -> Path:
+        """默认工作区：设置页 > 启动参数 > `~/cowork-workspaces`。
+
+        **必须是人找得到的地方**：原来没配就 `tempfile.mkdtemp()`，
+        于是「我的产物在哪」这个问题没有答案（实测反馈）。
+        """
+        import os
+
+        raw = (os.environ.get("COWORK_WORKSPACE") or "").strip() or self.workspace
+        return workspace.resolve_workspace(raw) if raw else workspace.default_root()
+
+    def start_plan(
+        self, goal: str, *, ws: str | None = None, takeover: bool = False
+    ) -> str:
         backend = self._exec_backend()  # 同步建一次：没 key 时让请求立刻 400，而不是线程里悄悄死
         plan_id = ids.task_id()  # 同时也是将来那条复合线程的 root_id
+        # 路径问题要在起跑之前抛（ValueError → 400），别等到 Subagent 写第一个
+        # 文件才发现目录不能用
+        root = workspace.resolve_workspace(ws) if ws else self.workspace_root()
+        ws_path = workspace.task_workspace(root, plan_id, takeover=takeover)
         with self._lock:
-            self.plans[plan_id] = PlanEntry(id=plan_id, goal=goal, created_at=time.time())
+            self.plans[plan_id] = PlanEntry(
+                id=plan_id, goal=goal, created_at=time.time(),
+                workspace=str(ws_path), takeover=takeover,
+            )
         # 人的原话落进 root 线程的第一条事件（M6 §9 那两条小缺口）。
         # 为什么非记不可：spec.goal 会被架构师改写，rev>1 之后**人最初说的那句话
         # 就再也拿不回来了**，而界面开头那个「你发布任务」的气泡要的正是原话。
@@ -142,12 +192,19 @@ class Runner:
     def _plan_worker(self, plan_id: str, goal: str, backend) -> None:
         entry = self.plans[plan_id]
         try:
-            ws = (
-                Path(self.workspace) / plan_id
-                if self.workspace
-                else Path(tempfile.mkdtemp(prefix="cowork-serve-"))
-            )
-            ws.mkdir(parents=True, exist_ok=True)
+            ws = workspace.ensure(Path(entry.workspace))
+            # 接手已有项目：先把现状摆给架构师看。**不给的话它会把一个有内容的
+            # 目录当空目录，从零重建一遍** —— 那正是「半路接手」和「从零开始」
+            # 的全部区别。从零开始的任务不采集（目录本来就是空的，白花提示词）。
+            existing = ""
+            if entry.takeover:
+                entries = workspace.snapshot(ws)
+                existing = workspace.render_snapshot(entries)
+                self._log(
+                    f"[PLAN] 接手已有项目：{ws}，现状 {len(entries)} 个文件"
+                    if entries
+                    else f"[PLAN] 接手模式，但 {ws} 是空的 —— 按从零开始处理"
+                )
             architect = Architect(
                 backend,
                 self.store,
@@ -164,6 +221,7 @@ class Runner:
                     ),
                     parent_id=plan_id,
                 ),
+                existing=existing or None,
                 log=self._log,
             )
             with self._lock:
@@ -191,6 +249,9 @@ class Runner:
             dispatchable=entry.dispatchable,
             ruling_note=entry.ruling_note,
             dispatched_root=entry.dispatched_root,
+            # 产物落在哪 —— 界面要显示它，这是「我的东西在哪」的唯一答案
+            workspace=entry.workspace,
+            takeover=entry.takeover,
         )
         # 模型选择界面要的两样素材：任务特点（架构师一次调用）+ 可用的家。
         # profiles 是 LLM 调用，惰性生成一次然后缓存 —— 只有一家可用时不该问也不该花。

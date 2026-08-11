@@ -25,6 +25,12 @@ GLOBAL_KEYS = {
     "effort.architect": "COWORK_ARCHITECT_EFFORT",
     "effort.subagent": "COWORK_SUBAGENT_EFFORT",
     "effort.cheap": "COWORK_CHEAP_EFFORT",
+    # 每个角色用哪一家（从已配 key 的供应商里选，空 = 自动）。
+    # **这和上面的 models.* 是两件事**：那是模型 id 的全局覆盖，这是「谁来干」。
+    "providers.architect": "COWORK_ARCHITECT_PROVIDER",
+    "providers.reviewer": "COWORK_REVIEWER_PROVIDER",
+    "providers.subagent": "COWORK_SUBAGENT_PROVIDER",
+    "workspace": "COWORK_WORKSPACE",
     "review_writes": "COWORK_REVIEW_WRITES",
 }
 
@@ -34,6 +40,10 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 DEFAULTS = {
     "base_url_override": "",
     "models": {"architect": "", "subagent": "", "triage": ""},
+    # 空 = 自动：架构师用启动时那家，复核者按 `resolve_reviewer` 挑一家**不同的**
+    # （§11.11：独立复核的前提就是不同家），Subagent 跟架构师同一家。
+    "providers": {"architect": "", "reviewer": "", "subagent": ""},
+    "workspace": "",
     "effort": {"architect": "high", "subagent": "medium", "cheap": "off"},
     # 写入侧复核（§12 M8）。默认开，依据 §11.19；界面上留开关是因为
     # 它的**重做循环**没在真实链路上测过，只有判别力那半有数据。

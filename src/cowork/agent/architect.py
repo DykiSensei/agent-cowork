@@ -758,6 +758,7 @@ class Architect:
         template: SpecTemplate,
         *,
         feedback: list[str] | None = None,
+        existing: str | None = None,
     ) -> list[TaskSpec]:
         """让模型拆一次，把结果补全成可派发的 TaskSpec。
 
@@ -767,7 +768,9 @@ class Architect:
         补全在这里做而不是在提示词里要求，是因为 sandbox / tools / 上限
         属于隔离与成本边界 —— 见 `SpecTemplate` 的说明。
         """
-        drafts, tokens = self.backend.decompose(root_goal, feedback=feedback)
+        drafts, tokens = self.backend.decompose(
+            root_goal, feedback=feedback, existing=existing
+        )
         self.tokens_used += tokens
         return [self._assemble(d, template) for d in drafts]
 
@@ -801,6 +804,7 @@ class Architect:
         root_goal: str,
         template: SpecTemplate,
         *,
+        existing: str | None = None,
         log: Callable[[str], None] = lambda _m: None,
     ) -> DecompositionResult:
         """生成 → 复核 → 重生成 ≤N 次 → 升级给人（§12 M7 7.4）。
@@ -840,7 +844,11 @@ class Architect:
         while True:
             attempt += 1
             try:
-                specs = self.decompose(root_goal, template, feedback=feedback)
+                # existing 每一轮都要给：重生成同样是在已有基础上拆，
+                # 少给一轮就等于告诉它「这次是空目录」
+                specs = self.decompose(
+                    root_goal, template, feedback=feedback, existing=existing
+                )
             except ModelError as exc:
                 # 模型调不动或产出不合规 —— 和执行层同一条路：不抛出去，
                 # 变成「需要人」的终局。架构师连拆解都拆不出来时不该猜一个。
