@@ -193,11 +193,33 @@ export interface ProviderInfo {
   base: string | null;
   key_env: string;
   models: { subagent: string | null; architect: string | null; triage: string | null };
+  /**
+   * **「我们验证过这个预设」，不是「你的 key 有效」。**
+   * 指的是 PROVIDERS 表里那一行的 model id 在本机用真 key 打通过。
+   * 用户自己的 key 能不能用要看 ProbeResult —— 两件事共用一个标签的话，
+   * 填完 key 看到「未验证」会以为是自己填错了。
+   */
+  preset_verified: boolean;
+  /** @deprecated 用 preset_verified；这个只为兼容旧前端保留 */
   verified: boolean;
   effort: string | null;
   cache: string;
+  /** 环境变量非空 —— 只说明「填了」，不说明「能用」 */
   configured: boolean;
   key_hint: string | null;
+}
+
+/** POST /api/providers/:name/test 的结果（后端 probe_provider）。 */
+export interface ProbeResult {
+  name: string;
+  /**
+   * ok         预设的 model id 都在服务端，这家现在能用
+   * mismatch   端点通、key 有效，但预设写的 id 服务端没有（表过期了）
+   * unreachable 问不到 —— **不代表配置错**
+   * skipped    没有 key / 这家不吃 /v1/models —— **不代表配置错**
+   */
+  status: "ok" | "mismatch" | "unreachable" | "skipped";
+  detail: string;
 }
 
 export interface Settings {

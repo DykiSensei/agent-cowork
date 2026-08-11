@@ -111,6 +111,18 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
         : sendJson(res, 404, { error: "not found" });
     }
 
+    // 设置页的「测试连接」：mock 不打真实端点，回一个 skipped —— 它的语义正是
+    // 「没测到」，不是「失败」，所以这里不用编一个假的成功
+    const probe = url.pathname.match(/^\/api\/providers\/([\w-]+)\/test$/);
+    if (req.method === "POST" && probe) {
+      await drain(req);
+      return sendJson(res, 200, {
+        name: probe[1],
+        status: "skipped",
+        detail: "mock 不打真实端点 —— 起 cowork serve 才测得到",
+      });
+    }
+
     const act = url.pathname.match(/^\/api\/tasks\/([\w-]+)\/(intervene|cancel|ruling)$/);
     if (req.method === "POST" && act) {
       await drain(req);

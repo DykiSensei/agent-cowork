@@ -26,41 +26,62 @@ M6 ✅ 群聊界面层      前端 ui/（React + TS，简洁/专业双模式 + �
 
 ## 跑起来
 
-```bash
-docker compose up -d postgres litellm
-python -m unittest discover -s tests -t .
-```
-
-377 个测试。三样基础设施都不起时，依赖它们的 14 个会 skip（3 个 Postgres +
-5 个 LiteLLM + 6 个 Docker 沙箱），其余照常跑；打真实供应商的用例需要
-`DEEPSEEK_API_KEY` 或 `MOONSHOT_API_KEY`（`.env` 里配好即可，测试会自动读）。
+**第一次跑不需要 key，也不需要 Docker：**
 
 ```bash
-python -m cowork.cli demo                      # SQLite + 本地沙箱 + 脚本后端
-python -m cowork.cli demo --store pg --docker  # Postgres + Docker 沙箱
-python -m cowork.cli demo --backend deepseek   # 真实模型（需要 key，见下）
-
-python -m cowork.cli composite --backend deepseek          # M4 复合任务：并行 + 冲突检测
-
-python -m cowork.cli plan "把 CSV 转成带图表的周报" --run    # M7：一句话 → 拆解 → 并行跑到产出
-
-python -m cowork.cli bench --backend deepseek --repeat 5   # M2 参数实测跑批
-python -m cowork.cli bench-report bench_runs.jsonl         # 出参数结论
+pip install -e .
+cowork demo
 ```
 
-（未安装时先 `pip install -e .`，或 `set PYTHONPATH=src`。）
+它用脚本后端（确定性、不花钱）把完整链路走一遍：L0 硬信号 → 中断 →
+架构师改规格 → REBASE → 恢复 → 完成。想知道自己这台机器上还能跑什么：
 
-带界面跑：
+```bash
+cowork models     # 各家 key 配了没有 / 模型 id 对不对得上 / PG 与 Docker 在不在
+```
+
+### 接真实模型
+
+`.env` 里填一个 key（`cp .env.example .env`），或者跑起界面在设置页里填：
+
+```bash
+cowork demo --backend deepseek                 # 真实模型跑同一个场景
+cowork plan "把 CSV 转成带图表的周报" --run       # 一句话 → 拆解 → 并行跑到产出
+cowork composite --backend deepseek            # M4 复合任务：并行 + 冲突检测
+```
+
+没配 key 就打真实供应商时，它会**当场告诉你少了哪一步**，而不是让你撞一个
+看起来像账号问题的 401。花钱有上限：`--budget`（默认 100 万 token，`0` 关闭）。
+
+### 带界面跑
 
 ```bash
 pip install -e .[server]
 cd ui && npm install && npm run build && cd ..
-python -m cowork.cli serve      # http://127.0.0.1:8000
+cowork serve                                   # http://127.0.0.1:8000
 ```
 
 `serve` **只绑 loopback，绑别的地址会被直接拒绝** —— 理由见
 [这个原型不适合做什么](#这个原型不适合做什么)。只想看界面不想起后端的话，
 `cd ui && npm run dev` 自带 mock API（数据是真实运行导出的，见 `ui/README.md`）。
+
+### 跑测试
+
+```bash
+docker compose up -d postgres litellm      # 可选，不起就 skip 掉相关的
+python -m unittest discover -s tests -t .
+```
+
+398 个测试。三样基础设施都不起时，依赖它们的 14 个会 skip（3 个 Postgres +
+5 个 LiteLLM + 6 个 Docker 沙箱），其余照常跑；打真实供应商的用例需要
+`DEEPSEEK_API_KEY` 或 `MOONSHOT_API_KEY`（`.env` 里配好即可，测试会自动读）。
+
+跑批实测（**要花真钱**，先看 §12 的预算参考）：
+
+```bash
+cowork bench --backend deepseek --repeat 5   # M2 参数实测
+cowork bench-report bench_runs.jsonl         # 只出结论，不重跑不花钱
+```
 
 演示场景的实际输出：
 

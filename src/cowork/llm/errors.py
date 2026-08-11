@@ -14,6 +14,19 @@ from __future__ import annotations
 from ..signals import SignalType
 
 
+class MissingApiKey(RuntimeError):
+    """还没配 key 就要打真实端点。
+
+    **刻意不是 `ModelError` 的子类。** ModelError 会被归成硬信号、交给架构师
+    决策、最后以 AWAITING_HUMAN 收尾 —— 那条路对「模型调用失败」是对的，
+    对「你还没配置」是灾难：用户看到的是跑到一半的 401
+    （`Your api key: ****lder is invalid`，因为回退链末尾是个占位符），
+    读起来像账号出了问题，而真相是少做了一步。
+
+    配置错误应该在**构造后端时**就大声抛出来，不进信号机制。
+    """
+
+
 class ModelError(Exception):
     """模型调用失败，且已归类到某个硬信号。"""
 

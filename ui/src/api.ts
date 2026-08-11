@@ -4,6 +4,7 @@
  */
 
 import type {
+  ProbeResult,
   ProviderInfo,
   Settings,
   TaskDetail,
@@ -74,6 +75,14 @@ export function subscribeStream(onEvent: (data: unknown) => void): () => void {
 
 export function fetchProviders(): Promise<ProviderInfo[]> {
   return req("/api/providers");
+}
+
+/**
+ * 真打一次端点，回答「这个 key 现在能不能用」。
+ * 和 `cowork models` 共用后端的 probe_provider()。
+ */
+export function testProvider(name: string): Promise<ProbeResult> {
+  return req(`/api/providers/${name}/test`, { method: "POST" });
 }
 
 export function putProviderKey(name: string, apiKey: string) {

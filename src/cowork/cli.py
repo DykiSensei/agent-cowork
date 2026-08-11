@@ -14,6 +14,8 @@ import argparse
 import json
 import sys
 
+from .llm.errors import MissingApiKey
+
 
 # 每个供应商的端点、key 来源、默认模型分工。
 #
@@ -280,6 +282,8 @@ def _make_raw_backend(kind: str):
         architect_effort=arch_effort,
         subagent_effort=sub_effort,
         cheap_effort=cheap_effort,
+        # 只为了没配 key 时能把话说全（"没有配置 deepseek 的 API key…"）
+        provider=kind,
     )
 
 
@@ -517,6 +521,72 @@ def _threads(args: argparse.Namespace) -> int:
     return 0
 
 
+def probe_provider(name: str, *, timeout: float = 10.0) -> dict:
+    """探一家供应商：有没有 key、端点通不通、预设的 model id 在不在服务端。
+
+    **CLI 的 `models` 和设置页的「测试连接」共用这一份。** 两套探测迟早会分叉，
+    而它们回答的是同一个问题。
+
+    status 的四个取值刻意分开，因为它们的**结论不同**：
+      ok         预设的 model id 都在服务端 —— 这家现在能用
+      mismatch   端点通、key 有效，但预设写的 id 服务端没有（表过期了）
+      unreachable 问不到（网络 / 这家没有这个接口）—— **不代表配置错**
+      skipped    没有 key，或这家不吃 /v1/models —— **不代表配置错**
+    """
+    import os
+    import urllib.error
+    import urllib.request
+
+    p = PROVIDERS[name]
+    wanted = sorted({m for m in p["models"] if m})
+    key = os.environ.get("COWORK_LLM_API_KEY") or os.environ.get(p["key_env"] or "")
+    if not key:
+        return {"name": name, "status": "skipped",
+                "detail": f"没有 {p['key_env']}，未验证"}
+    if name == "anthropic":
+        # 自己的 SDK，模型列表接口也不同 —— 只报「有 key」，不假装验证过
+        return {"name": name, "status": "skipped",
+                "detail": "走 Anthropic SDK，不吃 /v1/models"}
+    if not p["base"]:
+        return {"name": name, "status": "skipped", "detail": "没有 base_url"}
+
+    url = p["base"].rstrip("/") + "/models"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            served = {m["id"] for m in json.load(resp).get("data", [])}
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+        return {"name": name, "status": "unreachable",
+                "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}
+
+    missing = [m for m in wanted if m not in served]
+    if missing:
+        return {"name": name, "status": "mismatch",
+                "detail": f"服务端没有 {missing}；实际有 {sorted(served)[:6]}"}
+    return {"name": name, "status": "ok", "detail": f"{wanted} 都在服务端"}
+
+
+_PROBE_LABEL = {"ok": "OK", "mismatch": "对不上", "unreachable": "问不到", "skipped": "跳过"}
+_PROBE_EXIT = {"ok": 0, "skipped": 0, "unreachable": 1, "mismatch": 2}
+_PROBE_MARK = {"ok": "✓", "mismatch": "✗", "unreachable": "?", "skipped": "-"}
+_PROBE_MARK_ASCII = {"ok": "+", "mismatch": "x", "unreachable": "?", "skipped": "-"}
+
+
+def _marks() -> dict[str, str]:
+    """终端编不出 ✓ 就退回 ASCII。
+
+    中文 Windows 的默认控制台是 GBK，`✓` 直接 UnicodeEncodeError —— 而这是个
+    **查状态**的命令，第一次跑的人拿它确认环境，结果它自己崩了。
+    装饰字符不值得让一条诊断命令挂掉。
+    """
+    enc = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        "✓✗".encode(enc)
+    except (UnicodeEncodeError, LookupError):
+        return _PROBE_MARK_ASCII
+    return _PROBE_MARK
+
+
 def _models(args: argparse.Namespace) -> int:
     """拿各家的 GET /v1/models 对一遍 PROVIDERS 表。
 
@@ -526,54 +596,82 @@ def _models(args: argparse.Namespace) -> int:
     deepseek-v4-flash 就是这么发生的。所以给一个能直接问的命令，
     别靠读文档判断表里写的还对不对。
     """
-    import os
-    import urllib.error
-    import urllib.request
-
     names = [args.provider] if args.provider else PROVIDER_NAMES
     rows: list[tuple[str, str, str]] = []
     exit_code = 0
 
+    marks = _marks()
     for name in names:
-        p = PROVIDERS[name]
-        wanted = sorted({m for m in p["models"] if m})
-        key = os.environ.get("COWORK_LLM_API_KEY") or os.environ.get(p["key_env"] or "")
-        if not key:
-            rows.append((name, "跳过", f"没有 {p['key_env']}，未验证"))
-            continue
-        if name == "anthropic":
-            # 自己的 SDK，模型列表接口也不同 —— 这里只报「有 key」，不假装验证过
-            rows.append((name, "跳过", "走 Anthropic SDK，不吃 /v1/models"))
-            continue
-        if not p["base"]:
-            rows.append((name, "跳过", "没有 base_url"))
-            continue
+        r = probe_provider(name, timeout=args.timeout)
+        rows.append((marks[r["status"]], name, _PROBE_LABEL[r["status"]], r["detail"]))
+        exit_code = max(exit_code, _PROBE_EXIT[r["status"]])
 
-        url = p["base"].rstrip("/") + "/models"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
-        try:
-            with urllib.request.urlopen(req, timeout=args.timeout) as resp:
-                served = {m["id"] for m in json.load(resp).get("data", [])}
-        except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
-            # 连不上/不支持这个接口都不算配置错 —— 说清楚是「没问到」而不是「不对」
-            rows.append((name, "问不到", f"{type(exc).__name__}: {str(exc)[:60]}"))
-            exit_code = max(exit_code, 1)
-            continue
-
-        missing = [m for m in wanted if m not in served]
-        if missing:
-            rows.append((name, "对不上", f"服务端没有 {missing}；实际有 {sorted(served)[:6]}"))
-            exit_code = 2
-        else:
-            rows.append((name, "OK", f"{wanted} 都在服务端"))
-
-    width = max(len(r[0]) for r in rows)
-    for name, status, detail in rows:
-        mark = {"OK": "✓", "对不上": "✗", "问不到": "?", "跳过": "-"}[status]
+    width = max(len(r[1]) for r in rows)
+    for mark, name, status, detail in rows:
         print(f"{mark} {name:<{width}}  {status:<6} {detail}")
     print("\n「跳过」不代表配置错，只代表这次没验证到 —— 缺 key 或那家没有这个接口。",
           file=sys.stderr)
+
+    _print_environment(marks)
     return exit_code
+
+
+def _print_environment(marks: dict[str, str]) -> None:
+    """供应商之外的自检：.env 从哪读的、可选组件在不在、现在能跑什么。
+
+    这半是给**第一次跑的人**的 —— 供应商详情设置页做得更好，
+    但「Docker 守护进程在不在」「ui/dist 建了没有」没有别的地方会说。
+    """
+    import os
+    import shutil
+    import socket
+    from pathlib import Path
+
+    from .config import find_env_file
+
+    def _port_open(host: str, port: int) -> bool:
+        with socket.socket() as sk:
+            sk.settimeout(0.4)
+            return sk.connect_ex((host, port)) == 0
+
+    # 表格走 stdout、这一段走 stderr，两个流的缓冲不同步 —— 被管道接走时
+    # 顺序会颠倒。先把前面的刷出去。
+    sys.stdout.flush()
+
+    env_file = find_env_file()
+    root = Path(__file__).resolve().parents[2]
+    dist = root / "ui" / "dist"
+    providers = available_providers()
+
+    checks = [
+        (".env", bool(env_file and Path(env_file).is_file()),
+         str(env_file) if env_file else "没找到（从 .env.example 复制一份）"),
+        ("Postgres", _port_open("127.0.0.1", 5433),
+         "localhost:5433（只有 --store pg 需要）"),
+        ("LiteLLM", _port_open("127.0.0.1", 4000),
+         "localhost:4000（只有要 virtual key 预算强制时需要）"),
+        ("Docker", shutil.which("docker") is not None,
+         "只有 --docker 沙箱需要"),
+        ("ui/dist", dist.is_dir(), "cd ui && npm install && npm run build（serve 要）"),
+    ]
+    print("\n环境：", file=sys.stderr)
+    for label, ok, detail in checks:
+        mark = marks["ok"] if ok else marks["skipped"]
+        print(f"  {mark} {label:<10} {detail}", file=sys.stderr)
+
+    print("\n你现在可以跑：", file=sys.stderr)
+    print("  · cowork demo                     不需要 key，完整链路走一遍", file=sys.stderr)
+    if providers:
+        first = next(iter(providers))
+        print(f"  · cowork demo --backend {first}{' ' * max(0, 10 - len(first))}"
+              f"真实模型", file=sys.stderr)
+        print(f'  · cowork plan "<一句话目标>" --run   拆解 + 并行执行', file=sys.stderr)
+    else:
+        print("  （还没有任何供应商的 key —— 填一个才能用真实模型：",
+              file=sys.stderr)
+        print("    写进 .env，或跑 cowork serve 在设置页里填）", file=sys.stderr)
+    if dist.is_dir():
+        print("  · cowork serve                    带界面跑", file=sys.stderr)
 
 
 def _plan(args: argparse.Namespace) -> int:
@@ -1052,7 +1150,13 @@ def main(argv: list[str] | None = None) -> int:
     bpr.set_defaults(func=_bench_plan_report)
 
     args = p.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except MissingApiKey as exc:
+        # 配置没做完不是程序错误 —— 给一段照着做就行的话，别给 traceback。
+        # 第一次跑的人看到 40 行调用栈会以为是这个项目坏了。
+        print(f"\n{exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ from typing import Any
 from ..actions import AgentAction
 from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, TaskProfile, Triage
 from ..llm.effort import resolve
-from ..llm.errors import ModelCallFailed, from_provider_error
+from ..llm.errors import MissingApiKey, ModelCallFailed, from_provider_error
 from ..runtime.detectors import validate_schema
 from ..types import AgentContext, Signal, TaskSpec
 from .anthropic_backend import (
@@ -70,6 +70,55 @@ PRESETS = {
     "litellm": "http://localhost:4000/v1",
 }
 
+# 自托管 / 本机代理：这些地址上没有 key 是正常的，占位符照发。
+_SELF_HOSTED_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal")
+
+
+def _is_self_hosted(url: str) -> bool:
+    """这个端点是不是自己机器上的代理。
+
+    判据只看主机名，不看端口 —— LiteLLM 默认 4000，但换端口是常事。
+    解析不出来就当成**外部**端点：这里的默认要偏严，
+    宁可多问一次 key，也不要把占位符发到别人的服务器上。
+    """
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _SELF_HOSTED_HOSTS
+
+
+def _missing_key_message(url: str, provider: str | None) -> str:
+    """没配 key 时唯一会被看到的那段文字，所以它要能直接照着做。
+
+    三条出路刻意按「从最不需要理解到最需要」排：先给一条完全不用配置的
+    （scripted），因为第一次跑的人最需要的是先看到东西动起来。
+    """
+    from ..cli import PROVIDERS  # 延迟导入：这里只在出错路径上用一次
+
+    env = None
+    if provider and provider in PROVIDERS:
+        env = PROVIDERS[provider].get("key_env")
+    who = provider or url
+    env_line = (
+        f"  · 环境变量 {env}=sk-...（或写进 .env，从 .env.example 复制）"
+        if env
+        else "  · 把对应供应商的 key 写进 .env（从 .env.example 复制）"
+    )
+    return (
+        f"没有配置 {who} 的 API key，而这是一个真实供应商端点（{url}）。三选一：\n"
+        f"  · 先跑 `cowork demo` —— 用脚本后端，不需要任何 key，"
+        f"完整链路照样走一遍\n"
+        f"{env_line}\n"
+        f"  · 跑 `cowork serve`，在设置页里填（不用碰文件）\n"
+        f"\n"
+        f"（自托管代理如 LiteLLM 不需要 key —— 那种情况把 COWORK_LLM_BASE_URL "
+        f"指到 localhost 即可）"
+    )
+
+
 # deepseek-reasoner 不支持 response_format / 温度等参数，只能靠提示词约束
 _NO_JSON_MODE = ("deepseek-reasoner", "reasoner")
 
@@ -96,6 +145,7 @@ class OpenAICompatBackend:
         architect_effort: str = "high",
         subagent_effort: str = "medium",
         cheap_effort: str = "off",
+        provider: str | None = None,
     ) -> None:
         import openai  # 延迟导入：跑脚本后端时不需要
 
@@ -106,8 +156,15 @@ class OpenAICompatBackend:
             or os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("MOONSHOT_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
-            or "placeholder"
         )
+        if not key:
+            # 自托管代理（LiteLLM 之类）常常不校验 key，占位符是合理的；
+            # 打**真实供应商**端点却没有 key 则是配置没做完 —— 必须当场说清楚。
+            # 曾经这里一律回退 "placeholder"，于是「你还没配 key」变成了跑到
+            # 一半的 401 `Your api key: ****lder is invalid`，读起来像账号出问题。
+            if not _is_self_hosted(url):
+                raise MissingApiKey(_missing_key_message(url, provider))
+            key = "placeholder"
         self.client = openai.OpenAI(base_url=url, api_key=key, max_retries=max_retries)
         self.base_url = url
         # subagent_model 为 None 时用 TaskSpec.model —— 保留「不同模型干擅长的事」；

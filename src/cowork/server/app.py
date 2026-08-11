@@ -210,7 +210,11 @@ def create_app(
                         "architect": p["models"][1],
                         "triage": p["models"][2],
                     },
-                    "verified": p["verified"],
+                    # **这是「我们验证过这个预设」，不是「你的 key 有效」。**
+                    # 两件事在界面上曾经共用一个「已验证 / 未验证」标签，
+                    # 用户填完自己的 key 看到「未验证」会以为是自己填错了。
+                    "preset_verified": p["verified"],
+                    "verified": p["verified"],  # 兼容旧前端，勿新用
                     "effort": p.get("effort"),
                     "cache": p.get("cache", "unknown"),
                     "configured": configured,
@@ -218,6 +222,21 @@ def create_app(
                 }
             )
         return out
+
+    @app.post("/api/providers/{name}/test")
+    async def test_provider(name: str):
+        """真打一次端点，回答「这个 key 现在能不能用」。
+
+        设置页原来只显示「已配置」，判据是环境变量非空 —— 填错一个 key 照样
+        显示已配置，任务照样 401。这个端点和 `cli models` 共用
+        `probe_provider()`：两套探测迟早会分叉，而它们回答的是同一个问题。
+        """
+        if name not in PROVIDERS:
+            return err(404, f"未知供应商: {name!r}")
+        from ..cli import probe_provider
+
+        # 探测要打网络，别占住事件循环
+        return await asyncio.to_thread(probe_provider, name)
 
     @app.put("/api/providers/{name}")
     async def put_provider(name: str, req: Request):

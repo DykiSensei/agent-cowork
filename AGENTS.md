@@ -17,7 +17,9 @@ Subagent 是薄执行层，Runtime 是完全确定性的（不含任何 LLM 调�
 判别力已实测（**kimi J 0.886 / deepseek 0.829，FPR 两边 0/20**，§11.19），
 **默认仍关着**（`review_writes=True` 启用）。两个复核者的盲区**互补**，
 选型按**漏报代价**定而不是按 J：kimi 漏的 `non_responsive` 下一轮会被「指纹重复」
-的确定性判据接住，deepseek 漏的两种没兜底 —— 所以这一层用 kimi。**M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
+的确定性判据接住，deepseek 漏的两种没兜底 —— 所以这一层用 kimi。
+
+**M6 群聊界面层已落地**：前端在 `ui/`（React + TS +
 Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAPI，
 `python -m cowork.cli serve` 起服务，含 AWAITING_HUMAN 的 restore 路径）。
 `CLAUDE.md` 是给 Claude Code 的同类指南，内容更细，两者应保持一致。
@@ -46,7 +48,7 @@ Vite 双模式界面 + 设置页），服务层在 `src/cowork/server/`（FastAP
 pip install -e .                                  # 或 set PYTHONPATH=src（仅 CLI 需要）
 
 docker compose up -d postgres litellm             # postgres:5433 / litellm:4000
-python -m unittest discover -s tests -t .         # 377 个测试。用 unittest，没引 pytest
+python -m unittest discover -s tests -t .         # 398 个测试。用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例
@@ -137,7 +139,7 @@ lite 的术语翻译集中在 `ui/src/copy.ts`。细节见 `ui/README.md`。
 
 ## 测试策略
 
-- 377 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
+- 398 个 unittest 用例，默认全本地可跑（脚本后端是确定性的）。
 - **同一场景跨运行方差很大**（中断 0–5 次，token 0–50k）：单次运行不能作为
   参数或结论的依据，**也不能拿它写断言**。
 - **改提示词必须两侧都测**（正例 + 反例）：M5a 第一版只看不可解侧是「大胜」，

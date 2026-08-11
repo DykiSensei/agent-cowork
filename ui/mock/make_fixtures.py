@@ -162,6 +162,10 @@ def main() -> None:
                 "architect": p["models"][1],
                 "triage": p["models"][2],
             },
+            # preset_verified 是「我们验证过这一行的 model id」，
+            # 和「你的 key 有没有效」是两件事（后者要点「测试连接」）。
+            # verified 同值保留只为兼容旧前端 —— 服务层的 /api/providers 也是这么给的
+            "preset_verified": p["verified"],
             "verified": p["verified"],
             "effort": p.get("effort"),
             "cache": p.get("cache", "unknown"),

@@ -161,6 +161,89 @@ class TestProviderResolution(unittest.TestCase):
         self.assertIn("localhost:4000", str(b.client.base_url))
         self.assertEqual(b.client.api_key, "sk-virtual-key")
 
+
+class TestMissingKey(unittest.TestCase):
+    """没配 key 要在**构造后端时**说清楚，不要变成跑到一半的 401。
+
+    这里曾经一律回退 `"placeholder"` 然后拿它去打真实端点，用户看到的是
+    `Your api key: ****lder is invalid` —— 读起来像账号出问题，
+    而真相是「你还没配置」。首次运行最容易撞的就是这一条。
+    """
+
+    def setUp(self):
+        self._saved = {
+            k: os.environ.get(k)
+            for k in ("DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "OPENAI_API_KEY",
+                      "COWORK_LLM_BASE_URL", "COWORK_LLM_API_KEY")
+        }
+        for k in self._saved:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_real_endpoint_without_key_is_refused(self):
+        from cowork.cli import _make_backend
+        from cowork.llm.errors import MissingApiKey
+
+        with self.assertRaises(MissingApiKey) as cm:
+            _make_backend("deepseek")
+        msg = str(cm.exception)
+        # 三条出路都要在，缺一条这段话就不完整
+        self.assertIn("DEEPSEEK_API_KEY", msg)
+        self.assertIn("cowork demo", msg)     # 不需要 key 的那条路
+        self.assertIn("cowork serve", msg)    # 设置页那条路
+
+    def test_missing_key_is_not_a_model_error(self):
+        """**刻意不是 ModelError**：那条路会把它归成硬信号、交给架构师、
+        最后以 AWAITING_HUMAN 收尾 —— 对「模型调用失败」是对的，
+        对「你还没配置」是灾难。
+        """
+        from cowork.llm.errors import MissingApiKey, ModelError
+
+        self.assertFalse(issubclass(MissingApiKey, ModelError))
+
+    def test_self_hosted_proxy_still_works_without_key(self):
+        """自托管代理常常不校验 key —— 占位符对它是合理的，不能一刀切。"""
+        from cowork.llm.openai_compat import OpenAICompatBackend
+
+        b = OpenAICompatBackend(
+            base_url="http://localhost:4000/v1", architect_model="whatever"
+        )
+        self.assertEqual(b.client.api_key, "placeholder")
+
+    def test_unparseable_host_counts_as_external(self):
+        """解析不出主机名时按外部端点处理 —— 宁可多问一次 key，
+        也不要把占位符发到别人的服务器上。
+        """
+        from cowork.llm.openai_compat import _is_self_hosted
+
+        self.assertTrue(_is_self_hosted("http://127.0.0.1:9999/v1"))
+        self.assertTrue(_is_self_hosted("http://localhost/v1"))
+        self.assertFalse(_is_self_hosted("https://api.deepseek.com/v1"))
+        self.assertFalse(_is_self_hosted("not a url"))
+
+
+class TestPresetModels(unittest.TestCase):
+    """预设里写的 model id 是不是当前真的被服务的那个。
+
+    需要一把 key 才构造得出后端（否则 MissingApiKey），所以自己设一个假的。
+    """
+
+    def setUp(self):
+        self._saved = os.environ.get("DEEPSEEK_API_KEY")
+        os.environ["DEEPSEEK_API_KEY"] = "sk-deepseek-fake"
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("DEEPSEEK_API_KEY", None)
+        else:
+            os.environ["DEEPSEEK_API_KEY"] = self._saved
+
     def test_deepseek_preset_uses_a_currently_served_model(self):
         """DeepSeek v4 起只暴露 flash / pro 两个 id，chat / reasoner 只剩别名。
 

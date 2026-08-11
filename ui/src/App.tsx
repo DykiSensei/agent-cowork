@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   fetchDetail,
+  fetchProviders,
   fetchThreads,
   postCancel,
   postIntervene,
@@ -24,6 +25,26 @@ export interface AppProps {
   onIntervene: (taskId: string, instruction: string) => Promise<boolean>;
   onCancel: (taskId: string, reason: string) => Promise<boolean>;
   onRuling: (taskId: string, action: string, rationale: string) => Promise<boolean>;
+}
+
+/** 全新用户的第一屏：一家 key 都没配、也还没有任何线程。 */
+function FirstRun({ onOpenSettings }: { onOpenSettings: () => void }) {
+  return (
+    <div className="first-run">
+      <div className="first-run-card">
+        <h1>先填一个 API Key</h1>
+        <p>
+          还没有配置任何供应商，所以现在发任务会失败。去设置页填一个 key
+          就能开始 —— 填完可以当场点「测试连接」确认它真的能用。
+        </p>
+        <button onClick={onOpenSettings}>去设置页</button>
+        <p className="first-run-alt">
+          只想先看看这套东西怎么跑？在终端里执行 <code>cowork demo</code> ——
+          它用脚本后端，不需要任何 key，完整链路照样走一遍。
+        </p>
+      </div>
+    </div>
+  );
 }
 
 function initialMode(): Mode {
@@ -50,6 +71,14 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // null = 还没问出来；true = 一家 key 都没配
+  const [needsSetup, setNeedsSetup] = useState(false);
+
+  useEffect(() => {
+    void fetchProviders()
+      .then((ps) => setNeedsSetup(ps.every((p) => !p.configured)))
+      .catch(() => setNeedsSetup(false)); // 问不到就别挡路
+  }, [page]);
 
   useEffect(() => {
     // 支持 #task_xxx 深链（可与 #pro 叠加：#pro,task_comp）
@@ -147,6 +176,20 @@ export default function App() {
     );
   }
   if (!threads) return null;
+
+  // 一家 key 都没配 + 一条线程都没有 = 全新用户第一次打开。
+  // 别让他先提交一个必然失败的任务再去找设置页 —— 直接把路指出来。
+  // （**不在服务端拦**：设置页正是填 key 的地方，拒绝启动会死锁。）
+  if (needsSetup && threads.length === 0) {
+    return (
+      <FirstRun
+        onOpenSettings={() => {
+          setPage("settings");
+          history.replaceState(null, "", "#settings");
+        }}
+      />
+    );
+  }
 
   const props: AppProps = {
     threads,

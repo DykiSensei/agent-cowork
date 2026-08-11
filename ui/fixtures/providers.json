@@ -8,6 +8,7 @@
    "architect": "claude-opus-5",
    "triage": "claude-haiku-4-5-20251001"
   },
+  "preset_verified": false,
   "verified": false,
   "effort": "anthropic",
   "cache": "explicit"
@@ -21,6 +22,7 @@
    "architect": "deepseek-v4-flash",
    "triage": "deepseek-v4-flash"
   },
+  "preset_verified": true,
   "verified": true,
   "effort": "deepseek",
   "cache": "automatic"
@@ -34,6 +36,7 @@
    "architect": "doubao-seed-2.0-pro",
    "triage": "doubao-seed-2.0-lite"
   },
+  "preset_verified": false,
   "verified": false,
   "effort": "doubao",
   "cache": "automatic"
@@ -47,6 +50,7 @@
    "architect": "gemini-3.6-flash",
    "triage": "gemini-3.5-flash-lite"
   },
+  "preset_verified": false,
   "verified": false,
   "effort": "gemini",
   "cache": "automatic"
@@ -60,6 +64,7 @@
    "architect": "kimi-k3",
    "triage": "kimi-k3"
   },
+  "preset_verified": true,
   "verified": true,
   "effort": "kimi",
   "cache": "automatic"
@@ -73,6 +78,7 @@
    "architect": null,
    "triage": null
   },
+  "preset_verified": true,
   "verified": true,
   "effort": null,
   "cache": "unknown"
@@ -86,6 +92,7 @@
    "architect": "gpt-5.6-sol",
    "triage": "gpt-5.6-luna"
   },
+  "preset_verified": false,
   "verified": false,
   "effort": "openai",
   "cache": "automatic"
@@ -99,6 +106,7 @@
    "architect": "qwen-max",
    "triage": "qwen-turbo"
   },
+  "preset_verified": false,
   "verified": false,
   "effort": "qwen",
   "cache": "automatic"
@@ -112,6 +120,7 @@
    "architect": "grok-4.5",
    "triage": "grok-4.5"
   },
+  "preset_verified": false,
   "verified": false,
   "effort": "xai",
   "cache": "automatic"
@@ -125,6 +134,7 @@
    "architect": "glm-5",
    "triage": "glm-5-turbo"
   },
+  "preset_verified": false,
   "verified": false,
   "effort": "zhipu",
   "cache": "automatic"

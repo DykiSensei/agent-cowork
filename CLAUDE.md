@@ -9,8 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `AGENTS.md` 是同一批事实的精简版（给别家编码代理）：本文件里的命令、代码地图、
 四条不变量改了，那边也要跟着改，否则两份指南会慢慢分叉。
 
-当前：M0–M7 全部完成；**M8 写入侧复核代码完成但默认关闭** ——
-`Architect(review_writes=True)` 才启用，因为它的判别力还没实测（见下）。**M6 群聊界面层已落地**：前端 `ui/`（React + TS + Vite
+当前：M0–M7 全部完成；**M8 写入侧复核代码完成、判别力已实测，但默认仍关着**
+（`Architect(review_writes=True)` 启用，理由与数据见下）。
+**M6 群聊界面层已落地**：前端 `ui/`（React + TS + Vite
 双模式界面 + 设置页，细节见 `ui/README.md`）；服务层 `src/cowork/server/`
 （FastAPI，`python -m cowork.cli serve`，只绑 loopback）—— 含 restore 路径
 （`Orchestrator.restore()` + `resume_with_ruling()`，人的裁决经
@@ -89,7 +90,7 @@ docker compose up -d postgres litellm     # postgres:5433 / litellm:4000
                                           # 不起的话 8 个测试 skip（3 个 PG + 5 个 LiteLLM，不是失败）
                                           # 另有 6 个 Docker 沙箱用例要的是 docker 守护进程本身，
                                           # 与这两个容器无关 —— 三样都缺就是 14 个 skip
-python -m unittest discover -s tests -t . # 377 个测试。项目用 unittest，没引 pytest
+python -m unittest discover -s tests -t . # 398 个测试。项目用 unittest，没引 pytest
 
 python -m unittest tests.test_preemption                              # 单个文件
 python -m unittest tests.test_chain.TestChain.test_rebase_cleared_the_trace  # 单个用例

@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
-import { fetchProviders, fetchSettings, putProviderKey, putSettings } from "../api";
-import type { ProviderInfo, Settings } from "../types";
+import {
+  fetchProviders,
+  fetchSettings,
+  putProviderKey,
+  putSettings,
+  testProvider,
+} from "../api";
+import type { ProbeResult, ProviderInfo, Settings } from "../types";
 
 /**
  * 设置页：各家供应商的 API Key + 全局模型 / 推理挡位。
@@ -24,11 +30,21 @@ const MODEL_ROLES: { key: keyof Settings["models"]; label: string; env: string }
   { key: "triage", label: "分诊模型", env: "COWORK_TRIAGE_MODEL" },
 ];
 
+/** 探测结果 → 一句人话。四种状态的结论不同，不能都说成「失败」。 */
+const PROBE_TEXT: Record<ProbeResult["status"], string> = {
+  ok: "可用",
+  mismatch: "预设的模型 id 服务端没有",
+  unreachable: "问不到（网络或这家没有这个接口）",
+  skipped: "没测到",
+};
+
 function ProviderCard({ p }: { p: ProviderInfo }) {
   const [input, setInput] = useState("");
   const [configured, setConfigured] = useState(p.configured);
   const [hint, setHint] = useState(p.key_hint);
   const [saving, setSaving] = useState(false);
+  const [probe, setProbe] = useState<ProbeResult | null>(null);
+  const [testing, setTesting] = useState(false);
 
   const save = async (key: string) => {
     setSaving(true);
@@ -37,22 +53,45 @@ function ProviderCard({ p }: { p: ProviderInfo }) {
       setConfigured(key.length > 0);
       setHint(key ? `····${key.slice(-4)}` : null);
       setInput("");
+      setProbe(null); // 换了 key，上一次的探测结果作废
     } finally {
       setSaving(false);
     }
   };
 
+  const test = async () => {
+    setTesting(true);
+    try {
+      setProbe(await testProvider(p.name));
+    } catch {
+      setProbe({ name: p.name, status: "unreachable", detail: "服务端没应答" });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  // 预设已验证（我们的事）和 key 能不能用（你的事）是两件事，分开显示 ——
+  // 合成一个标签的话，用户填完 key 看到「未验证」会以为是自己填错了
+  const presetVerified = p.preset_verified ?? p.verified;
+
   return (
     <div className="set-card">
       <div className="set-card-hd">
         <b>{p.name}</b>
-        <span className={`set-tag${p.verified ? " ok" : ""}`}>
-          {p.verified ? "已验证" : "未验证"}
+        <span
+          className={`set-tag${presetVerified ? " ok" : ""}`}
+          title={
+            presetVerified
+              ? "我们在本机用真 key 打通过这一行的 model id"
+              : "这一行的 model id 没被我们验证过 —— 没验证不等于错"
+          }
+        >
+          预设{presetVerified ? "已验证" : "未验证"}
         </span>
         {configured ? (
-          <span className="set-key-ok">已配置 {hint}</span>
+          <span className="set-key-ok">已填 {hint}</span>
         ) : (
-          <span className="set-key-no">未配置</span>
+          <span className="set-key-no">未填</span>
         )}
       </div>
       <div className="set-row">
@@ -86,6 +125,20 @@ function ProviderCard({ p }: { p: ProviderInfo }) {
           <button className="set-clear" disabled={saving} onClick={() => void save("")}>
             清除
           </button>
+        )}
+      </div>
+      <div className="set-testrow">
+        <button className="set-test" disabled={testing || !configured} onClick={() => void test()}>
+          {testing ? "测试中…" : "测试连接"}
+        </button>
+        {probe ? (
+          <span className={`set-probe ${probe.status}`} title={probe.detail}>
+            {PROBE_TEXT[probe.status]}
+          </span>
+        ) : (
+          <span className="set-probe none">
+            {configured ? "「已填」只说明填了，没说明能用 —— 测一下" : "填了 key 才能测"}
+          </span>
         )}
       </div>
     </div>

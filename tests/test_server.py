@@ -318,6 +318,41 @@ class TestServer(unittest.TestCase):
                 finally:
                     runner.running.pop(spec.id, None)
 
+    def test_provider_test_endpoint(self):
+        """「已填」和「能用」是两件事。
+
+        设置页原来只显示「已配置」，判据是环境变量非空 —— 填错一个 key 照样
+        显示已配置、任务照样 401。这个端点让人能当场问一句「现在能用吗」。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            client = self._app(ScriptedBackend({}), Path(td))
+            with client:
+                r = client.post("/api/providers/没这家/test")
+                self.assertEqual(r.status_code, 404)
+
+                r = client.post("/api/providers/anthropic/test")
+                self.assertEqual(r.status_code, 200, r.text)
+                body = r.json()
+                # anthropic 走自己的 SDK，不吃 /v1/models —— 结论是「没测到」，
+                # **不是「失败」**。四个状态的结论不同，不能混成一个 bool
+                self.assertEqual(body["status"], "skipped")
+                self.assertIn("detail", body)
+
+    def test_providers_separate_preset_verified_from_your_key(self):
+        """`verified` 说的是「我们验证过这一行的 model id」，
+        不是「你的 key 有效」—— 两件事共用一个标签的话，用户填完 key
+        看到「未验证」会以为是自己填错了。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            client = self._app(ScriptedBackend({}), Path(td))
+            with client:
+                rows = client.get("/api/providers").json()
+                row = next(r for r in rows if r["name"] == "deepseek")
+                self.assertIn("preset_verified", row)
+                self.assertIn("configured", row)
+                # 预设验证过 ≠ 你填了 key，两个字段互不决定
+                self.assertTrue(row["preset_verified"])
+
     # ---------------------------------------------------------- #
     # 设置页
     # ---------------------------------------------------------- #
