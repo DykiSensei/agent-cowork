@@ -17,6 +17,8 @@ const LITE_DOT: Record<string, string> = {
 
 export default function LiteApp(props: AppProps) {
   const [composing, setComposing] = useState(false);
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [delErr, setDelErr] = useState<string | null>(null);
   // INTERRUPTED 是过渡态，不值得在 lite 里占一行
   const threads = props.threads.filter((t) => t.status !== "INTERRUPTED");
   const awaiting = threads.filter((t) => t.status === "AWAITING_HUMAN").length;
@@ -31,10 +33,6 @@ export default function LiteApp(props: AppProps) {
         <button className="l-setbtn" onClick={props.onOpenSettings}>
           设置
         </button>
-        <div className="seg">
-          <button className="on">简洁</button>
-          <button onClick={() => props.onSwitchMode("pro")}>专业</button>
-        </div>
       </header>
 
       <div className="l-layout">
@@ -56,9 +54,49 @@ export default function LiteApp(props: AppProps) {
               <div className="l-t-meta">
                 <span className={`l-dot ${LITE_DOT[t.status]}`} />
                 {LITE_STATUS[t.status]}
+                <button
+                  className="l-del"
+                  title="删掉这条记录（不会动工作区里的文件）"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirm(t.task_id);
+                  }}
+                >
+                  删除
+                </button>
               </div>
             </div>
           ))}
+          {confirm && (
+            <div className="l-confirm-mask" onClick={() => setConfirm(null)}>
+              <div className="l-confirm" onClick={(e) => e.stopPropagation()}>
+                <b>删掉这条任务的记录？</b>
+                {/* 说清楚**不会**发生什么 —— 用户最怕的是「我的代码没了」 */}
+                <p>
+                  只删对话、信号和裁决记录。
+                  <b>工作区里已经产出的文件不会被动。</b>
+                  正在跑的任务要先停下来才能删。
+                </p>
+                {delErr && <div className="l-fail">{delErr}</div>}
+                <div className="l-confirm-row">
+                  <button onClick={() => setConfirm(null)}>算了</button>
+                  <button
+                    className="danger"
+                    onClick={() => {
+                      const id = confirm;
+                      setDelErr(null);
+                      void props.onDelete(id).then((r) => {
+                        if (r.ok) setConfirm(null);
+                        else setDelErr(r.error ?? "没能删掉");
+                      });
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </aside>
 
         {composing ? (

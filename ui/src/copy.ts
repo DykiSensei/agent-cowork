@@ -3,7 +3,13 @@
  * 数据形状不变，只是呈现层的一张映射表。
  */
 
-import type { DecisionRecord, Signal, TaskProgress, TaskStatus } from "./types";
+import type {
+  DecisionRecord,
+  Signal,
+  TaskDetail,
+  TaskProgress,
+  TaskStatus,
+} from "./types";
 
 export const STATUSES: TaskStatus[] = [
   "PENDING",
@@ -160,4 +166,37 @@ export function proDoingText(p: TaskProgress): string {
   if (a.kind === "finish") return "finish → 等验收";
   if (a.kind === "soft_signal") return "soft_signal";
   return `${a.name ?? "?"}${a.target ? ` ${a.target}` : ""}`;
+}
+
+// --------------------------------------------------------------------- //
+// 底部输入区此刻处于什么状态
+// --------------------------------------------------------------------- //
+
+export type ComposerPhase =
+  | "running"    // 有正在跑的任务，可以介入
+  | "waiting"    // 停下来等人拍板 —— 去卡片里答复
+  | "queued"     // 还没开始跑：拆解中、刚派发、或者在等前面的步骤
+  | "done";      // 终局
+
+/**
+ * **「不在跑」不等于「已经结束」。**
+ *
+ * 实测撞到的：任务处于排队中，底部却写「这条任务已经结束了」——
+ * 因为分支只判了 running / waiting，剩下的一律当终局。PENDING、拆解中、
+ * 刚派发这三种都落在那个 else 里，而它们恰恰是「再等一会儿就好」。
+ */
+export function composerPhase(detail: TaskDetail): ComposerPhase {
+  if (detail.kind === "single") {
+    const s = detail.state.status;
+    if (s === "RUNNING" || s === "INTERRUPTED") return "running";
+    if (s === "AWAITING_HUMAN") return "waiting";
+    return s === "PENDING" ? "queued" : "done";
+  }
+  const tasks = Object.values(detail.progress);
+  if (tasks.some((t) => t.status === "RUNNING" || t.status === "INTERRUPTED"))
+    return "running";
+  if (detail.pending_children.length > 0) return "waiting";
+  // 一个子任务都还没有 = 还在拆解 / 刚派发，那是最容易被误报成「结束」的一种
+  if (tasks.length === 0) return "queued";
+  return tasks.every((t) => t.terminal) ? "done" : "queued";
 }

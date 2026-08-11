@@ -299,6 +299,15 @@ export interface ProbeResult {
   detail: string;
 }
 
+/** `GET /api/fs`：目录选择器的一层。 */
+export interface FsListing {
+  path: string;
+  parent: string | null;
+  entries: { name: string; path: string }[];
+  /** true = 这是起点列表（主目录 / 盘符），不是某个真实目录的内容 */
+  roots: boolean;
+}
+
 export interface Settings {
   base_url_override: string;
   models: { architect: string; subagent: string; triage: string };
@@ -312,6 +321,11 @@ export interface Settings {
   workspace: string;
   /** 没配工作区时东西会落在哪 —— 只读，服务端算出来的。 */
   workspace_default: string;
+  /** `run` 能调哪些可执行文件，逗号分隔。默认只有 python。 */
+  allowed_binaries: string;
+  /** 联网工具 fetch_url 开不开（"on" / "off"）。**默认关**：取回的第三方内容
+   * 会进 reasoning_trace 再进下一轮提示词，那是一条提示词注入通道。 */
+  allow_network: string;
   effort: { architect: string; subagent: string; cheap: string };
   /**
    * 写入侧复核（§12 M8）。**字符串 "on" / "off"，不是布尔** ——

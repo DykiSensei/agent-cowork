@@ -314,6 +314,51 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
               </p>
             </div>
 
+            <h2>工具与联网</h2>
+            <p className="set-note">
+              Subagent 默认能读写工作区、搜文件、删改文件、跑 python。
+              这两个闸门**归你**，不归架构师 —— 让被隔离方给自己配隔离边界是没有意义的。
+            </p>
+            <div className="set-card">
+              <div className="set-row">
+                <span className="set-k">
+                  run 允许的程序{" "}
+                  <span className="set-env">逗号分隔。加 git / node 之前想清楚</span>
+                </span>
+                <input
+                  className="set-text"
+                  placeholder="python"
+                  value={settings.allowed_binaries}
+                  onChange={(e) =>
+                    setSettings({ ...settings, allowed_binaries: e.target.value })
+                  }
+                  spellCheck={false}
+                />
+              </div>
+              <div className="set-row">
+                <span className="set-k">
+                  允许联网抓取{" "}
+                  <span className="set-env">fetch_url —— 取网页正文，不是搜索</span>
+                </span>
+                <select
+                  className="set-text"
+                  value={settings.allow_network}
+                  onChange={(e) =>
+                    setSettings({ ...settings, allow_network: e.target.value })
+                  }
+                >
+                  <option value="off">关（默认）</option>
+                  <option value="on">开</option>
+                </select>
+              </div>
+              {settings.allow_network === "on" && (
+                <p className="set-note" style={{ margin: "2px 0 0" }}>
+                  取回的网页内容会进入模型的上下文 —— 那是一段你控制不了的文字，
+                  里面的「指令」有可能被当成任务。只在你信任要访问的站点时开。
+                </p>
+              )}
+            </div>
+
             <h2>全局模型与推理挡位</h2>
             <p className="set-note">
               留空 = 用供应商预设。挡位词表统一 off / low / medium / high / max，

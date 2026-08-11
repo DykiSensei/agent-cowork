@@ -9,6 +9,7 @@
  */
 
 import type {
+  FsListing,
   PlanView,
   ProbeResult,
   ProviderInfo,
@@ -85,6 +86,20 @@ export function postCancel(taskId: string, reason: string) {
 
 export function postRuling(taskId: string, action: string, rationale: string) {
   return send(`/api/tasks/${encodeURIComponent(taskId)}/ruling`, { action, rationale });
+}
+
+/**
+ * 删掉一条线程。**只删记录，不碰工作区里的文件** ——
+ * 产物是人的东西，删一条聊天记录不该顺手删掉他的代码。
+ * 正在跑的会被 409 拒掉（先停下来再删）。
+ */
+export function deleteTask(taskId: string) {
+  return send(`/api/tasks/${encodeURIComponent(taskId)}`, undefined, "DELETE");
+}
+
+/** 列目录，给文件夹选择器用（浏览器拿不到本机绝对路径，只能让服务端列）。 */
+export function browseFs(path: string): Promise<FsListing> {
+  return req(`/api/fs?path=${encodeURIComponent(path)}`);
 }
 
 // --------------------------------------------------------------------- //

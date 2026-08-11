@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ActionResult } from "./api";
 import {
+  deleteTask,
   fetchDetail,
   fetchProviders,
   fetchThreads,
@@ -10,19 +11,17 @@ import {
   subscribeStream,
 } from "./api";
 import type { TaskDetail, ThreadSummary } from "./types";
-import ProApp from "./components/pro/ProApp";
 import LiteApp from "./components/lite/LiteApp";
 import SettingsPage from "./components/Settings";
-
-export type Mode = "lite" | "pro";
 
 export interface AppProps {
   threads: ThreadSummary[];
   selected: string | null;
   onSelect: (id: string) => void;
   detail: TaskDetail | null;
-  onSwitchMode: (m: Mode) => void;
   onOpenSettings: () => void;
+  /** 删掉一条线程（只删记录，不碰工作区里的文件）。 */
+  onDelete: (taskId: string) => Promise<ActionResult>;
   /** 派发完成后把新线程选中并刷新列表。 */
   onDispatched: (rootId: string) => void;
   onIntervene: (taskId: string, instruction: string) => Promise<ActionResult>;
@@ -50,11 +49,11 @@ function FirstRun({ onOpenSettings }: { onOpenSettings: () => void }) {
   );
 }
 
-function initialMode(): Mode {
-  // 深链：#pro 切专业模式，#task_xxx 选线程，可叠加成 #pro,task_comp
-  if (location.hash.includes("pro")) return "pro";
-  return localStorage.getItem("cowork-mode") === "pro" ? "pro" : "lite";
-}
+// 专业版（暗色、信息全量那一版）**已弃用** —— 两套界面意味着每个改动都要做两遍，
+// 而实测反馈是它不好看、没人用。它独有的那些信息（spec 全文、验收标准、
+// 硬信号覆盖面、预算水位）搬进了 `Details.tsx` 的折叠抽屉，
+// 没有跟着一起删掉：这套系统的卖点就是每一步都看得见。
+// `#pro` 深链还在，只是不再有效果。
 
 /** 服务端按 updated_at 排序（views.thread_list），这里把「等你处理」的顶到最前。 */
 function sortThreads(ts: ThreadSummary[]): ThreadSummary[] {
@@ -66,7 +65,6 @@ function sortThreads(ts: ThreadSummary[]): ThreadSummary[] {
 }
 
 export default function App() {
-  const [mode, setMode] = useState<Mode>(initialMode);
   const [page, setPage] = useState<"chat" | "settings">(() =>
     location.hash.includes("settings") ? "settings" : "chat",
   );
@@ -147,10 +145,20 @@ export default function App() {
     };
   }, [page, refresh]);
 
-  const switchMode = useCallback((m: Mode) => {
-    setMode(m);
-    localStorage.setItem("cowork-mode", m);
-  }, []);
+  const onDelete = useCallback(
+    async (taskId: string) => {
+      const r = await deleteTask(taskId);
+      if (r.ok) {
+        // 删掉的可能正是当前选中的那条 —— 先清空再刷新，
+        // 否则详情会去拉一个已经不存在的 id
+        setSelected((s) => (s === taskId ? null : s));
+        setDetail((d) => (selectedRef.current === taskId ? null : d));
+        refresh(null);
+      }
+      return r;
+    },
+    [refresh],
+  );
 
   const onIntervene = useCallback(
     (taskId: string, instruction: string) => postIntervene(taskId, instruction),
@@ -215,15 +223,15 @@ export default function App() {
     selected,
     onSelect: setSelected,
     detail,
-    onSwitchMode: switchMode,
     onOpenSettings: () => {
       setPage("settings");
       history.replaceState(null, "", "#settings");
     },
+    onDelete,
     onDispatched,
     onIntervene,
     onCancel,
     onRuling,
   };
-  return mode === "lite" ? <LiteApp {...props} /> : <ProApp {...props} />;
+  return <LiteApp {...props} />;
 }

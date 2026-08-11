@@ -25,8 +25,8 @@ await build({
       export { renderToStaticMarkup } from "react-dom/server";
       export { default as React } from "react";
       export { default as LiteStream } from "./src/components/lite/LiteStream";
-      export { default as ProStream } from "./src/components/pro/ProStream";
       export { default as Progress } from "./src/components/Progress";
+      export { default as Details } from "./src/components/Details";
       export { default as NewTask } from "./src/components/NewTask";
     `,
     resolveDir: process.cwd(),
@@ -72,15 +72,19 @@ const check = (name, fn) => {
   }
 };
 
-// 1. 每一份真实投影，两种模式都要渲得出来
+// 1. 每一份真实投影都要渲得出来（专业版已弃用，只剩一套界面）
 for (const [file, detail] of details) {
-  check(`${file} 两种模式都渲染出内容`, () => {
-    for (const [mode, C] of [["lite", m.LiteStream], ["pro", m.ProStream]]) {
-      const html = render(React.createElement(C, props(detail)));
-      assert.ok(html.length > 200, `${mode} 渲出来是空的`);
-    }
+  check(`${file} 渲染出内容`, () => {
+    const html = render(React.createElement(m.LiteStream, props(detail)));
+    assert.ok(html.length > 200, "渲出来是空的");
   });
 }
+
+check("技术细节抽屉在真实数据上不炸", () => {
+  for (const [, detail] of details) {
+    render(React.createElement(m.Details, { detail }));
+  }
+});
 
 // 2. 进度面板：真实数据上要说得出「在做什么」
 check("进度面板在复合线程上逐个子任务列出来", () => {
@@ -126,6 +130,16 @@ check("挂起的任务：输入框禁用，并且说清该去哪答复", () => {
   assert.ok(html.includes("disabled"), "不能让人往一个必然被拒的框里打字");
   assert.ok(html.includes("上面那张卡片"), "要指出该去哪答复");
   assert.ok(!html.includes("step 边界"), "给用户看的话里不该有黑话");
+});
+
+check("排队中的任务不能被说成「已经结束」", () => {
+  // 实测撞到的：任务在排队，底部却写「这条任务已经结束了」——
+  // 因为分支只判了 running / waiting，剩下的一律当终局。
+  const entry = details.find(([, d]) => d.kind === "single" && d.state.status === "PENDING");
+  assert.ok(entry, "fixtures 里该有一个 PENDING 的任务");
+  const html = render(React.createElement(m.LiteStream, props(entry[1])));
+  assert.ok(!html.includes("已经结束"), "PENDING 不是终局");
+  assert.ok(html.includes("还没开始跑"), "要说清它在等什么");
 });
 
 // 4. 发布任务：第一屏要有输入框和按钮

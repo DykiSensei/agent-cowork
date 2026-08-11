@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { createTask, dispatchPlan, fetchPlan, fetchSettings, rulePlan } from "../api";
 import type { PlanView } from "../types";
+import FolderPicker from "./FolderPicker";
 
 /**
  * 发布任务：目标 → 拆解 → 人裁决 → 派发（M6 §6 的 `POST /tasks` + `/plans/*`）。
@@ -111,6 +112,7 @@ export default function NewTask({
   const [mode, setMode] = useState<"new" | "takeover">("new");
   const [ws, setWs] = useState("");
   const [wsDefault, setWsDefault] = useState("");
+  const [picking, setPicking] = useState(false);
   const [planId, setPlanId] = useState<string | null>(null);
   const [plan, setPlan] = useState<PlanView | null>(null);
   const [busy, setBusy] = useState(false);
@@ -248,7 +250,17 @@ export default function NewTask({
             onChange={(e) => setWs(e.target.value)}
             spellCheck={false}
           />
+          <button type="button" className="nt-browse" onClick={() => setPicking(true)}>
+            浏览…
+          </button>
         </label>
+        {picking && (
+          <FolderPicker
+            value={ws || wsDefault}
+            onPick={setWs}
+            onClose={() => setPicking(false)}
+          />
+        )}
         <div className="nt-ws-note">
           {mode === "takeover" ? (
             <>

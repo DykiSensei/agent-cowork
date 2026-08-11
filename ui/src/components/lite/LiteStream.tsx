@@ -4,11 +4,13 @@ import type { ActionResult } from "../../api";
 import {
   LITE_ACTION,
   LITE_ACTION_SUGGEST,
+  composerPhase,
   liteRationale,
   liteSignalBody,
   liteSignalTitle,
   liteWaitText,
 } from "../../copy";
+import Details from "../Details";
 import Progress from "../Progress";
 import { translate } from "../../translate";
 import type {
@@ -260,11 +262,8 @@ export default function LiteStream({
         : [];
   const [pick, setPick] = useState<string | null>(null);
   const target = targets.find((t) => t.id === pick) ?? targets[0] ?? null;
-  const running = targets.length > 0;
-  const waiting =
-    detail.kind === "composite"
-      ? detail.pending_children.length > 0
-      : detail.state.status === "AWAITING_HUMAN";
+  const phase = composerPhase(detail);
+  const running = phase === "running" && targets.length > 0;
 
   const submitCancel = () => {
     if (stopping || !target) return;
@@ -299,6 +298,8 @@ export default function LiteStream({
     <main className="l-stream">
       {/* 「现在在干什么」—— 时间线说的是发生过什么，这里说的是此刻怎么样 */}
       <Progress detail={detail} lite />
+      {/* 专业版弃用之后，它独有的信息（spec / 验收标准 / 硬信号 / 预算）在这里 */}
+      <Details detail={detail} />
       <div className="l-scroll">
         <div className="l-col">
           {events.map((ev, i) => {
@@ -373,7 +374,13 @@ export default function LiteStream({
           <form className="row" style={{ display: "contents" }} onSubmit={submitIntervene}>
             <input
               placeholder={
-                running ? "插一句话，改变它接下来的做法…" : "现在没有在跑的步骤"
+                running
+                  ? "插一句话，改变它接下来的做法…"
+                  : phase === "queued"
+                    ? "还没开始跑，等它动起来"
+                    : phase === "waiting"
+                      ? "在上面那张卡片里答复"
+                      : "这条任务已经结束了"
               }
               autoComplete="off"
               disabled={!running}
@@ -392,13 +399,15 @@ export default function LiteStream({
           {/* **说不能做什么的时候，同时说该做什么。** 实测反馈：卡在「等你处理」
               时聊天框发不出去，而提示只说了「任务不在运行中（下一个 step 边界）」
               —— 既没说该去哪答复，也没人知道 step 边界是什么。 */}
-          {running ? (
+          {phase === "running" ? (
             <>
               你的话会直接变成它的新指令，不是闲聊。它会把手头这一小步做完再照办
               （通常一两秒）。「停下来」是彻底不做了，已经写出来的东西会留着。
             </>
-          ) : waiting ? (
+          ) : phase === "waiting" ? (
             <>它停下来在等你拍板 —— 请在上面那张卡片里选一个处理方式，这里发消息没用。</>
+          ) : phase === "queued" ? (
+            <>还没开始跑 —— 正在拆解或在等前面的步骤做完。等它动起来就能插话了。</>
           ) : (
             <>这条任务已经结束了，发消息不会有人收。想接着做请发布一个新任务。</>
           )}

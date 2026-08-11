@@ -1,8 +1,9 @@
 # ui/ —— M6 群聊界面层（ChatSurface）
 
-React 18 + TypeScript + Vite。双模式：**简洁版（默认，小白向）/ 专业版（开发者向）**，
-同一份数据的两种呈现，右上角切换（`localStorage` 记忆）。另有独立的**设置页**
-（各家供应商 API Key + 全局模型/推理挡位），两个模式的顶栏都有入口。
+React 18 + TypeScript + Vite。**一套界面**（原来的「专业版」已弃用 —— 两套界面
+意味着每个改动都要做两遍，而实测反馈是它不好看、没人用；它独有的信息搬进了
+`Details.tsx` 的折叠抽屉，没有跟着删掉）。另有独立的**设置页**：各家供应商
+API Key、按角色选供应商、工作区、工具与联网闸门、全局模型/推理挡位。
 
 ## 跑起来
 
@@ -19,9 +20,10 @@ dev 和 preview 都自带 **mock API**（`mock/plugin.ts`），不需要 Python 
 
 ### 两道门，各管一半
 
-`tsc --noEmit` 管形状，`npm run check`（`check/translate.mjs`）管**行为** ——
-前端只有一处逻辑，就是 `translate.ts`（后端事件索引 → 前端时间线），
-而它判错的方式是静默的：卡片不出现，页面照样渲染，类型也全对。
+`tsc --noEmit` 管形状，`npm run check` 管**行为**（两个文件：翻译层的用例表 +
+拿真实 fixtures 渲一遍的冒烟）。前端逻辑几乎只有 `translate.ts`
+（后端事件索引 → 前端时间线），而它判错的方式是静默的：
+卡片不出现，页面照样渲染，类型也全对。
 实际栽过一次：「等你拍板」的判据写成「那条 `status` 事件恰好是最后一条事件」，
 而 orchestrator 会在挂起后再写一行 `[STOP]` 说明原因 ——
 **人看得见挂起了，却没有表单可以答复**（开发文档 §11.20 第四条）。
@@ -30,10 +32,9 @@ dev 和 preview 都自带 **mock API**（`mock/plugin.ts`），不需要 Python 
 
 ## 深链
 
-- `#pro` 专业模式（默认简洁）
 - `#task_xxx` 选中某个线程
 - `#settings` 设置页
-- 可叠加：`#pro,task_comp`
+- `#pro` 已失效（专业版弃用，链接留着不报错）
 
 ## mock 数据：全部来自真实运行
 
@@ -57,12 +58,15 @@ mock/settings.local.json  设置页的 mock 持久化（已 gitignore）
 fixtures/              views 的真实输出（threads.json / <task_id>.json / providers.json）
 src/types.ts           与 cowork.views 投影对齐的形状（M6-界面层接口.md §10）
 src/translate.ts       翻译层：后端事件索引 → 前端时间线（呈现规则都注释在里面）
-src/copy.ts            lite 模式的「人话翻译」映射表
+src/copy.ts            「人话翻译」映射表 + composerPhase（底部输入区四态）
 src/api.ts             fetch 客户端；写类调用统一返回 ActionResult{ok,error}
-check/translate.mjs    翻译层的行为检查（npm run check，也串在 build 里）
-src/components/pro/    专业版（暗色，信息全量）
-src/components/lite/   简洁版（亮色，只保留叙事线）
-src/components/NewTask.tsx   发布任务：目标 → 拆解 → 人裁决 → 派发（两种模式共用）
+check/translate.mjs    翻译层的行为检查
+check/render.mjs       渲染冒烟：拿真实 fixtures 把界面渲一遍，断言该出现的字样出现了
+src/components/lite/   界面本体（专业版已弃用，见下）
+src/components/Progress.tsx   现在在干什么（每个 Subagent 一行）
+src/components/Details.tsx    技术细节抽屉（spec / 验收 / 硬信号 / 预算）
+src/components/FolderPicker.tsx  文件夹选择器（服务端列目录，界面上点）
+src/components/NewTask.tsx   发布任务：从零开始 / 接手已有项目 → 拆解 → 裁决 → 派发
 src/components/Settings.tsx  设置页
 prototype.html         最初的静态视觉稿（设计定稿依据，已被 React 版取代）
 shot-app-*.png         React 版的自检截图
