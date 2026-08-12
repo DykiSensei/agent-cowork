@@ -54,6 +54,9 @@ ACTION_SCHEMA: dict[str, Any] = {
         },
         "path": {"type": "string"},
         "content": {"type": "string"},
+        # write_file 的追加模式：写长文件时一次输出有限，分多次 append 写完
+        # （M12 之后：写长段会被 max_tokens 截断，append 是出路）。
+        "append": {"type": "boolean"},
         "command": {"type": "array", "items": {"type": "string"}},
         # search_files / move_file / fetch_url / search_web / list_files 的参数。
         # 全部必填、用空值表示「不适用」—— 结构化输出要求 required 列全。
@@ -82,7 +85,7 @@ ACTION_SCHEMA: dict[str, Any] = {
     },
     "required": [
         "kind", "thought", "tool", "path", "content", "command",
-        "pattern", "glob", "to", "url", "query", "recursive",
+        "pattern", "glob", "to", "url", "query", "recursive", "append",
         "output_json", "summary", "signal_type", "detail",
     ],
     "additionalProperties": False,
@@ -140,7 +143,9 @@ SUBAGENT_SYSTEM = """你是一个 Subagent，只与架构师通信，不与其�
 每次只输出**一个**动作。Runtime 会执行它并把结果追加到你的上下文里。
 
 可用动作：
-- tool_call + tool=write_file，需要 path / content
+- tool_call + tool=write_file，需要 path / content；append=true 表示**追加**到文件
+  末尾而不是覆盖（写长文件时一次输出有限，分多次 append 写完），
+  不写 append 或 append=false 是覆盖
 - tool_call + tool=read_file，需要 path
 - tool_call + tool=list_files，需要 path（目录，用 "." 表示工作区根）；
   recursive=true 一次列完整棵树。**想看工作区里有什么就用它，不要去 run 一个 ls**
@@ -948,7 +953,8 @@ def _parse_action(d: dict[str, Any]) -> AgentAction:
     if kind == "tool_call":
         tool = d["tool"]
         if tool == "write_file":
-            args = {"path": d["path"], "content": d["content"]}
+            args = {"path": d["path"], "content": d["content"],
+                    "append": bool(d.get("append"))}
         elif tool == "read_file":
             args = {"path": d["path"]}
         elif tool == "list_files":

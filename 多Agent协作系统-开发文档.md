@@ -2267,6 +2267,32 @@ system 提示词列了 8 个工具，而 bench 任务的 `spec.tools` 只给 4 �
 
 ---
 
+### 11.34 文书任务的编码问题：run python 默认 GBK，和 write_file 的 UTF-8 打架（真人反馈，2026-08）
+
+症状：含中文的文档类任务（「写一份中文说明 / 报告」）经常要改好几轮都过不了验收，
+中文内容反复乱码或「读出来不是那回事」。
+
+根因：中文 Windows 上，python 的 `open()` 默认编码是 **GBK（cp936）**，而工具层
+`write_file` / `read_file` 固定 UTF-8。两条路打架：
+
+- 模型用 `write_file` 写 UTF-8 文件，但验收命令（`python -c "assert '中文' in ..."`）
+  走 `run`、用 GBK 读 → 读到乱码 → 验收失败；
+- 或者模型用 `run python` 自己写文件（要格式化/处理文本时很自然），默认 GBK 写出，
+  和 write_file 的 UTF-8 不一致。
+
+**修法**：`sandbox._wrap` 把 `python` / `python3` 换成 `sys.executable` 时加
+`-X utf8`（PEP 540 UTF-8 mode），强制子进程的 `open()` / stdin / stdout 全用 UTF-8。
+这样 `run python` 写/读文件的默认编码和 write_file/read_file 工具一致，消除打架。
+只动本地沙箱那一支；Docker 容器里是 Linux、默认就是 UTF-8，不用改。
+
+守它的是 `test_run_python_writes_utf8_by_default` / `test_run_python_reads_utf8_by_default`。
+
+**一条边界**：`-X utf8` 只影响**新建** python 子进程的默认编码。如果任务的验收命令
+或被测程序**显式**写了 `encoding='gbk'`，那还是 GBK —— 但那已经是任务的规格在指定
+编码，不是工具层该管的。
+
+---
+
 ### 11.33 工具的大小限制：读大文件是静默截断，写长段卡在 max_tokens（2026-08）
 
 问「工具有大小限制吗」分两层，答案不一样：
@@ -2292,10 +2318,12 @@ system 提示词列了 8 个工具，而 bench 任务的 `spec.tools` 只给 4 �
 只显示开头，用 search_files 定位后重读」，让模型既看到最重要的开头、又知道没读完。
 其余工具仍取末尾 2000（`run` 的错误信息在末尾，那个方向是对的）。
 
-**未修（需讨论）**：写长段。要么给 `next_step` 显式设一个大的 `max_tokens`（但
-§11.26 正是因为这个「猜的数字会把正文挤没」才默认不发），要么给 `write_file`
-加 append 模式让模型分多次写。两件事都要动 ACTION_SCHEMA + SUBAGENT_SYSTEM +
-派发 + sandbox 四处，且和 §11.26 的结论正面冲突，单独一轮。
+**写长段已修（append 模式）**：`write_file` 加 `append` 参数 —— 写长文件时一次输出
+有限，模型可以分多次 `write_file(..., append=true)` 追加写完，绕开 max_tokens 截断。
+改动五处：`ACTION_SCHEMA`（append 字段 + required）、`SUBAGENT_SYSTEM`（write_file
+描述）、`_parse_action`（args 带 append）、`_exec_tool`（派发传 append）、
+`Sandbox.write_file`（append=True 时以 "a" 打开；追加到不存在的文件 = 创建）。
+守它的是 `test_append_adds_instead_of_overwriting` / `test_append_to_a_missing_file_creates_it`。
 
 ---
 

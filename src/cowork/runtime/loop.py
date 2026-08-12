@@ -407,7 +407,10 @@ class StepLoop:
                 call.name, f"不在这个任务的 tools {list(spec.tools)} 里"
             )
         if call.name == "write_file":
-            return self.sandbox.write_file(call.args["path"], call.args["content"])
+            return self.sandbox.write_file(
+                call.args["path"], call.args["content"],
+                append=bool(call.args.get("append")),
+            )
         if call.name == "read_file":
             return self.sandbox.read_file(call.args["path"])
         if call.name == "list_files":

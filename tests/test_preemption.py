@@ -552,6 +552,69 @@ class TestBinaryApproval(LoopFixture):
         self.assertNotIn("allow_binary", VERDICT_SCHEMA["properties"])
 
 
+class TestAppendWrite(unittest.TestCase):
+    """`write_file` 的 append 模式（M12 之后）：写长文件时一次输出有限，分多次追加。"""
+
+    def _sandbox(self, ws: Path, scope=("out.py",)) -> Sandbox:
+        return Sandbox(
+            SandboxProfile(workspace=str(ws), allowed_binaries=("python",)),
+            list(scope),
+        )
+
+    def test_append_adds_instead_of_overwriting(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            sandbox = self._sandbox(ws)
+            self.assertTrue(sandbox.write_file("out.py", "第一段\n").ok)
+            self.assertTrue(sandbox.write_file("out.py", "第二段\n", append=True).ok)
+            self.assertEqual(
+                (ws / "out.py").read_text(encoding="utf-8"), "第一段\n第二段\n"
+            )
+
+    def test_append_to_a_missing_file_creates_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            sandbox = self._sandbox(ws)
+            self.assertTrue(sandbox.write_file("out.py", "第一段\n", append=True).ok)
+            self.assertEqual(
+                (ws / "out.py").read_text(encoding="utf-8"), "第一段\n"
+            )
+
+
+class TestRunForcesUtf8(unittest.TestCase):
+    """`run python` 强制 `-X utf8`：中文 Windows 上默认 GBK，会和 write_file/read_file
+    的 UTF-8 打架 —— 文书任务（含中文文档）因此反复失败（M12 之后）。"""
+
+    def test_run_python_writes_utf8_by_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            sandbox = Sandbox(
+                SandboxProfile(workspace=str(ws), allowed_binaries=("python",)),
+                ["out.txt"],
+            )
+            # 不指定 encoding —— 依赖 -X utf8 强制成 UTF-8，而不是系统默认 GBK
+            r = sandbox.run(["python", "-c", "open('out.txt','w').write('中文')"])
+            self.assertTrue(r.ok, r.stderr)
+            data = (ws / "out.txt").read_bytes()
+            self.assertEqual(data.decode("utf-8"), "中文")
+
+    def test_run_python_reads_utf8_by_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            sandbox = Sandbox(
+                SandboxProfile(workspace=str(ws), allowed_binaries=("python",)),
+                ["out.txt"],
+            )
+            (ws / "out.txt").write_text("中文", encoding="utf-8")
+            # 不指定 encoding 读 UTF-8 文件，应该原样读到「中文」
+            r = sandbox.run(
+                ["python", "-c",
+                 "print(open('out.txt').read() == '中文')"]
+            )
+            self.assertTrue(r.ok, r.stderr)
+            self.assertIn("True", r.stdout)
+
+
 class TestToolFaceIsConsistent(unittest.TestCase):
     """加一个工具要同时改四处，少一处就是一类**假信号**。
 

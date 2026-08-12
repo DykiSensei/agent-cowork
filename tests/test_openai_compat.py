@@ -468,7 +468,7 @@ class TestPromptCaching(unittest.TestCase):
 
         action = json.dumps({
             "kind": "finish", "thought": "", "tool": "", "path": "", "content": "",
-            "command": [], "pattern": "", "glob": "", "to": "", "url": "",
+            "append": False, "command": [], "pattern": "", "glob": "", "to": "", "url": "",
             "query": "", "recursive": False, "signal_type": "", "detail": "",
             "summary": "做完了", "output_json": "{}",
         })

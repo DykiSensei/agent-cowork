@@ -93,11 +93,18 @@ class Sandbox:
 
     # -- tools ------------------------------------------------------------- #
 
-    def write_file(self, path: str, content: str) -> ToolResult:
+    def write_file(self, path: str, content: str, *, append: bool = False) -> ToolResult:
         target = self._resolve_in_scope(path, write=True)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            if append and target.exists():
+                # 追加而不是覆盖：写一个长文件时模型一次输出有限，可以分多次
+                # 追加写完（M12 之后：写长段会被 max_tokens 截断，append 是出路）。
+                with target.open("a", encoding="utf-8") as f:
+                    f.write(content)
+            else:
+                # append 到还不存在的文件 = 创建，等价于普通写入
+                target.write_text(content, encoding="utf-8")
         except OSError as exc:
             # 文件系统的拒绝是**工具失败**，不是我们的崩溃。写到一个已经是目录的
             # 路径、盘满、Windows 上的保留名（con/nul）都会走到这里 —— 抛出去的话
@@ -107,7 +114,8 @@ class Sandbox:
             return ToolResult(
                 ok=False, exit_code=1, stderr=f"写入失败: {type(exc).__name__}: {exc}"
             )
-        return ToolResult(ok=True, detail=f"wrote {len(content)} chars to {path}")
+        verb = "appended" if append and target.exists() else "wrote"
+        return ToolResult(ok=True, detail=f"{verb} {len(content)} chars to {path}")
 
     def delete_file(self, path: str) -> ToolResult:
         """删一个文件。**受 scope 限制，和 write_file 同一套判定。**
@@ -426,7 +434,12 @@ class Sandbox:
     def _wrap(self, command: list[str]) -> list[str]:
         if not self.profile.use_docker:
             if command[0] in ("python", "python3"):
-                return [sys.executable, *command[1:]]
+                # `-X utf8`：强制子进程默认 UTF-8（`open()` / stdin / stdout 全是）。
+                # 中文 Windows 上 python 默认 GBK，而 write_file / read_file 工具
+                # 固定 UTF-8 —— 模型用 `run python` 写文件会写出 GBK、验收命令用
+                # `run python` 读 UTF-8 文件会读到乱码。不强制的话，含中文的文档类
+                # 任务（文书）就在两种编码之间反复失败、改好几轮都过不了验收。
+                return [sys.executable, "-X", "utf8", *command[1:]]
             return command
 
         # 整个 workspace 只读挂载，再把 scope 内的具体路径以可写方式覆盖上去。
