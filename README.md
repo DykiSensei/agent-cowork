@@ -77,7 +77,7 @@ docker compose up -d postgres litellm     # 可选，不起就 skip 掉相关的
 python -m unittest discover -s tests -t .
 ```
 
-548 个测试。三样基础设施（Postgres / LiteLLM / Docker）都不起时，依赖它们的
+556 个测试。三样基础设施（Postgres / LiteLLM / Docker）都不起时，依赖它们的
 18 个会 skip（7 PG + 5 LiteLLM + 6 Docker），再加 1 个要搜索 key = 19，其余照常跑；
 打真实供应商的用例需要 `.env` 里配 key。
 
@@ -127,7 +127,7 @@ Runtime 是纯确定性层（不含任何 LLM 调用）。
 
 ---
 
-## 功能一览（M0–M11 全部完成）
+## 功能一览（M0–M12）
 
 | 里程碑 | 内容 |
 |---|---|
@@ -144,6 +144,7 @@ Runtime 是纯确定性层（不含任何 LLM 调用）。
 | M9 | 会话级 token 硬护栏：应用层预算强制，不依赖 LiteLLM |
 | M10 | 工作区与「接手已有项目」、按角色选供应商、工具面 4→8（search_web 是第 9 个） |
 | M11 | 真人实测一轮：三角色附加提示词、run 白名单放宽、max_steps 默认 60、进度落成事件 |
+| M12 | skill + 终局续跑 + 可观测性；详情页接管拆解、多任务并行可见（流式待办） |
 
 ## 四条架构不变量（有测试守着）
 
