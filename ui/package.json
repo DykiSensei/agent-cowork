@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "agent-cowork M6 群聊界面层（ChatSurface）。简洁/专业双模式。",
+  "description": "agent-cowork M6 群聊界面层（ChatSurface）。一套界面（专业版已弃用）。",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && npm run check && vite build",

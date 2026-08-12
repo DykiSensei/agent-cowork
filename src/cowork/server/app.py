@@ -95,6 +95,15 @@ def create_app(
     def list_tasks():
         return runner.list_threads()
 
+    @app.get("/api/skills")
+    def list_skills():
+        """人写的说明书清单（M12）。**只读** —— 增删改在文件系统里做。
+
+        不做「在界面上编辑 skill」是刻意的：那是一个文件管理器，
+        而人已经有一个了。界面要答的是「有哪些、放在哪、这次带哪几份」。
+        """
+        return runner.list_skills()
+
     @app.post("/api/tasks", status_code=202)
     async def create_task(req: Request):
         # 全部入口都走 optional_body：body 不合法时该回 400（下面的字段校验会说
@@ -106,11 +115,15 @@ def create_app(
         mode = (body.get("mode") or "new").strip()
         if mode not in ("new", "takeover"):
             return err(400, f"mode 只能是 new / takeover，收到 {mode!r}")
+        picked = body.get("skills") or []
+        if not isinstance(picked, list) or any(not isinstance(s, str) for s in picked):
+            return err(400, "skills 要是一个字符串数组")
         try:
             plan_id = runner.start_plan(
                 goal,
                 ws=(body.get("workspace") or "").strip() or None,
                 takeover=mode == "takeover",
+                skill_names=picked,
             )
         except ValueError as exc:      # 工作区路径不能用（WorkspaceError）
             return err(400, str(exc))
@@ -137,9 +150,30 @@ def create_app(
                 409,
                 "这个任务现在没有在跑，所以这句话没有送出去。"
                 "如果它在等你拍板，请在上方的卡片里选一个处理方式；"
-                "如果它已经结束了，可以发布一个新任务。",
+                "如果它已经结束了，用「接着改」把要求补给它。",
             )
         return {"accepted": True}
+
+    @app.post("/api/tasks/{task_id}/follow-up", status_code=202)
+    async def follow_up(task_id: str, req: Request):
+        """任务收尾之后追加要求 —— 原地续跑（M12）。
+
+        和 `intervene` 是同一句话的两种时机，**分成两个端点是刻意的**：介入是
+        对一个正在烧钱的循环喊停并改道，几乎不额外花钱；追加要求会把一条已经
+        终局的线程**重新跑起来**。后果不同，界面上就要问得不一样，
+        而共用一个端点的话，「它到底做了什么」只能靠猜。
+        """
+        body = await optional_body(req)
+        instruction = (body.get("instruction") or "").strip()
+        if not instruction:
+            return err(400, "instruction 不能为空")
+        try:
+            kind = runner.follow_up(task_id, instruction)
+        except KeyError:
+            return err(404, "没有这个任务")
+        except ValueError as exc:
+            return err(409, str(exc))
+        return {"accepted": True, "kind": kind}
 
     @app.post("/api/tasks/{task_id}/cancel", status_code=202)
     async def cancel_task(task_id: str, req: Request):
@@ -392,6 +426,9 @@ def create_app(
                 GLOBAL_KEYS["allowed_binaries"], DEFAULTS["allowed_binaries"]
             ),
             "max_steps": env.get(GLOBAL_KEYS["max_steps"], DEFAULTS["max_steps"]),
+            "max_parallel": env.get(
+                GLOBAL_KEYS["max_parallel"], DEFAULTS["max_parallel"]
+            ),
             "allow_network": env.get(
                 GLOBAL_KEYS["allow_network"], DEFAULTS["allow_network"]
             ),
@@ -464,7 +501,7 @@ def create_app(
                     if value not in ("on", "off"):
                         return err(400, f"allow_network 只能是 on / off，收到 {raw!r}")
                     pairs[env_name] = value
-                elif flat == "max_steps":
+                elif flat in ("max_steps", "max_parallel"):
                     value = str(raw or "").strip()
                     if value:
                         # 非数字当场拒 —— 落进 .env 之后只会被静默当成默认值，
@@ -472,9 +509,9 @@ def create_app(
                         try:
                             n = int(value)
                         except ValueError:
-                            return err(400, f"max_steps 要一个整数，收到 {raw!r}")
+                            return err(400, f"{flat} 要一个整数，收到 {raw!r}")
                         if n < 0:
-                            return err(400, "max_steps 不能是负数（0 = 不限）")
+                            return err(400, f"{flat} 不能是负数（0 = 不限）")
                         value = str(n)
                     pairs[env_name] = value
                 elif flat == "workspace":

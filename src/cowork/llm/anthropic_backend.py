@@ -21,7 +21,7 @@ from ..llm import ArchitectVerdict, CacheStats, SubtaskDraft, TaskProfile, Triag
 from ..llm.errors import ModelCallFailed, from_provider_error
 from ..signals import SOFT_SIGNALS, SignalType
 from ..types import AgentContext, Signal, TaskSpec
-from .prompts import with_extra
+from .prompts import skill_block, with_extra
 
 
 def _error_text(exc) -> str:
@@ -687,21 +687,35 @@ class AnthropicBackend:
         schema: dict[str, Any],
         thinking: bool = True,
         effort: str | None = None,
+        tail: str = "",
     ) -> tuple[dict[str, Any], int]:
         # Anthropic 的提示词缓存是**显式**的：不打 cache_control 断点就一次都不命中，
         # 这和 OpenAI 系「够长就自动缓存」不是一回事（§11.14）。断点打在 system 上 ——
         # 角色提示词在同一种调用里一字不变，而 user 每次都不同，缓存的边界正好在这。
         # 断点之前的内容才进缓存，所以 system 必须是完整的一块，不能把可变内容拼进去。
+        #
+        # `tail`（今天只有 skill，M12）单独成一块、单独一个断点：**两个断点**才能
+        # 让「勾了不同 skill 的任务」仍然共享第一块的缓存。拼成一块的话，
+        # 换一个 skill 组合就等于换一整份 system，前面那段角色提示词白白重付。
+        system_blocks: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        if tail:
+            system_blocks.append(
+                {
+                    "type": "text",
+                    "text": tail,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            )
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": self.max_tokens,
-            "system": [
-                {
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            "system": system_blocks,
             "messages": [{"role": "user", "content": user}],
             "output_config": {"format": {"type": "json_schema", "schema": schema}},
         }
@@ -748,6 +762,7 @@ class AnthropicBackend:
             user=_render_subagent_context(ctx),
             schema=ACTION_SCHEMA,
             effort=self.subagent_effort,
+            tail=skill_block(ctx.task_spec.skills),
         )
         return _parse_action(data), tokens
 

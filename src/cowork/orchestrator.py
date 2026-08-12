@@ -24,6 +24,7 @@ from .runtime.loop import StepLoop, StepOutcome
 from .runtime.sandbox import Sandbox
 from .signals import SignalSource, SignalType
 from .types import (
+    TERMINAL_STATUSES,
     Action,
     AgentContext,
     Artifact,
@@ -238,9 +239,16 @@ class Orchestrator:
         state = store.load_task(task_id)
         if state is None:
             raise ValueError(f"没有这个任务: {task_id}")
-        if state.status is not TaskStatus.AWAITING_HUMAN:
+        # AWAITING_HUMAN → 人的裁决（`resume_with_ruling`）；
+        # 终局三种 → 人的追加要求（`follow_up`，M12）。
+        # **RUNNING / INTERRUPTED / PENDING 不许 restore**：它们要么正在跑、
+        # 要么还在飞行中，重建一份现场等于同一个任务跑两遍。
+        if (
+            state.status is not TaskStatus.AWAITING_HUMAN
+            and state.status not in TERMINAL_STATUSES
+        ):
             raise ValueError(
-                f"只有 AWAITING_HUMAN 的任务能 restore（当前 {state.status.value}）"
+                f"只有挂起或已终局的任务能 restore（当前 {state.status.value}）"
             )
         orch = cls(
             state.spec,
@@ -283,6 +291,61 @@ class Orchestrator:
         self._event(
             "decision", ref_id=decision.id, payload={"action": decision.action.value}
         )
+        self._render(decision)
+        return self._drive(max_cycles, first=decision)
+
+    def follow_up(self, instruction: str, max_cycles: int = 8) -> RunResult:
+        """任务已经收尾了，人还有话说 —— **原地续跑**（M12，§11.30）。
+
+        「一次做不到位、要改几轮」是真实使用里最常见的形状，而这套系统原来在
+        终局那一刻就把门关死了：`intervene` 只对活着的循环有效（要有人来取抢占
+        队列），`ruling` 只认 AWAITING_HUMAN。人手上什么都没有，只能重发一个
+        任务，而那会**丢掉已经做出来的产物和整条执行记录**。
+
+        **没有新机制**。人的追加要求走的就是 `intervene` 那条路：
+
+            人说的话 → HUMAN_INTERVENTION 硬信号 → 架构师落成裁决
+                     （`apply_follow_up`）→ 既有的 apply_resume → 既有的 cycle 循环
+
+        三个后果是刻意的：
+
+        - **写权不变**（§2.3）。人提供的是**信号**，新 spec 由架构师构造。
+          和中途介入一样不问模型 —— 人是这条裁决的 decider，问模型只是多花
+          一次钱去猜人的意思。
+        - **状态从终局回到 RUNNING**，`revision` +1。M6 契约因此改了：
+          「终局」不再等于「这条线程永远不会再动」，只等于「此刻它自己不会动」。
+        - **产物保留、执行记录压成摘要**（`choose_resume_mode` 会选 REBASE：
+          goal 变了但 scope 有交集）。产物留着正是原地续跑相对「重发一个任务」
+          的全部价值；trace 不留是 REBASE 本来的意义 —— 旧目标的推理痕迹会
+          把下一轮带偏（§6）。
+
+        取消（`cancel`）不走这里：那条路人已经拍板，架构师无事可决。
+        """
+        was = self.state.status
+        if was not in TERMINAL_STATUSES:
+            raise ValueError(
+                f"只有已终局的任务能追加要求（当前 {was.value}）；"
+                "还在跑的用 intervene，挂起的用 ruling"
+            )
+        sig = self.intervene(instruction)
+        # **抢占队列必须清空**：`intervene` 把信号也塞进了抢占队列，而此刻
+        # 没有任何 step 循环会来取它 —— 留着的话，续跑的第一步刚开头就会被它
+        # 抢占一次，白烧一轮架构师（同「一次中断放大成无限中断」那条坑）。
+        self.bus.drain_preempt()
+        self.state.interrupt_count += 1
+        self.state.signal_log.append(sig.id)
+        self._event("signal", ref_id=sig.id, payload={"type": sig.type.value})
+        self._set_status(TaskStatus.INTERRUPTED)
+        self._say(f"[HUMAN] 追加要求，任务从 {was.value} 续跑")
+
+        # 走架构师，但**不问模型**：人是这条裁决的 decider（同 `apply_human_ruling`
+        # 和 `decide()` 里那条 HUMAN_INTERVENTION 快路径）。写权仍然在架构师手上
+        # —— 新 spec 是它构造的，人给的只有那句话。
+        decision = self.architect.apply_follow_up(self.state, sig)
+        self.store.save_decision(decision)
+        self.decisions.append(decision)
+        self._event("decision", ref_id=decision.id,
+                    payload={"action": decision.action.value})
         self._render(decision)
         return self._drive(max_cycles, first=decision)
 

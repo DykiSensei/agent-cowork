@@ -111,6 +111,9 @@ class SpecTemplate:
         "delete_file", "move_file", "run",
     )
     model: str = "claude-opus-5"
+    # 这批子任务带哪几份说明书（M12）。**和 tools 同一类**：人挑，模型不挑 ——
+    # 让被隔离方给自己挑说明书没有意义，而且选择结果落进 spec 就是一次写入。
+    skills: tuple[str, ...] = ()
     # 0 = 不限。**M11 起默认 60**：12 是 M1 拿脚本后端定的，真实任务里
     # 「读几个文件 + 写几个文件 + 跑一遍测试」轻松就过 12 步，于是 STEP_LIMIT
     # 变成了最常见的中断原因 —— 而它和任务做得对不对毫无关系。
@@ -717,6 +720,44 @@ class Architect:
             rationale=ruling.rationale,
         )
 
+    def apply_follow_up(self, state: TaskState, signal: Signal) -> DecisionRecord:
+        """任务收尾之后，人还有话说 —— 落成一条 decider=HUMAN 的裁决（M12）。
+
+        **和 `decide()` 里那条 HUMAN_INTERVENTION 快路径只差一处，但那一处是
+        本质的：目标是追加的，不是替换的。**
+
+        中途介入说的是「别那么干，改成这样」—— 此刻的目标本来就没做到，
+        换掉它是对的。终局之后说的是「做得不错，再加一点」—— 原来的目标
+        **已经满足了**，把它整句换成「再补一节用法」的话，下一轮看到的任务
+        就只剩那半句，它会重新理解一遍甚至推翻已经做对的部分。
+
+        所以两条都不走模型（人是 decider，问模型是多花一次钱去猜人的意思），
+        但这里把追加要求**接在**原目标后面，并且带上第几版 —— 改过三轮之后，
+        「哪句话是这一轮要做的」得看得出来。
+
+        `resume_mode` 交给 `choose_resume_mode()` 算，不在这里硬写：
+        那条规则归 `resume.py`，它会因为 goal 变了且 scope 有交集而选 REBASE
+        —— 产物保留、执行记录压成摘要，正是续跑要的。
+        """
+        spec = state.spec
+        instruction = (signal.payload.get("instruction") or "").strip()
+        goal = (
+            f"{spec.goal}\n\n追加要求（第 {spec.revision + 1} 版）：{instruction}"
+            if instruction
+            else spec.goal
+        )
+        new_spec = spec.bump(goal=goal)
+        return DecisionRecord(
+            task_id=spec.id,
+            trigger=[signal.id],
+            decider=Decider.HUMAN,
+            action=Action.MODIFY_TASK,
+            rationale=f"任务收尾后人追加要求：{instruction}",
+            new_spec=new_spec,
+            spec_changes={"goal": goal},
+            resume_mode=choose_resume_mode(spec, new_spec),
+        )
+
     def prime_history(self, task_id: str, store) -> None:
         """从存储重建 `_history[task_id]` —— restore 时调用。
 
@@ -827,6 +868,7 @@ class Architect:
             scope=list(draft.scope),
             depends_on=list(draft.depends_on),
             tools=list(template.tools),
+            skills=list(template.skills),
             model=template.model,
             max_steps=template.max_steps,
             deadline_s=template.deadline_s,
@@ -868,11 +910,19 @@ class Architect:
         if template.parent_id is None:
             template = replace(template, parent_id=ids.task_id())
 
+        plan_started_at = time.time()
+
         def progress(phase: str, *, attempt: int, specs: list | None = None) -> None:
             """报一次「现在在哪一步」。**纯确定性，不花任何模型调用。**
 
-            token 每次都带上：一个在动的数字就是活着的证明，而这条链上
-            没有别的东西能便宜地提供这个信号。
+            token 每次都带上，但要清楚它的局限：**这条链上没有流式调用**，
+            所以 token 只有在一次调用返回之后才会动 —— 它在最慢的那段
+            （生成中）恰恰是不动的。实测反馈「token 计数不实时变化，而是产出
+            初版方案后跳变」说的就是这件事，那不是刷新问题。
+
+            所以真正扛住「它还活着吗」的是 `phase_started_at`：进入这个阶段的
+            时刻。界面拿它自己走秒 —— 一个在走的计时器不需要任何后端配合，
+            而且**刷新之后还在**（如果发的是「已经过了几秒」，刷新就归零了）。
             """
             if on_progress is None:
                 return
@@ -880,6 +930,10 @@ class Architect:
                 {
                     "phase": phase,
                     "attempt": attempt,
+                    # 进入这个阶段的时刻 / 整个拆解开始的时刻。给锚点不给差值：
+                    # 差值一旦离开这一刻就是错的，锚点永远是对的。
+                    "phase_started_at": time.time(),
+                    "started_at": plan_started_at,
                     # 分母是真的：重生成有 max_regenerate 上限。没有真分母的
                     # 地方就不要编一个百分比（同 pending_ruling 不编建议那条）
                     "max_attempts": self.policy.max_regenerate + 1,

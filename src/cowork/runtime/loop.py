@@ -199,6 +199,11 @@ class StepLoop:
 
             # ---- 派发一个 step ----
             step += 1
+            # **模型调用之前也要发一条。** 这一步是整条链上最慢的一段（推理模型
+            # 几十秒到几分钟），而它以前整个落在两条记录之间：上一步的 done 和
+            # 这一步的 done。于是「正在想」和「挂了」在界面上完全一样 ——
+            # 实测反馈里「子代理一直卡在第 0 步」说的就是这一段。
+            self._emit_progress(spec.id, step, "thinking")
             try:
                 action, cost = agent.next_step(ctx)
             except ModelError as exc:
@@ -218,6 +223,10 @@ class StepLoop:
             ctx.reasoning_trace.append(
                 {"role": "assistant", "step": step, "action": _describe(action)}
             )
+            # 模型说完了、动作还没执行 —— 这一刻手上第一次有「它打算干什么、
+            # 为什么」。工具本身也可能很慢（`run` 一遍测试就是几分钟），
+            # 所以这条不能等执行完再发。
+            self._emit_progress(spec.id, step, "acting", action=action)
 
             if isinstance(action, SoftSignalAction):
                 # 软信号入队，不中断（§3.3）
@@ -265,7 +274,7 @@ class StepLoop:
                         "stderr": result.stderr[-2000:],
                     }
                 )
-                self._emit_step(spec.id, step, action, result)
+                self._emit_progress(spec.id, step, "done", action=action, result=result)
 
                 if action.name == "write_file" and result.ok:
                     art = Artifact(
@@ -328,6 +337,9 @@ class StepLoop:
 
                 # 可机器检查的验收标准 -> TEST_FAILED
                 # 验收命令本身也可能撞上沙箱边界（例如它试图写 scope 外的路径）
+                # 跑验收也是一段可以很长的时间（一整套测试），同样不能是沉默的：
+                # 界面上「在收尾，等验收」得有个开始时刻才走得动计时器。
+                self._emit_progress(spec.id, step, "verifying", action=action)
                 try:
                     failed = self._run_acceptance(spec)
                 except ScopeViolation as exc:
@@ -405,20 +417,35 @@ class StepLoop:
             return self.sandbox.run(list(call.args["command"]))
         raise ScopeViolation(call.name, "未声明的工具")
 
-    def _emit_step(self, task_id: str, step: int, action, result) -> None:
-        """每走完一步发一条**轻量**事件（M11）。
+    def _emit_progress(
+        self, task_id: str, step: int, phase: str, *, action=None, result=None
+    ) -> None:
+        """一步之内的每个**阶段**都发一条轻量事件（M11 起是每步一条，M12 改成每阶段）。
 
-        为什么非有不可：进度面板的两个数据源以前都只在 **cycle 边界**更新 ——
+        为什么非有不可：进度面板的两个数据源本来都只在 **cycle 边界**更新 ——
         `current_step` 是 `loop.run()` 返回之后才 `+= steps_run`，
         而「此刻在做什么」取自 checkpoint，可 `checkpoint()` 只在中断 / PROBE /
         Finish 时才落盘。于是一个顺利跑完的子任务在库里只留下两个可观测状态：
         初始和终局 —— 界面因此从「还没动手」直接跳到「做完了」。
         **那不是刷新不及时，是中间状态压根不存在。**
 
+        M11 补的 `done` 一条把粒度从 cycle 降到了 step，但**没有解决同一个形状的
+        问题**：一步之内最慢的那段（模型调用）仍然整个落在两条 `done` 之间。
+        所以四个阶段各发一条，**进入时发、不是完成后发**：
+
+            thinking   模型在想（这一段最长，也最像卡死）
+            acting     动作拿到了、还没执行 —— 第一次有「打算干什么、为什么」
+            done       执行完了，带成败
+            verifying  Finish 之后跑验收命令（一整套测试可以很久）
+
+        一般化：**凡是耗时可能超过几秒的确定性阶段，进入时就要留下记录。**
+
         为什么不是「每步落一个 checkpoint」：`Checkpoint` 带着整份
         `agent_context`（含不断变长的 reasoning_trace），每步写一次是 O(n²) 的
-        字节量，而步数上限刚被放开。这里只记「第几步、调了什么、成没成」——
+        字节量，而步数上限刚被放开。这里只记「第几步、哪个阶段、对谁动手」——
         和 `events` 表的定位一致：**到达序的索引，不是内容的第二份拷贝**。
+        `thought` 是唯一的例外，而它是有意的：一句话的成本换「它为什么这么干」，
+        没有它的话界面上只剩 `step 3 write_file`，人还是不知道在发生什么。
 
         **失败不许打断执行**：进度是锦上添花，写不进去也不能把任务搞挂。
         """
@@ -427,17 +454,27 @@ class StepLoop:
         append = getattr(self.store, "append_event", None)
         if append is None:
             return
+        payload: dict = {"step": step, "phase": phase}
+        if action is not None:
+            desc = _describe(action)
+            payload["kind"] = desc.get("kind")
+            # 工具名对 finish / soft_signal 是空的 —— 保留键，让读的一侧不用分支
+            payload["tool"] = desc.get("name") or ""
+            payload["target"] = _target_of(action)
+            payload["thought"] = (desc.get("thought") or "")[:200]
+        if result is not None:
+            payload["ok"] = bool(result.ok)
+            if not result.ok:
+                # 失败时给一小段证据。**只在失败时、且截断** —— 成功的 stdout
+                # 可以很长，把它塞进事件表就真成了「内容的第二份拷贝」。
+                payload["stderr"] = (result.stderr or result.stdout or "")[-200:]
         try:
             append(
                 TaskEvent(
                     task_id=task_id,
                     kind="step",
-                    text=f"step {step} {action.name}",
-                    payload={
-                        "step": step,
-                        "tool": action.name,
-                        "ok": bool(result.ok),
-                    },
+                    text=f"step {step} {phase} {payload.get('tool') or ''}".rstrip(),
+                    payload=payload,
                 )
             )
         except Exception:  # noqa: BLE001 - 进度写不进去不该让任务失败
@@ -468,6 +505,26 @@ def _is_acceptance_rehearsal(spec, call: ToolCall) -> bool:
         return False
     argv = [str(x) for x in call.args.get("command") or []]
     return any(list(c.command) == argv for c in spec.acceptance if c.command)
+
+
+def _target_of(action: AgentAction) -> str:
+    """这个动作对什么东西动手 —— 路径 / 网址 / 搜索词 / 命令行。
+
+    和 `views._action_target()` 是同一个问题的两侧：那边读的是 checkpoint 里
+    存好的 dict（终局任务走那条），这边读的是**内存里的动作对象**（在跑的走这条）。
+    两处的取值口径必须一致，否则同一个动作在任务跑完前后显示成两样。
+    """
+    if isinstance(action, ToolCall):
+        args = action.args
+        for key in ("path", "url", "query", "pattern"):
+            if args.get(key):
+                return str(args[key])
+        if args.get("command"):
+            return " ".join(str(x) for x in args["command"])
+        return ""
+    if isinstance(action, Finish):
+        return action.summary or ""
+    return getattr(action, "signal_type", "") or ""
 
 
 def _describe(action: AgentAction) -> dict:

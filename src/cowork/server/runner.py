@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .. import ids, views, workspace
+from .. import ids, skills, views, workspace
 from ..agent.architect import (
     Architect,
     DecompositionResult,
@@ -24,7 +24,14 @@ from ..agent.architect import (
 from ..orchestrator import Orchestrator
 from ..policy import DEFAULT_POLICY
 from ..scheduler import Scheduler
-from ..types import Action, SandboxProfile, TaskEvent, TaskSpec, TaskStatus  # noqa: F401
+from ..types import (  # noqa: F401
+    TERMINAL_STATUSES,
+    Action,
+    SandboxProfile,
+    TaskEvent,
+    TaskSpec,
+    TaskStatus,
+)
 
 # PROVIDERS 预设表和后端工厂目前住在 cli 里 —— 服务层复用同一份，
 # 不另抄（将来值得挪进 llm/，那是另一次整理）
@@ -52,6 +59,8 @@ class PlanEntry:
     # 「我的产物在哪」原来在这套系统里没有答案（落在随机临时目录，界面也不显示）
     workspace: str = ""
     takeover: bool = False
+    # 这次任务带哪几份说明书（M12）。人在发布页勾的，落进 SpecTemplate.skills
+    skills: list[str] = field(default_factory=list)
     # 拆解跑到哪一步了（M11）。这个循环实测中位 110~381 秒，而它对外原来只有
     # 「开始」和「终局」两个事件 —— 中间那几分钟在界面上是真空，于是「慢」和
     # 「卡死」长得一模一样。阶段是确定性的，报它不花任何模型调用。
@@ -182,6 +191,25 @@ class Runner:
         except ValueError:
             return 60
 
+    def _max_parallel(self, layer_wide: int = 0) -> int:
+        """同一层里最多几个子任务同时跑。**0 = 不额外限制**（有几个跑几个）。
+
+        以前 `dispatch()` 根本不传这个参数，吃 `Scheduler` 的默认值 4 —— 于是
+        一层里第 5 个任务开始排队，而**排队这件事在界面上和「卡住」长得一样**
+        （M12 的 queued/started 两条事件就是为这个补的）。
+
+        为什么归人：这个数受供应商的并发限制约束，而那件事只有拿着 key 的人
+        知道。代码里猜一个，猜大了在别人的账号上限流，猜小了白等。
+        """
+        import os
+
+        raw = (os.environ.get("COWORK_MAX_PARALLEL") or "").strip()
+        try:
+            n = max(0, int(raw)) if raw else 4
+        except ValueError:
+            n = 4
+        return n or (layer_wide or 64)
+
     def _allow_network(self) -> bool:
         """两个联网工具开不开。**默认关** —— 见 `SpecTemplate.tools` 的说明。"""
         import os
@@ -241,7 +269,12 @@ class Runner:
         return workspace.resolve_workspace(raw) if raw else workspace.default_root()
 
     def start_plan(
-        self, goal: str, *, ws: str | None = None, takeover: bool = False
+        self,
+        goal: str,
+        *,
+        ws: str | None = None,
+        takeover: bool = False,
+        skill_names: list[str] | None = None,
     ) -> str:
         backend = self._exec_backend()  # 同步建一次：没 key 时让请求立刻 400，而不是线程里悄悄死
         plan_id = ids.task_id()  # 同时也是将来那条复合线程的 root_id
@@ -249,10 +282,13 @@ class Runner:
         # 文件才发现目录不能用
         root = workspace.resolve_workspace(ws) if ws else self.workspace_root()
         ws_path = workspace.task_workspace(root, plan_id, takeover=takeover)
+        # 同理：不存在的 skill 名字要在起跑前筛掉。带进去的话症状是
+        # 「模型好像没按说明书做」—— 那是查不出来的
+        picked = skills.resolve(skill_names or [])
         with self._lock:
             self.plans[plan_id] = PlanEntry(
                 id=plan_id, goal=goal, created_at=time.time(),
-                workspace=str(ws_path), takeover=takeover,
+                workspace=str(ws_path), takeover=takeover, skills=picked,
             )
         # 人的原话落进 root 线程的第一条事件（M6 §9 那两条小缺口）。
         # 为什么非记不可：spec.goal 会被架构师改写，rev>1 之后**人最初说的那句话
@@ -300,7 +336,10 @@ class Runner:
                 ),
                 parent_id=plan_id,
                 max_steps=self._max_steps(),
+                skills=tuple(entry.skills),
             )
+            if entry.skills:
+                log(f"[PLAN] 带上说明书：{'、'.join(entry.skills)}")
             net = self._network_tools()
             if net:
                 template = replace(template, tools=(*template.tools, *net))
@@ -435,6 +474,7 @@ class Runner:
             registry=self.running,
             reviewer_backend=self._reviewer_backend(),
             review_writes=self._review_writes(),
+            max_parallel=self._max_parallel(len(specs)),
         )
         entry.dispatched_root = sched.root_id
         threading.Thread(
@@ -535,6 +575,101 @@ class Runner:
             daemon=True,
         ).start()
 
+    def follow_up(self, task_id: str, instruction: str) -> str:
+        """任务收尾之后人还有话说（M12）。返回走的是哪条路。
+
+        **两种线程两条路，但都不是新机制**：
+
+          单任务   → `Orchestrator.restore(...).follow_up()`：信号 → 裁决 →
+                     既有的 apply_resume，产物和工作区原地接着用。
+          复合线程 → **带现状的新一轮拆解**：goal = 人的追加要求，
+                     existing = 工作区快照（就是 M10「接手已有项目」那条路），
+                     `parent_id` 仍然是这条线程的 root —— 于是新一批子任务
+                     落在同一条线程上，而不是另起一条。
+
+        为什么复合不能逐个子任务续跑：追加要求落在**哪个**子任务上是个判断题
+        （可能落在多个，甚至需要一个新的子任务），而这个判断正是架构师拆解时
+        要做的事。逐个问一遍等于把拆解重写一遍。
+        """
+        if task_id in self.running:
+            raise ValueError("这条任务还在跑 —— 直接说话就是介入，不用追加")
+        state = self.store.load_task(task_id)
+        children = [s for s in self.store.list_tasks() if s.spec.parent_id == task_id]
+        if children or state is None:
+            self._follow_up_composite(task_id, instruction, children)
+            return "composite"
+        if state.status not in TERMINAL_STATUSES:
+            raise ValueError(
+                f"这条任务还没收尾（{state.status.value}），追加要求要等它停下来"
+            )
+        backend = self._exec_backend()  # 没 key 时让请求立刻 400，别在线程里悄悄死
+        threading.Thread(
+            target=self._follow_up_worker,
+            args=(task_id, instruction, backend),
+            daemon=True,
+        ).start()
+        return "single"
+
+    def _follow_up_worker(self, task_id: str, instruction: str, backend) -> None:
+        try:
+            orch = Orchestrator.restore(
+                task_id,
+                backend=backend,
+                store=self.store,
+                policy=DEFAULT_POLICY,
+                human_gate=self.gate,
+                reviewer_backend=self._reviewer_backend(),
+                review_writes=self._review_writes(),
+                log=self._log,
+            )
+            self.running[task_id] = orch
+            orch.follow_up(instruction, self.max_cycles)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"[SERVE] 续跑 {task_id} 失败: {type(exc).__name__}: {exc}")
+        finally:
+            self.running.pop(task_id, None)
+
+    def _follow_up_composite(
+        self, root_id: str, instruction: str, children: list
+    ) -> None:
+        """复合线程的追加要求 = 在同一条线程上再拆一轮。
+
+        工作区要从**现场**找回来，不能只信内存里的 `plans`：进程重启之后那张表
+        是空的，而线程还在库里 —— 那时候「产物在哪」的唯一答案是子任务的
+        `spec.sandbox.workspace`。
+        """
+        entry = self.plans.get(root_id)
+        ws = entry.workspace if entry else ""
+        if not ws:
+            ws = next(
+                (
+                    k.spec.sandbox.workspace
+                    for k in children
+                    if k.spec.sandbox and k.spec.sandbox.workspace
+                ),
+                "",
+            )
+        if not ws:
+            raise ValueError("找不到这条线程的工作区，没法在现状上接着做")
+        alive = [k for k in children if k.status not in TERMINAL_STATUSES]
+        if alive:
+            raise ValueError(
+                f"还有 {len(alive)} 个子任务没收尾，等它们停下来再追加"
+            )
+        backend = self._exec_backend()
+        with self._lock:
+            # **复用同一个 id**：plan 注册表本来就是按 root 键的
+            # （`start_plan` 里 plan_id 就是将来的 root_id），所以新一轮直接
+            # 顶掉旧条目 —— 于是界面上还是那一条线程，不是又冒出来一条。
+            self.plans[root_id] = PlanEntry(
+                id=root_id, goal=instruction, created_at=time.time(),
+                workspace=ws, takeover=True,
+            )
+        self.store.append_event(TaskEvent(task_id=root_id, kind="human", text=instruction))
+        threading.Thread(
+            target=self._plan_worker, args=(root_id, instruction, backend), daemon=True
+        ).start()
+
     def _restore_worker(self, task_id: str, ruling: HumanRuling, backend) -> None:
         try:
             orch = Orchestrator.restore(
@@ -557,6 +692,19 @@ class Runner:
     # ------------------------------------------------------------------ #
     # 读侧（直接透传 views）
     # ------------------------------------------------------------------ #
+
+    def list_skills(self) -> dict:
+        """人写的说明书清单 + 它们放在哪。
+
+        **目录路径要回给界面**：「我该把 skill 放哪」这个问题必须有答案，
+        否则勾选列表为空时人只能猜（同工作区那条）。
+        """
+        root = skills.default_root()
+        return {
+            "root": str(root),
+            "exists": root.is_dir(),
+            "skills": [s.to_dict() for s in skills.load_all(root)],
+        }
 
     def list_threads(self):
         return views.thread_list(self.store)

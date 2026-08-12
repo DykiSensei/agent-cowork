@@ -180,6 +180,21 @@ cases.push(
         ),
       ),
   ],
+  [
+    "进度事件不进时间线 —— 它们回答的是「此刻怎么样」，不是「发生过什么」",
+    () =>
+      assert.deepEqual(
+        kinds([
+          ev(1, "queued", { payload: { layer: 1 } }),
+          ev(2, "started", { payload: { layer: 1 } }),
+          ev(3, "step", { payload: { step: 1, phase: "thinking" } }),
+          ev(4, "step", { payload: { step: 1, phase: "done", ok: true } }),
+          ev(5, "log", { text: "[RUN ] cycle=1" }),
+        ], null),
+        ["log"],
+        "一个任务跑 60 步就是 180 条 step 事件，全渲进来时间线就没了",
+      ),
+  ],
 );
 
 let failed = 0;

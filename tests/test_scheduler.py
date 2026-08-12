@@ -83,6 +83,48 @@ class TestCompositeRun(CompositeFixture):
         json.dumps(self.sched.run(max_cycles=3).to_dict(), ensure_ascii=False)
 
 
+class TestQueueingIsVisible(CompositeFixture):
+    """「还没轮到它」必须和「跑起来了但慢」分得开（M12）。
+
+    实测反馈的原话是「某个子代理一直卡在第 0 步，不确定是没并行还是单纯太慢」。
+    真相是它**根本还没开始** —— 后面几层要等前面整层跑完，而未起跑的子任务
+    在库里连一行都没有，于是界面只能画一个不动的第 0 步。
+    """
+
+    def test_every_subtask_exists_before_it_runs(self):
+        store = self.sched.store
+        self.sched._seed_pending()
+
+        for spec in self.sched.specs:
+            state = store.load_task(spec.id)
+            self.assertIsNotNone(state, f"{spec.id} 起跑前就该在库里")
+            self.assertIs(state.status, TaskStatus.PENDING)
+
+    def test_queued_and_started_bracket_the_wait(self):
+        """排队和开跑是两条事件，中间那段就是它等了多久。"""
+        self.sched.run(max_cycles=3)
+        store = self.sched.store
+
+        for spec in self.sched.specs:
+            kinds = [e.kind for e in store.events_for(spec.id, 0)]
+            self.assertIn("queued", kinds, f"{spec.id} 没说过它在排队")
+            self.assertIn("started", kinds, f"{spec.id} 没说过它开跑了")
+            self.assertLess(kinds.index("queued"), kinds.index("started"))
+
+    def test_queued_says_which_layer_and_how_wide(self):
+        """光说「在排队」不够：第几层、这层几个、并发几个，人才知道等多久。"""
+        self.sched.run(max_cycles=3)
+        store = self.sched.store
+
+        first = [e for e in store.events_for("t1_parse", 0) if e.kind == "queued"][0]
+        last = [e for e in store.events_for("t4_check", 0) if e.kind == "queued"][0]
+        self.assertEqual(first.payload["layer"], 1)
+        self.assertEqual(first.payload["layer_size"], 2)
+        self.assertEqual(first.payload["parallel"], 2)
+        self.assertEqual(last.payload["layer"], 3)
+        self.assertEqual(last.payload["layers_total"], 3)
+
+
 class TestConflictDetection(unittest.TestCase):
     """同层并行写同一份产出 —— 静态检查看不到的那种。
 

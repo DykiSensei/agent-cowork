@@ -44,6 +44,17 @@ def spec(tid="t1", *, parent=None, goal="干活") -> TaskSpec:
     )
 
 
+def _step_event(task_id: str, step: int, phase: str, *, tool="", ok=None) -> TaskEvent:
+    """手搓一条 step 事件 —— 用来构造 `loop` 不容易跑出来的时序。"""
+    payload: dict = {"step": step, "phase": phase}
+    if tool:
+        payload.update({"kind": "tool_call", "tool": tool, "target": "", "thought": ""})
+    if ok is not None:
+        payload["ok"] = ok
+    return TaskEvent(task_id=task_id, kind="step", text=f"step {step} {phase}",
+                     payload=payload)
+
+
 class TestPendingSuggestion(unittest.TestCase):
     """缺口 1：挂起那条记录里，action/rationale 是系统的兜底行为，不是模型的意见。"""
 
@@ -534,11 +545,49 @@ class TestLiveStepProgress(unittest.TestCase):
         loop.run(ctx, agent)
 
         events = [e for e in store.events_for(spec.id, 0) if e.kind == "step"]
+        # 三步 × 三个阶段：两次工具调用是 thinking/acting/done，
+        # Finish 那步是 thinking/acting/verifying（它不执行工具，但要跑验收）
+        self.assertEqual([e.payload["step"] for e in events],
+                         [1, 1, 1, 2, 2, 2, 3, 3, 3])
         self.assertEqual(
-            len(events), 2, "两次工具调用就该留下两条 step 事件（Finish 不算一步动作）"
+            [e.payload["phase"] for e in events[:3]],
+            ["thinking", "acting", "done"],
+            "一步之内的阶段顺序就是它的因果顺序",
         )
-        self.assertEqual([e.payload["step"] for e in events], [1, 2])
-        self.assertEqual(_latest_step(store, spec.id)["tool"], "write_file")
+        self.assertEqual(
+            [e.payload["phase"] for e in events[6:]],
+            ["thinking", "acting", "verifying"],
+            "Finish 之后跑验收，那一段同样不能是沉默的",
+        )
+        self.assertEqual(_latest_step(store, spec.id)["step"], 3)
+
+    def test_the_thinking_phase_is_recorded_before_the_model_answers(self):
+        """**模型调用之前**就要留下记录。
+
+        这是整组事件存在的理由：一步里最慢的是模型调用，而它以前整个落在
+        两条「完成」记录之间 —— 于是「正在想」和「挂了」在界面上完全一样。
+        """
+        from cowork.types import TaskState, TaskStatus
+        from cowork.views import _latest_step, task_progress
+
+        loop, agent, ctx, spec, store = self._loop_fixture()
+        seen: list[dict] = []
+        # 第一次模型调用「还没返回」时，库里应该已经有 thinking 那条了
+        original = agent.next_step
+
+        def spy(c):
+            seen.append(dict(_latest_step(store, spec.id) or {}))
+            return original(c)
+
+        agent.next_step = spy
+        loop.run(ctx, agent)
+
+        self.assertEqual(seen[0].get("phase"), "thinking")
+        self.assertEqual(seen[0].get("step"), 1, "第一次调用模型时就该报第 1 步")
+
+        running = TaskState(spec=spec, status=TaskStatus.RUNNING, current_step=0)
+        out = task_progress(store, running)
+        self.assertIsNotNone(out["phase_started_at"], "界面靠它自己走秒")
 
     def test_progress_reads_the_live_step_while_running(self):
         """在跑的时候读 step 事件，而不是等 checkpoint。"""
@@ -550,9 +599,36 @@ class TestLiveStepProgress(unittest.TestCase):
 
         running = TaskState(spec=spec, status=TaskStatus.RUNNING, current_step=0)
         out = task_progress(store, running)
-        self.assertEqual(out["current_step"], 2, "该反映最后一条 step 事件，不是 0")
+        self.assertEqual(out["current_step"], 3, "该反映最后一条 step 事件，不是 0")
         self.assertEqual(out["last_result"]["name"], "write_file")
+        self.assertEqual(out["last_action"]["kind"], "finish",
+                         "最后一个动作是 Finish，它也要报出来")
+        acting = [
+            e.payload for e in store.events_for(spec.id, 0)
+            if e.kind == "step" and e.payload.get("phase") == "acting"
+        ]
+        self.assertEqual([p["target"] for p in acting], ["a.py", "b.py", "done"],
+                         "「对什么东西动手」在跑的时候就要有，不能等 checkpoint")
         self.assertIsNotNone(out["started_at"], "计时器要有起点")
+
+    def test_a_failed_step_stays_visible_after_the_next_one_starts(self):
+        """失败不能被下一步的 thinking 抹掉。
+
+        `ok` 只出现在 done 上，而 thinking 是紧随其后的一条 ——
+        只看「最后一条 step 事件」的话，人最需要看到的那条信息活不过一秒。
+        """
+        from cowork.types import TaskState, TaskStatus
+        from cowork.views import task_progress
+
+        loop, agent, ctx, spec, store = self._loop_fixture()
+        store.append_event(_step_event(spec.id, 4, "done", tool="run", ok=False))
+        store.append_event(_step_event(spec.id, 5, "thinking"))
+
+        running = TaskState(spec=spec, status=TaskStatus.RUNNING, current_step=0)
+        out = task_progress(store, running)
+        self.assertEqual(out["phase"], "thinking", "阶段跟着最后一条走")
+        self.assertEqual(out["current_step"], 5)
+        self.assertIs(out["last_result"]["ok"], False, "上一步失败了要一直说")
 
     def test_progress_writes_never_break_the_run(self):
         """进度是锦上添花：存储写不进去也不能把任务搞挂。"""

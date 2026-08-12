@@ -86,6 +86,24 @@ function YourDecisionCard({ d }: { d: DecisionRecord }) {
  */
 const ANSWERED = new Map<string, string>();
 
+/**
+ * 终局之后刚说出去、还没在事件流里露面的那句话：task_id → 原话。
+ *
+ * **同 `ANSWERED` 的理由，是同一条坑的另一面**（§11.26）：追加要求是
+ * 「202 + 后台干活」—— 收下之后才起线程 restore，restore 里还有一次模型调用
+ * （REBASE 要摘要）。这期间服务端如实还在报「做完了」，人刚说的那句话
+ * 在界面上无影无踪，看着像没发出去。
+ *
+ * 按 task_id 记是对的（不像裁决那样要按 decision_id）：一条线程同一时刻
+ * 只可能有一次「刚说完还没落地」的追加。
+ */
+const SAID = new Map<string, string>();
+
+/** 给行为检查用：模拟「刚追加了一句，服务端还没回声」。 */
+export function markSaid(taskId: string, text: string): void {
+  SAID.set(taskId, text);
+}
+
 /** 给行为检查用：模拟「人已经答过这条裁决」。 */
 export function markAnswered(decisionId: string, label: string): void {
   ANSWERED.set(decisionId, label);
@@ -297,12 +315,14 @@ export default function LiteStream({
   taskId,
   detail,
   onIntervene,
+  onFollowUp,
   onCancel,
   onRuling,
 }: {
   taskId: string;
   detail: TaskDetail;
   onIntervene: (taskId: string, text: string) => Promise<ActionResult>;
+  onFollowUp: (taskId: string, text: string) => Promise<ActionResult>;
   onCancel: (taskId: string, reason: string) => Promise<ActionResult>;
   onRuling: (
     taskId: string,
@@ -312,6 +332,8 @@ export default function LiteStream({
   ) => Promise<ActionResult>;
 }) {
   const [bar, setBar] = useState(false);
+  // 刚追加、服务端还没回声的那句话 —— 状态在模块级的 `SAID` 里（见它的注释）
+  const [, bump] = useState(0);
   // 介入 / 取消都可能被服务端拒（最常见的是 409「任务不在运行中」）。
   // 原来这里 `.then()` 一律当成功：清空输入框 + 弹「已告诉它」，
   // 而那条指令其实哪儿都没到。
@@ -334,6 +356,12 @@ export default function LiteStream({
   const target = targets.find((t) => t.id === pick) ?? targets[0] ?? null;
   const phase = composerPhase(detail);
   const running = phase === "running" && targets.length > 0;
+  // **终局之后也能说话**（M12）。原来这里只有一句「这条任务已经结束了」，
+  // 而「一次做不到位、要改几轮」恰恰是最常见的形状 —— 人只能重发一个任务，
+  // 把已经做出来的东西丢掉。追加要求发给**线程本身**（不是某个子任务）：
+  // 复合线程那边是带着现状再拆一轮，落点得是 root。
+  const canFollowUp = phase === "done";
+  const canTalk = running || canFollowUp;
 
   const submitCancel = () => {
     if (stopping || !target) return;
@@ -346,23 +374,42 @@ export default function LiteStream({
       .finally(() => setStopping(false));
   };
 
-  const submitIntervene = (e: FormEvent<HTMLFormElement>) => {
+  const submitSay = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const input = e.currentTarget.querySelector("input")!;
     const text = input.value.trim();
-    if (!text || !target) return;
+    if (!text) return;
+    // 在跑 → 介入那个正在跑的子任务；已终局 → 追加要求发给线程本身
+    if (!running && !canFollowUp) return;
+    if (running && !target) return;
     setFailed(null);
-    void onIntervene(target.id, text).then((r) => {
+    const sent = running
+      ? onIntervene(target!.id, text)
+      : onFollowUp(taskId, text);
+    void sent.then((r) => {
       if (!r.ok) {
         // **不清空输入框**：那句话还没送到，人可能想改改再发一次
         setFailed(r.error ?? "没能送出去");
         return;
       }
       input.value = "";
+      if (!running) {
+        SAID.set(taskId, text);
+        bump((n) => n + 1);
+      }
       setBar(true);
       setTimeout(() => setBar(false), 4000);
     });
   };
+
+  // 那句话已经落进事件流了 —— 乐观气泡功成身退。
+  // **按内容比对而不是按时间清除**：restore 里那次模型调用要多久没人知道，
+  // 定个秒数就是猜（同挂起那张卡「按 decision_id 记」的理由）。
+  const said = SAID.get(taskId) ?? null;
+  if (said !== null && events.some((e) => e.kind === "human" && e.text === said)) {
+    SAID.delete(taskId);
+  }
+  const pendingSaid = SAID.get(taskId) ?? null;
 
   return (
     <main className="l-stream">
@@ -422,12 +469,22 @@ export default function LiteStream({
                 return <TermView key={i} ev={ev} />;
             }
           })}
+          {pendingSaid !== null && (
+            <>
+              <div className="l-me">
+                <div className="bub">{pendingSaid}</div>
+              </div>
+              {sysLine("已经交给它了，正在带着现有成果重新起跑…")}
+            </>
+          )}
         </div>
       </div>
 
       <div className="l-composer">
         <div className={`l-sysbar${bar ? " show" : ""}`}>
-          已告诉它，等它做完手头这一小步就照你说的办。
+          {canFollowUp
+            ? "已经交给它了 —— 它会带着现有的成果接着做。"
+            : "已告诉它，等它做完手头这一小步就照你说的办。"}
         </div>
         {failed && <div className="l-fail">{failed}</div>}
         {targets.length > 1 && (
@@ -443,22 +500,22 @@ export default function LiteStream({
           </div>
         )}
         <div className="row">
-          <form className="row" style={{ display: "contents" }} onSubmit={submitIntervene}>
+          <form className="row" style={{ display: "contents" }} onSubmit={submitSay}>
             <input
               placeholder={
                 running
                   ? "插一句话，改变它接下来的做法…"
-                  : phase === "queued"
-                    ? "还没开始跑，等它动起来"
-                    : phase === "waiting"
-                      ? "在上面那张卡片里答复"
-                      : "这条任务已经结束了"
+                  : canFollowUp
+                    ? "还要改什么？说一句，它接着做…"
+                    : phase === "queued"
+                      ? "还没开始跑，等它动起来"
+                      : "在上面那张卡片里答复"
               }
               autoComplete="off"
-              disabled={!running}
+              disabled={!canTalk}
             />
-            <button type="submit" disabled={!running}>
-              发送
+            <button type="submit" disabled={!canTalk}>
+              {canFollowUp ? "接着改" : "发送"}
             </button>
           </form>
           {running && (
@@ -481,7 +538,11 @@ export default function LiteStream({
           ) : phase === "queued" ? (
             <>还没开始跑 —— 正在拆解或在等前面的步骤做完。等它动起来就能插话了。</>
           ) : (
-            <>这条任务已经结束了，发消息不会有人收。想接着做请发布一个新任务。</>
+            <>
+              这一轮做完了。还有要改的就直接说 —— 它会<b>带着已经做出来的东西</b>
+              接着干（不是从头再来），所以会重新花时间和 token。
+              不想再动它就别发消息。
+            </>
           )}
         </div>
       </div>

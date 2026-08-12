@@ -6,6 +6,7 @@ import {
   fetchProviders,
   fetchThreads,
   postCancel,
+  postFollowUp,
   postIntervene,
   postRuling,
   subscribeStream,
@@ -25,6 +26,8 @@ export interface AppProps {
   /** 派发完成后把新线程选中并刷新列表。 */
   onDispatched: (rootId: string) => void;
   onIntervene: (taskId: string, instruction: string) => Promise<ActionResult>;
+  /** 终局之后追加要求 —— 它会重新跑起来（M12）。 */
+  onFollowUp: (taskId: string, instruction: string) => Promise<ActionResult>;
   onCancel: (taskId: string, reason: string) => Promise<ActionResult>;
   onRuling: (
     taskId: string,
@@ -170,6 +173,11 @@ export default function App() {
     [],
   );
 
+  const onFollowUp = useCallback(
+    (taskId: string, instruction: string) => postFollowUp(taskId, instruction),
+    [],
+  );
+
   const onCancel = useCallback(
     (taskId: string, reason: string) => postCancel(taskId, reason),
     [],
@@ -239,6 +247,7 @@ export default function App() {
     onDelete,
     onDispatched,
     onIntervene,
+    onFollowUp,
     onCancel,
     onRuling,
   };

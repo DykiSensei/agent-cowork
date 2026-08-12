@@ -72,6 +72,34 @@ class TestLoadEnv(unittest.TestCase):
         self.assertEqual(load_env(self.tmp / "nope.env"), [])
 
 
+class TestEnvExampleCoversEverySetting(unittest.TestCase):
+    """设置页能写的每一个环境变量，`.env.example` 里都要有一行。
+
+    这是实测撞到的一类漂移：M10 加了三个 `COWORK_*_PROVIDER`（按角色选供应商），
+    代码、设置页、CLAUDE.md 都有，**只有 `.env.example` 漏了整整一个里程碑** ——
+    而那份文件是不用界面的人唯一会打开的那一份。同 §11.20 那条：
+    「契约写了什么，就要有一条从调用方那侧发起的检查」，这里的调用方是人。
+    """
+
+    def test_every_writable_key_has_a_line(self):
+        from pathlib import Path
+
+        from cowork.server.settings_io import GLOBAL_KEYS, SEARCH_KEY_ENV
+
+        text = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
+            encoding="utf-8"
+        )
+        declared = {
+            line.split("=", 1)[0].strip()
+            for line in text.splitlines()
+            if "=" in line and not line.lstrip().startswith("#")
+        }
+        missing = sorted(
+            {*GLOBAL_KEYS.values(), SEARCH_KEY_ENV} - declared
+        )
+        self.assertEqual(missing, [], f".env.example 漏了这些设置项: {missing}")
+
+
 class TestRedact(unittest.TestCase):
     def test_sk_key_is_redacted(self):
         out = redact("Error: invalid key sk-abc123DEF456ghi789 at line 1")

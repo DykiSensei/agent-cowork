@@ -15,6 +15,7 @@ import type {
   ProviderInfo,
   SearchProbe,
   Settings,
+  SkillList,
   TaskDetail,
   TaskSpec,
   ThreadSummary,
@@ -79,6 +80,17 @@ export function postIntervene(taskId: string, instruction: string) {
 }
 
 /**
+ * 任务收尾之后追加要求 —— **它会重新跑起来**（M12）。
+ *
+ * 和 `postIntervene` 是同一句话的两种时机，端点分开是因为后果不同：介入是
+ * 对一个正在烧钱的循环改道，追加是把一条已经终局的线程重新点着。
+ * 单任务原地续跑（产物留着），复合线程带着现状再拆一轮。
+ */
+export function postFollowUp(taskId: string, instruction: string) {
+  return send(`/api/tasks/${encodeURIComponent(taskId)}/follow-up`, { instruction });
+}
+
+/**
  * 停掉正在跑的任务。和 ruling(ABANDON) 是两条路：那条管已经挂起的，
  * 这条管**正在烧钱的**。任务不在运行中时服务端回 409 —— 那句话要给用户看到。
  */
@@ -133,15 +145,26 @@ export function browseFs(path: string): Promise<FsListing> {
  */
 export async function createTask(
   goal: string,
-  opts: { workspace?: string; mode?: "new" | "takeover" } = {},
+  opts: {
+    workspace?: string;
+    mode?: "new" | "takeover";
+    /** 这次带哪几份说明书。**只有勾了的会进提示词**（M12）。 */
+    skills?: string[];
+  } = {},
 ): Promise<ActionResult & { plan_id?: string }> {
   const r = await send("/api/tasks", {
     goal,
     workspace: opts.workspace || undefined,
     mode: opts.mode ?? "new",
+    skills: opts.skills ?? [],
   });
   if (!r.ok) return r;
   return { ok: true, plan_id: (r.data as { plan_id?: string })?.plan_id };
+}
+
+/** 人写的说明书清单 + 它们放在哪（只读；增删改在文件系统里做）。 */
+export function fetchSkills(): Promise<SkillList> {
+  return req("/api/skills");
 }
 
 export function fetchPlan(planId: string): Promise<PlanView> {

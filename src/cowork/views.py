@@ -13,12 +13,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from .types import TaskState, TaskStatus
+from .types import TERMINAL_STATUSES, TaskState, TaskStatus
 
-# 终局状态：列表里用来判断「这条线程还会不会动」
-TERMINAL = frozenset(
-    {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ABANDONED}
-)
+# 终局状态：列表里用来判断「这条线程还会不会动」。
+# 定义在 types.py，这里只是取个短名 —— 同一个判据不能有两份。
+TERMINAL = TERMINAL_STATUSES
 
 
 def thread_summary(state: TaskState, *, composite: bool = False) -> dict[str, Any]:
@@ -253,15 +252,56 @@ def _composite_detail(
 
 def _latest_step(store, task_id: str) -> dict | None:
     """最近一条 step 事件的 payload。没有就 None（老库、或还没走第一步）。"""
-    for ev in reversed(_events(store, task_id, 0)):
-        if ev.kind == "step" and isinstance(ev.payload, dict):
-            return ev.payload
+    live = _live_steps(_events(store, task_id, 0))
+    return live["latest"] if live else None
+
+
+def _live_steps(events: list) -> dict[str, Any] | None:
+    """倒着扫一遍 step 事件，取出界面要的那三样。
+
+    **为什么不是「最后一条」一件事**：一步之内有四个阶段（thinking / acting /
+    done / verifying），而它们各自回答不同的问题 ——
+
+      latest      此刻在哪个阶段、第几步（含它的时刻，计时器要）
+      action      最近一次「打算干什么」（thinking 那条没有动作信息）
+      result      最近一次**有成败的**执行（`ok` 只出现在 done 上）
+
+    只看最后一条的话，一步失败之后紧接着的 thinking 会把「上一步失败了」
+    从界面上抹掉 —— 而那正是人最需要看到的一条。
+
+    收的是**已经取出来的事件列表**，不是 store：`task_progress` 一次取完给
+    所有读法用。按需各取各的话，复合线程每刷新一次就是 N 个子任务 × 几次查询，
+    而这条路径是界面上最热的一条。
+    """
+    latest = action = result = None
+    latest_ts = 0.0
+    for ev in reversed(events):
+        if ev.kind != "step" or not isinstance(ev.payload, dict):
+            continue
+        p = ev.payload
+        if latest is None:
+            latest, latest_ts = p, ev.created_at
+        if action is None and (p.get("kind") or p.get("tool")):
+            action = p
+        if result is None and "ok" in p:
+            result = p
+        if latest is not None and action is not None and result is not None:
+            break
+    if latest is None:
+        return None
+    return {"latest": latest, "latest_at": latest_ts, "action": action, "result": result}
+
+
+def _queue_info(events: list) -> dict[str, Any] | None:
+    """它排在第几层、这层多宽、并发几个（`Scheduler` 派发时发的那条）。
+
+    只有「排队中」三个字的话，人接着就要问「还要等多久」——
+    而层号和层宽是这个问题唯一能确定性回答的部分。
+    """
+    for ev in reversed(events):
+        if ev.kind == "queued" and isinstance(ev.payload, dict):
+            return dict(ev.payload)
     return None
-
-
-def _first_event_ts(store, task_id: str) -> float | None:
-    events = _events(store, task_id, 0)
-    return events[0].created_at if events else None
 
 
 def task_progress(store, state: TaskState) -> dict[str, Any]:
@@ -292,6 +332,12 @@ def task_progress(store, state: TaskState) -> dict[str, Any]:
         "scope": list(spec.scope),
         # 产物落在哪 —— 「我的东西在哪」得有答案，而它只在 spec.sandbox 里
         "workspace": spec.sandbox.workspace if spec.sandbox else "",
+        # 这一步走到哪个阶段了、什么时候进的（M12）。终局任务两个都是 None ——
+        # 它已经不在任何阶段里，界面的计时器也就不该走。
+        "phase": None,
+        "phase_started_at": None,
+        # 它在第几层排着（`Scheduler` 派发时发的 queued 事件）。终局任务不给。
+        "queue": None,
         "last_action": None,
         "last_result": None,
         "produced": [],
@@ -301,17 +347,38 @@ def task_progress(store, state: TaskState) -> dict[str, Any]:
         # Finish 时落盘，而 `state.current_step` 要等 `loop.run()` 返回才累加 ——
         # 两个都只在 cycle 边界动，于是顺利跑完的任务在库里只有「初始」和
         # 「终局」两个状态，界面就从「还没动手」直跳「做完了」。
-        live = _latest_step(store, spec.id)
+        # 事件只取一次，下面几种读法共用（这是界面上最热的一条路径）
+        evs = _events(store, spec.id, 0)
+        out["queue"] = _queue_info(evs)
+        live = _live_steps(evs)
         if live:
-            out["current_step"] = live.get("step", out["current_step"])
-            out["last_result"] = {
-                "step": live.get("step"),
-                "name": live.get("tool"),
-                "ok": live.get("ok"),
-                "exit_code": 0 if live.get("ok") else 1,
-            }
+            latest = live["latest"]
+            out["current_step"] = latest.get("step", out["current_step"])
+            # 此刻在这一步的哪个阶段，以及**进入这个阶段的时刻** —— 界面靠后者
+            # 自己走秒。没有它的话「想了 3 秒」和「想了 8 分钟」在界面上一样，
+            # 而那正是人唯一想知道的事（同 `started_at` 那条：给事实不给判断）。
+            out["phase"] = latest.get("phase") or "acting"
+            out["phase_started_at"] = live["latest_at"]
+            act = live["action"]
+            if act:
+                out["last_action"] = {
+                    "step": act.get("step"),
+                    "kind": act.get("kind"),
+                    "name": act.get("tool") or None,
+                    "target": act.get("target") or "",
+                    "thought": act.get("thought") or "",
+                }
+            res = live["result"]
+            if res:
+                out["last_result"] = {
+                    "step": res.get("step"),
+                    "name": res.get("tool"),
+                    "ok": res.get("ok"),
+                    "exit_code": 0 if res.get("ok") else 1,
+                    "stderr": res.get("stderr") or "",
+                }
         # 开始时刻：界面上那个计时器要它。没有 deadline 了，「跑太久」归人判断
-        out["started_at"] = _first_event_ts(store, spec.id)
+        out["started_at"] = evs[0].created_at if evs else None
 
     if state.status in TERMINAL or not state.checkpoint_id:
         return out

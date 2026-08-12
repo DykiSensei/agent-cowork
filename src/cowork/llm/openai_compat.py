@@ -30,7 +30,7 @@ from ..llm.effort import resolve
 from ..llm.errors import MissingApiKey, ModelCallFailed, from_provider_error
 from ..runtime.detectors import validate_schema
 from ..types import AgentContext, Signal, TaskSpec
-from .prompts import with_extra
+from .prompts import skill_block, with_extra
 from .anthropic_backend import (
     ACTION_SCHEMA,
     ARCHITECT_SYSTEM,
@@ -208,6 +208,7 @@ class OpenAICompatBackend:
     def _call(
         self, *, model: str, system: str, user: str, schema: dict[str, Any],
         max_tokens: int | None = None, effort: str | None = None,
+        tail: str = "",
     ) -> tuple[dict[str, Any], int]:
         import openai
 
@@ -216,11 +217,16 @@ class OpenAICompatBackend:
         # 输出约束 + schema（同一种调用里一字不变）必须整体排在最前面，
         # 随每次调用变化的 user 内容排在最后。把 schema 挪到 user 里、或者在
         # system 里插一个时间戳/任务 id，都会把命中率直接打到 0（§11.14）。
+        #
+        # `tail` 是**按任务变但仍然静态**的那一块（今天只有 skill，M12）：
+        # 它排在 schema 之后，这样勾了不同 skill 的任务之间仍然共享
+        # 「提示词 + 输出约束 + schema」这一整段前缀。
         sys_prompt = (
             f"{system}\n\n"
             "只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释文字。\n"
             "必须严格符合下面这个 JSON schema：\n"
             f"{json.dumps(schema, ensure_ascii=False)}"
+            f"{tail}"
         )
         messages: list[dict[str, str]] = [
             {"role": "system", "content": sys_prompt},
@@ -334,6 +340,7 @@ class OpenAICompatBackend:
             user=_render_subagent_context(ctx),
             schema=ACTION_SCHEMA,
             effort=self.subagent_effort,
+            tail=skill_block(ctx.task_spec.skills),
         )
         return _parse_action(data), tokens
 

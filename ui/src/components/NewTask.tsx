@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { FormEvent } from "react";
-import { createTask, dispatchPlan, fetchPlan, fetchSettings, rulePlan } from "../api";
-import type { PlanView, TaskSpec } from "../types";
+import {
+  createTask,
+  dispatchPlan,
+  fetchPlan,
+  fetchSettings,
+  fetchSkills,
+  rulePlan,
+} from "../api";
+import type { PlanView, SkillList, TaskSpec } from "../types";
 import FolderPicker from "./FolderPicker";
 
 /**
@@ -64,6 +71,9 @@ export function PlanProgressView({ plan }: { plan: PlanView }) {
 
   const p = plan.progress;
   const elapsed = plan.started_at ? Math.max(0, Math.round(now - plan.started_at)) : null;
+  const inPhase = p?.phase_started_at
+    ? Math.max(0, Math.round(now - p.phase_started_at))
+    : null;
   const base = p ? PLAN_BASELINE[Math.min(p.attempt, 3)] : undefined;
   const slow = Boolean(elapsed && base && elapsed > base.max);
 
@@ -104,6 +114,9 @@ export function PlanProgressView({ plan }: { plan: PlanView }) {
       <div className="nt-prog-meta">
         {p ? `${p.tokens.toLocaleString()} token` : "还没开始调模型"}
         {elapsed !== null && ` · 已用 ${fmtSec(elapsed)}`}
+        {/* 这一阶段待了多久。**token 在这段时间里是不动的**（链上没有流式调用，
+            它只在一次调用返回后才跳），所以「还活着吗」得靠这个计时器来答。 */}
+        {inPhase !== null && ` · 这一步 ${fmtSec(inPhase)}`}
         {base && ` · 这一轮以往大概 ${fmtSec(base.median)}`}
       </div>
 
@@ -114,6 +127,72 @@ export function PlanProgressView({ plan }: { plan: PlanView }) {
           关掉这一屏不影响它继续跑，任务不会因此丢。
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * 说明书（skill）勾选。
+ *
+ * **一份都没有时也要出现**，而且要说清目录在哪 —— 「我该把 skill 放哪」
+ * 这个问题必须有答案，否则人只会以为这个功能坏了（同工作区那条）。
+ *
+ * 只勾选、不编辑：增删改在文件系统里做。在界面上做一个文件管理器没有意义，
+ * 人已经有一个了。
+ */
+export function SkillPicker({
+  picked,
+  onToggle,
+  list: given,
+}: {
+  picked: string[];
+  onToggle: (name: string) => void;
+  /** 直接给一份清单（不自己拉）。行为检查用的就是这条 —— 静态渲染跑不了 effect。 */
+  list?: SkillList;
+}) {
+  const [fetched, setFetched] = useState<SkillList | null>(null);
+  useEffect(() => {
+    if (given) return;
+    void fetchSkills()
+      .then(setFetched)
+      .catch(() => {});
+  }, [given]);
+
+  const list = given ?? fetched;
+  if (!list) return null;
+  return (
+    <div className="nt-skills">
+      <div className="nt-skills-hd">
+        说明书
+        <span className="nt-skills-note">
+          {list.skills.length
+            ? "勾上的会加进 Subagent 的提示词 —— 只有勾上的，所以别一次全选"
+            : "还没有说明书。在下面这个目录里放 <名字>.md 就会出现在这里"}
+        </span>
+      </div>
+      {list.skills.length > 0 && (
+        <div className="nt-skills-list">
+          {list.skills.map((s) => (
+            <label
+              key={s.name}
+              className={`nt-skill${picked.includes(s.name) ? " on" : ""}`}
+              title={s.path}
+            >
+              <input
+                type="checkbox"
+                checked={picked.includes(s.name)}
+                onChange={() => onToggle(s.name)}
+              />
+              <span className="nt-skill-n">{s.name}</span>
+              <span className="nt-skill-d">{s.description}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      <div className="nt-skills-root">
+        放在 <code>{list.root}</code>
+        {!list.exists && "（还不存在，建一个就行）"}
+      </div>
     </div>
   );
 }
@@ -333,6 +412,9 @@ export default function NewTask({
   const [error, setError] = useState<string | null>(null);
   // 人改过的拆解。null = 没动过，显示架构师那份。
   const [edited, setEdited] = useState<TaskSpec[] | null>(null);
+  // 这次带哪几份说明书。**只有勾了的会进提示词**：代价是前缀缓存按组合分叉，
+  // 换来的是 skill 多起来之后不必每个任务都驮着全部正文（M12）。
+  const [picked, setPicked] = useState<string[]>([]);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 默认工作区从设置页来 —— 「我的产物会落在哪」要在**发布之前**就看得见，
@@ -372,13 +454,23 @@ export default function NewTask({
     };
   }, [planId]);
 
+  const toggleSkill = useCallback((name: string) => {
+    setPicked((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    );
+  }, []);
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
     const text = goal.trim();
     if (!text || busy) return;
     setBusy(true);
     setError(null);
-    void createTask(text, { workspace: ws.trim() || undefined, mode })
+    void createTask(text, {
+      workspace: ws.trim() || undefined,
+      mode,
+      skills: picked,
+    })
       .then((r) => {
         if (!r.ok || !r.plan_id) {
           setError(r.error ?? "服务端没有返回 plan_id");
@@ -496,6 +588,8 @@ export default function NewTask({
             </>
           )}
         </div>
+
+        <SkillPicker picked={picked} onToggle={toggleSkill} />
 
         <textarea
           className="nt-input"

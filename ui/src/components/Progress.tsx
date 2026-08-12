@@ -57,6 +57,11 @@ function Row({
   // 钩子必须无条件调 —— 所以「要不要走」作为参数传进去，而不是包在 if 里
   const now = useNow(!p.terminal && Boolean(p.started_at));
   const elapsed = p.started_at && !p.terminal ? now - p.started_at : null;
+  // 当前这一步在这个阶段待了多久（M12）。**它才是「卡住了吗」的答案** ——
+  // 总时长会随任务变大而变大，而「想了 6 分钟」在任何任务上都说明问题。
+  // 后端给的是时刻不是差值：差值一旦离开那一刻就是错的。
+  const inPhase =
+    p.phase_started_at && !p.terminal ? Math.max(0, now - p.phase_started_at) : null;
   const doing = lite ? liteDoingText(p) : proDoingText(p);
   const status = awaiting ? "AWAITING_HUMAN" : p.status;
   return (
@@ -68,6 +73,9 @@ function Row({
         </div>
         <div className="pg-doing">
           {doing}
+          {inPhase !== null && inPhase >= 3 && (
+            <span className="pg-phase">　{fmtDur(inPhase)}</span>
+          )}
           {p.last_result && p.last_result.ok === false && (
             <span className="pg-bad">
               　上一步失败（exit {p.last_result.exit_code}）

@@ -47,6 +47,8 @@ export interface TaskSpec {
   token_budget: number | null;
   context_refs: string[];
   depends_on: string[];
+  /** 这个任务带哪几份说明书（名字，正文在服务端按名字读）。 */
+  skills?: string[];
 }
 
 export interface TaskState {
@@ -114,7 +116,21 @@ export interface TaskEvent {
   id: string;
   task_id: string;
   seq: number;
-  kind: "human" | "log" | "signal" | "decision" | "status" | "plan" | "review";
+  /**
+   * 后三种是**进度**事件（M12），不进时间线 —— 它们回答「此刻怎么样」，
+   * 由 `views.task_progress()` 读走后在进度面板上显示。
+   */
+  kind:
+    | "human"
+    | "log"
+    | "signal"
+    | "decision"
+    | "status"
+    | "plan"
+    | "review"
+    | "step"
+    | "queued"
+    | "started";
   text: string;
   ref_id: string | null;
   payload: Record<string, unknown>;
@@ -145,7 +161,30 @@ export interface PlanProgress {
   attempt: number;
   /** 分母是真的：重生成有 max_regenerate 上限。 */
   max_attempts: number;
+  /**
+   * **这个数在最慢的那段是不动的。** 链上没有流式调用，token 只有在一次
+   * 模型调用返回之后才拿得到 —— 所以它不能单独用来回答「还活着吗」。
+   */
   tokens: number;
+  /**
+   * 进入当前阶段的时刻（epoch 秒）。回答「还活着吗」的是它：界面拿它自己
+   * 走秒，刷新之后照样准（发差值的话刷新就归零了）。
+   */
+  phase_started_at?: number | null;
+  /** 整个拆解开始的时刻。 */
+  started_at?: number | null;
+}
+
+/**
+ * 人写的说明书（skill）。**列表里不带正文** —— 勾选要看的是「这是什么」。
+ *
+ * `root` 必须回给界面：清单为空时人得知道该把文件放哪，否则只能猜
+ * （同工作区那条：默认值必须是人找得到的地方）。
+ */
+export interface SkillList {
+  root: string;
+  exists: boolean;
+  skills: { name: string; description: string; chars: number; path: string }[];
 }
 
 export interface PlanData {
@@ -240,6 +279,28 @@ export interface TaskProgress {
    * 计时器决定 —— 界面要给的是事实，不是替他做的判断。
    */
   started_at?: number | null;
+  /**
+   * 这一步走到哪个阶段了（M12）。**「在想」和「挂了」以前长得一模一样** ——
+   * 一步之内最慢的是模型调用，而它整个落在两条「完成」记录之间。
+   *
+   *   thinking   模型在想下一个动作
+   *   acting     动作拿到了，正在执行（`run` 一遍测试也可以很久）
+   *   done       这一步执行完了
+   *   verifying  Finish 之后在跑验收命令
+   */
+  phase?: "thinking" | "acting" | "done" | "verifying" | null;
+  /** 进入当前阶段的时刻（epoch 秒）。界面靠它走秒。 */
+  phase_started_at?: number | null;
+  /**
+   * 它排在第几层。**「还没轮到」和「跑起来了但慢」以前长得一样** ——
+   * 后面几层要等前面整层跑完，而未起跑的子任务在库里连一行都没有。
+   */
+  queue?: {
+    layer: number;
+    layers_total: number;
+    layer_size: number;
+    parallel: number;
+  } | null;
   last_action: {
     step: number | null;
     kind: string | null;
@@ -356,6 +417,12 @@ export interface Settings {
   allowed_binaries: string;
   /** 一个子任务最多走几步。**"0" = 不限**。字符串，同 review_writes 那条理由。 */
   max_steps: string;
+  /**
+   * 同一批里最多几个子任务一起跑。**"0" = 有几个跑几个**。
+   * 归人的理由和 max_steps 不同：它受供应商的并发限制约束，
+   * 而只有拿着 key 的人知道那把 key 能同时打几路。
+   */
+  max_parallel: string;
   /** 两个联网工具（fetch_url / search_web）的总闸（"on" / "off"）。**默认关**：
    * 取回的第三方内容会进 reasoning_trace 再进下一轮提示词，那是一条提示词注入通道。 */
   allow_network: string;

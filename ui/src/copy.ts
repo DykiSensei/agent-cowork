@@ -142,6 +142,11 @@ const TOOL_VERB: Record<string, string> = {
   write_file: "正在写",
   read_file: "正在读",
   list_files: "正在看目录",
+  search_files: "正在搜代码",
+  delete_file: "正在删",
+  move_file: "正在挪",
+  fetch_url: "正在取网页",
+  search_web: "正在搜",
   run: "正在执行",
 };
 
@@ -150,7 +155,21 @@ export function liteDoingText(p: TaskProgress): string {
   if (p.status === "COMPLETED") return "做完了";
   if (p.status === "FAILED") return "没跑成";
   if (p.status === "ABANDONED") return "已放弃";
-  if (p.status === "PENDING") return "排队等前面的步骤做完";
+  if (p.status === "PENDING") {
+    // 说得出「第几层、还有几个在它前面」，人才知道这是在等而不是坏了
+    const q = p.queue;
+    if (q) {
+      return q.layer > 1
+        ? `排在第 ${q.layer}/${q.layers_total} 批，等前面那批做完`
+        : `轮到它了，等一个空位（这批 ${q.layer_size} 个、同时跑 ${q.parallel} 个）`;
+    }
+    return "排队等前面的步骤做完";
+  }
+  // **阶段优先于动作**（M12）：`last_action` 说的是「上一个动作是什么」，
+  // 而 phase 说的是「此刻在干什么」。模型正在想下一步时，前者还停在上一步 ——
+  // 于是界面显示「正在写 a.py」，其实那一步早就写完了。
+  if (p.phase === "thinking") return "正在想下一步";
+  if (p.phase === "verifying") return "在跑验收";
   const a = p.last_action;
   if (!a) return "刚开始，还没动手";
   if (a.kind === "finish") return "在收尾，等验收";
@@ -161,6 +180,8 @@ export function liteDoingText(p: TaskProgress): string {
 
 /** 专业版：把动作还原成它本来的样子，不做人话化。 */
 export function proDoingText(p: TaskProgress): string {
+  if (p.phase === "thinking") return "next_step → 等模型";
+  if (p.phase === "verifying") return "acceptance → 跑验收命令";
   const a = p.last_action;
   if (!a) return p.status;
   if (a.kind === "finish") return "finish → 等验收";

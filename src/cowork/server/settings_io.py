@@ -42,6 +42,10 @@ GLOBAL_KEYS = {
     "allowed_binaries": "COWORK_ALLOWED_BINARIES",
     # 一个子任务最多走几步（0 = 不限）。归人：任务多大只有人知道
     "max_steps": "COWORK_MAX_STEPS",
+    # 同一层里最多几个子任务同时跑（0 = 这一层有几个就跑几个）。
+    # 归人的理由和 max_steps 不同：这个数受**供应商的并发限制**约束，
+    # 而那件事只有拿着 key 的人知道 —— 代码里猜一个就会在别人的账号上限流。
+    "max_parallel": "COWORK_MAX_PARALLEL",
     "allow_network": "COWORK_ALLOW_NETWORK",
     "review_writes": "COWORK_REVIEW_WRITES",
     # search_web 用哪家搜索 API。**只有供应商名在这里** ——
@@ -77,6 +81,7 @@ DEFAULTS = {
     # 真正的回落在 `runner._allowed_binaries()`
     "allowed_binaries": "",
     "max_steps": "60",
+    "max_parallel": "4",
     # 默认关：取回的第三方内容会进 reasoning_trace 再进下一轮提示词，
     # 那是一条提示词注入通道
     "allow_network": "off",

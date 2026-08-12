@@ -34,6 +34,7 @@ from cowork.types import (
     SandboxProfile,
     TaskClass,
     TaskSpec,
+    TaskState,
     TaskStatus,
 )
 
@@ -299,6 +300,20 @@ class TestServer(unittest.TestCase):
                 r = client.post(f"/api/plans/{plan_id}/dispatch", json={})
                 self.assertEqual(r.status_code, 202, r.text)
                 self.assertEqual(r.json()["root_id"], plan_id)
+
+                # **派发是 202，活儿在后台线程里。** 不等它收尾就退出 with 块的话，
+                # `TemporaryDirectory` 会在子任务还在往里写文件时删目录 ——
+                # 症状是偶发的 `WinError 145 目录不是空的`，和被测行为无关。
+                _wait_for(
+                    lambda: all(
+                        p["terminal"]
+                        for p in client.get(f"/api/tasks/{plan_id}")
+                        .json()["progress"]
+                        .values()
+                    )
+                    or None,
+                    what="派发出去的子任务收尾",
+                )
 
     def test_the_journey_a_human_actually_takes(self):
         """实测走过的那条路，逐跳钉住 —— 它踩到了两个界面上无解的坑。
@@ -645,6 +660,280 @@ class TestServer(unittest.TestCase):
                 r = client.put("/api/settings", json={"workspace": "./相对路径"})
                 self.assertEqual(r.status_code, 400)
                 self.assertIn("绝对路径", r.json()["error"])
+
+    def _finished_task(self, tmp: Path):
+        """跑出一个 COMPLETED 的单任务，返回 (client, spec, backend)。"""
+        spec = TaskSpec(
+            goal="写一个 README",
+            parent_id="task_parent",  # 避开 §7.2 的顶层保护
+            acceptance=[Criterion(id="c1", description="有文件")],
+            task_class=TaskClass.CODE,
+            sandbox=SandboxProfile(workspace=str(tmp)),
+            scope=["README.md"],
+            tools=["write_file"],
+            max_steps=8,
+        )
+        backend = ScriptedBackend(
+            {
+                (1, 0): ToolCall("write_file", {"path": "README.md", "content": "# 标题\n"}),
+                (1, 1): Finish(output={}),
+                (2, 0): ToolCall(
+                    "write_file", {"path": "README.md", "content": "# 标题\n## 用法\n"}
+                ),
+                (2, 1): Finish(output={}),
+            }
+        )
+        client = self._app(backend, tmp)
+        return client, spec, backend
+
+    def test_follow_up_restarts_a_finished_task(self):
+        """终局之后还能改（M12）。
+
+        实测反馈：「当前任务完成之后就无法进行修改，很多时候一次不能做出符合
+        要求的产出」。原来 intervene 回 409（不在活任务表里）、ruling 回 409
+        （不是 AWAITING_HUMAN）—— 人手上一条路都没有。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            client, spec, backend = self._finished_task(tmp)
+            with client:
+                runner = client.app.state.runner
+                orch = Orchestrator(
+                    spec, backend=backend, store=runner.store,
+                    human_gate=runner.gate, log=QUIET,
+                )
+                self.assertIs(orch.run().state.status, TaskStatus.COMPLETED)
+
+                r = client.post(
+                    f"/api/tasks/{spec.id}/follow-up",
+                    json={"instruction": "再补一节「用法」"},
+                )
+                self.assertEqual(r.status_code, 202, r.text)
+                self.assertEqual(r.json()["kind"], "single")
+
+                def done():
+                    d = client.get(f"/api/tasks/{spec.id}").json()
+                    return d if d["state"]["spec"]["revision"] == 2 else None
+
+                final = _wait_for(done, what="续跑跑到第 2 版")
+                self.assertEqual(final["state"]["status"], "COMPLETED")
+                self.assertIn(
+                    "用法", (tmp / "README.md").read_text(encoding="utf-8")
+                )
+                # 人说的那句话要在时间线上
+                self.assertIn(
+                    "再补一节「用法」",
+                    [e["text"] for e in final["events"] if e["kind"] == "human"],
+                )
+
+    def test_follow_up_on_a_running_task_is_refused_with_a_reason(self):
+        """还在跑的时候「追加」就是介入 —— 拒绝要说清该用哪条路。"""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            client, spec, backend = self._finished_task(tmp)
+            with client:
+                runner = client.app.state.runner
+                orch = Orchestrator(
+                    spec, backend=backend, store=runner.store, log=QUIET
+                )
+                orch.run()
+                runner.running[spec.id] = orch  # 假装它还在跑
+
+                r = client.post(
+                    f"/api/tasks/{spec.id}/follow-up", json={"instruction": "改一下"}
+                )
+                self.assertEqual(r.status_code, 409)
+                self.assertIn("介入", r.json()["error"])
+
+    def test_follow_up_on_a_composite_thread_replans_in_place(self):
+        """复合线程的追加要求 = 在同一条线程上、带着现状再拆一轮（M12）。
+
+        **不另起一条线程**：注册表本来就按 root 键，新一轮直接顶掉旧条目。
+        逐个子任务续跑做不到这件事 —— 追加要求落在哪个子任务上是个判断题，
+        而那正是拆解要做的事。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            client = self._app(self._plan_backend(), tmp)
+            with client:
+                runner = client.app.state.runner
+                plan_id = client.post(
+                    "/api/tasks", json={"goal": "做点东西", "workspace": td}
+                ).json()["plan_id"]
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("workspace"),
+                    what="拆解开始",
+                )
+                ws = client.get(f"/api/plans/{plan_id}").json()["workspace"]
+
+                r = client.post(
+                    f"/api/tasks/{plan_id}/follow-up",
+                    json={"instruction": "再加一个导出功能"},
+                )
+                self.assertEqual(r.status_code, 202, r.text)
+                self.assertEqual(r.json()["kind"], "composite")
+
+                again = _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json()
+                    if client.get(f"/api/plans/{plan_id}").json().get("goal")
+                    == "再加一个导出功能"
+                    else None,
+                    what="新一轮拆解接管同一条线程",
+                )
+                self.assertEqual(again["workspace"], ws, "要在原来的产物上接着做")
+                self.assertTrue(again["takeover"], "追加一轮就是「接手已有项目」")
+                self.assertIn(
+                    "再加一个导出功能",
+                    [
+                        e["text"]
+                        for e in client.get(f"/api/tasks/{plan_id}").json()["events"]
+                        if e["kind"] == "human"
+                    ],
+                    "人说的话要留在这条线程上",
+                )
+                self.assertIsNotNone(runner.plans[plan_id])
+
+    def test_follow_up_finds_the_workspace_after_a_restart(self):
+        """进程重启之后 `plans` 是空的，而线程还在库里。
+
+        那时候「产物在哪」的唯一答案是子任务的 `spec.sandbox.workspace` ——
+        只信内存的话，重启过一次的线程就再也追加不了了。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            client = self._app(self._plan_backend(), tmp)
+            with client:
+                runner = client.app.state.runner
+                kid = TaskSpec(
+                    id="t_kid", parent_id="root_x", goal="干活",
+                    acceptance=[Criterion(id="c1", description="做完")],
+                    task_class=TaskClass.CODE,
+                    sandbox=SandboxProfile(workspace=str(tmp / "产物")),
+                    scope=["a.py"],
+                )
+                runner.store.save_task(
+                    TaskState(spec=kid, status=TaskStatus.COMPLETED)
+                )
+                self.assertNotIn("root_x", runner.plans, "模拟重启：注册表里没有它")
+
+                r = client.post(
+                    "/api/tasks/root_x/follow-up", json={"instruction": "再改改"}
+                )
+                self.assertEqual(r.status_code, 202, r.text)
+                self.assertEqual(runner.plans["root_x"].workspace, str(tmp / "产物"))
+
+    def test_follow_up_waits_for_the_children_to_stop(self):
+        """还有子任务在跑的时候不能重拆 —— 那等于一边跑一边换规格。"""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            client = self._app(self._plan_backend(), tmp)
+            with client:
+                runner = client.app.state.runner
+                kid = TaskSpec(
+                    id="t_kid2", parent_id="root_y", goal="干活",
+                    acceptance=[Criterion(id="c1", description="做完")],
+                    task_class=TaskClass.CODE,
+                    sandbox=SandboxProfile(workspace=str(tmp)),
+                    scope=["a.py"],
+                )
+                runner.store.save_task(
+                    TaskState(spec=kid, status=TaskStatus.RUNNING)
+                )
+
+                r = client.post(
+                    "/api/tasks/root_y/follow-up", json={"instruction": "再改改"}
+                )
+                self.assertEqual(r.status_code, 409)
+                self.assertIn("收尾", r.json()["error"])
+
+    def test_skills_are_listed_and_ride_into_the_specs(self):
+        """人勾的说明书要一路走到子任务的 spec 上（M12）。
+
+        清单里还要带上**目录在哪** —— 列表为空时人得知道该把文件放哪，
+        否则只能猜（同工作区那条：默认值必须是人找得到的地方）。
+        """
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            sk = tmp / "skills"
+            (sk / "py-style").mkdir(parents=True)
+            (sk / "py-style" / "SKILL.md").write_text(
+                "---\nname: py-style\ndescription: 风格约定\n---\n缩进四个空格",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"COWORK_SKILLS_DIR": str(sk)}):
+                client = self._app(self._plan_backend(), tmp)
+                with client:
+                    runner = client.app.state.runner
+                    got = client.get("/api/skills").json()
+                    self.assertEqual(got["root"], str(sk))
+                    self.assertEqual(
+                        [s["name"] for s in got["skills"]], ["py-style"]
+                    )
+                    self.assertNotIn("body", got["skills"][0], "列表不驮正文")
+
+                    plan_id = client.post(
+                        "/api/tasks",
+                        json={
+                            "goal": "做点东西",
+                            "workspace": str(tmp),
+                            # 不存在的那个要被静默筛掉，不能带进 spec
+                            "skills": ["py-style", "并不存在"],
+                        },
+                    ).json()["plan_id"]
+                    plan = _wait_for(
+                        lambda: client.get(f"/api/plans/{plan_id}").json()
+                        if client.get(f"/api/plans/{plan_id}").json().get("specs")
+                        else None,
+                        what="拆解出子任务",
+                    )
+                    self.assertEqual(plan["specs"][0]["skills"], ["py-style"])
+                    self.assertEqual(runner.plans[plan_id].skills, ["py-style"])
+
+    def test_skills_must_be_a_list_of_strings(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = self._app(self._plan_backend(), Path(td))
+            with client:
+                r = client.post(
+                    "/api/tasks", json={"goal": "做点东西", "skills": "py-style"}
+                )
+                self.assertEqual(r.status_code, 400)
+
+    def test_follow_up_needs_something_to_say(self):
+        with tempfile.TemporaryDirectory() as td:
+            client, spec, _ = self._finished_task(Path(td))
+            with client:
+                r = client.post(
+                    f"/api/tasks/{spec.id}/follow-up", json={"instruction": "  "}
+                )
+                self.assertEqual(r.status_code, 400)
+
+    def test_max_parallel_is_the_humans_to_set(self):
+        """并发度归人（M12）。
+
+        以前 `dispatch()` 压根不传这个参数，吃 Scheduler 的默认 4 —— 一层里
+        第 5 个任务开始排队，而排队在界面上和「卡住」长得一模一样。
+        `0` 是「有几个跑几个」，不是「一个都不跑」。
+        """
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            client = self._app(self._plan_backend(), Path(td))
+            with client:
+                runner = client.app.state.runner
+                self.assertIn("max_parallel", client.get("/api/settings").json())
+
+                with mock.patch.dict(os.environ, {"COWORK_MAX_PARALLEL": ""}):
+                    self.assertEqual(runner._max_parallel(9), 4)
+                with mock.patch.dict(os.environ, {"COWORK_MAX_PARALLEL": "2"}):
+                    self.assertEqual(runner._max_parallel(9), 2)
+                with mock.patch.dict(os.environ, {"COWORK_MAX_PARALLEL": "0"}):
+                    self.assertEqual(runner._max_parallel(9), 9, "0 = 不额外限制")
+                with mock.patch.dict(os.environ, {"COWORK_MAX_PARALLEL": "什么"}):
+                    self.assertEqual(runner._max_parallel(9), 4, "填坏了要回落，不能崩")
 
     # ---------------------------------------------------------- #
     # 写端的错误面

@@ -161,6 +161,14 @@ export function translate(detail: TaskDetail): StreamEvent[] {
         // 结构化复核结论不进时间线：[REVIEW] 日志行已作刻度渲染，
         // 完整内容在右栏（pro）/ 方案卡头部（lite）
         break;
+      case "step":
+      case "queued":
+      case "started":
+        // **进度事件不进时间线。** 它们回答的是「此刻怎么样」，那是进度面板的
+        // 问题；时间线回答「发生过什么」。一个任务跑 60 步 = 180 条 step 事件，
+        // 全渲进来就等于把时间线冲没了 —— 而它们的正文在 `task_progress` 里
+        // 已经被读走（M12）。
+        break;
     }
   }
   flushTerminal();

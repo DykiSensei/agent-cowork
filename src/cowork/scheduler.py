@@ -35,7 +35,7 @@ from .plan import Plan, build_plan
 from .policy import DEFAULT_POLICY, Policy
 from .runtime.bus import SignalBus
 from .signals import SignalType
-from .types import Signal, TaskEvent, TaskSpec, TaskStatus
+from .types import Signal, TaskEvent, TaskSpec, TaskState, TaskStatus
 
 
 @dataclass
@@ -138,12 +138,18 @@ class Scheduler:
         self._event("log", text=msg)
 
     def _event(self, kind: str, *, text: str = "", ref_id: str | None = None,
-               payload: dict | None = None) -> None:
+               payload: dict | None = None, task_id: str | None = None) -> None:
+        """默认写在复合线程上；`task_id` 指定时写在那个子任务上。
+
+        两种都有用，而且**归属不能搞混**：分层 / 复核 / 仲裁属于线程（子任务里
+        看不到它们），排队 / 起跑属于那个子任务（它自己的进度条要用）。
+        """
         append = getattr(self.store, "append_event", None)
-        if append is None or self.root_id is None:
+        target = task_id or self.root_id
+        if append is None or target is None:
             return
         try:
-            append(TaskEvent(task_id=self.root_id, kind=kind, text=text,
+            append(TaskEvent(task_id=target, kind=kind, text=text,
                              ref_id=ref_id, payload=payload or {}))
         except Exception:  # noqa: BLE001 - 事件是旁路，写不进去不该影响调度
             pass
@@ -156,6 +162,7 @@ class Scheduler:
 
         # 分层结果单独发一条结构化事件：界面要画的是那张分层图，不是日志文本
         self._event("plan", payload=self.plan.to_dict())
+        self._seed_pending()
         for issue in self.plan.issues:
             self._say(f"[PLAN] {issue.kind}: {issue.detail} {list(issue.tasks)}")
 
@@ -193,22 +200,66 @@ class Scheduler:
 
     # ------------------------------------------------------------------ #
 
+    def _seed_pending(self) -> None:
+        """把**还没起跑**的子任务先写进 tasks 表（PENDING）。
+
+        没有这一步的话它们在库里根本不存在：`TaskState` 是 `Orchestrator.run()`
+        才落的，于是「在第 3 层等着」和「跑起来了但卡住」在界面上是同一个样子
+        —— 两者都只是一个不动的第 0 步。实测反馈里「不确定是没并行还是单纯太慢」
+        就是这么来的：**它根本还没开始，而那件事没有任何地方说出来。**
+
+        用 `save_task` 的 upsert：起跑时 Orchestrator 会拿同一个 id 覆盖回去，
+        这里只是把「已知但未开始」这个状态提前写出来。
+        """
+        for spec in self.specs:
+            try:
+                self.store.save_task(TaskState(spec=spec, status=TaskStatus.PENDING))
+            except Exception:  # noqa: BLE001 - 同 _event：可观测性不该影响调度
+                pass
+
     def _run_layer(self, layer: list[TaskSpec], result: CompositeResult, *, max_cycles: int):
+        workers = 1 if len(layer) == 1 else min(self.max_parallel, len(layer))
+        # 排队这件事要在**提交之前**记：一个任务从这一刻起就是「轮到它了」，
+        # 而它真正开跑是在拿到线程池名额之后（`_run_one` 的第一件事）。
+        # 两条事件之间的那段时间就是它排了多久 —— 不用猜，也不用编。
+        for spec in layer:
+            self._event(
+                "queued", task_id=spec.id,
+                text=f"排在第 {self._layer_no(spec)} 层，本层 {len(layer)} 个、并发 {workers}",
+                payload={
+                    "layer": self._layer_no(spec),
+                    "layers_total": len(self.plan.layers),
+                    "layer_size": len(layer),
+                    "parallel": workers,
+                },
+            )
         if len(layer) == 1:
             tid, run = self._run_one(layer[0], max_cycles, result)
             result.results[tid] = run
             return
 
-        workers = min(self.max_parallel, len(layer))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(self._run_one, spec, max_cycles, result) for spec in layer]
             for fut in futures:
                 tid, run = fut.result()
                 result.results[tid] = run
 
+    def _layer_no(self, spec: TaskSpec) -> int:
+        for i, layer in enumerate(self.plan.layers, start=1):
+            if any(t.id == spec.id for t in layer):
+                return i
+        return 0
+
     def _run_one(
         self, spec: TaskSpec, max_cycles: int, result: CompositeResult
     ) -> tuple[str, RunResult]:
+        # 拿到线程池名额了 —— 这才是「开跑」。和上面那条 queued 配对，
+        # 两者的时间差就是它在排队上花的时间（层内超过并发度的那些会很明显）。
+        self._event(
+            "started", task_id=spec.id,
+            text=f"开跑（第 {self._layer_no(spec)} 层）",
+            payload={"layer": self._layer_no(spec)},
+        )
         orch = Orchestrator(
             spec,
             backend=self.backend,

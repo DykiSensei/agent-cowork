@@ -24,12 +24,12 @@ await build({
     contents: `
       export { renderToStaticMarkup } from "react-dom/server";
       export { default as React } from "react";
-      export { default as LiteStream, markAnswered } from "./src/components/lite/LiteStream";
+      export { default as LiteStream, markAnswered, markSaid } from "./src/components/lite/LiteStream";
       export { default as Progress } from "./src/components/Progress";
       export { default as Details } from "./src/components/Details";
       export { default as NewTask } from "./src/components/NewTask";
       export { SearchCard } from "./src/components/Settings";
-      export { SpecList, PlanProgressView } from "./src/components/NewTask";
+      export { SpecList, PlanProgressView, SkillPicker } from "./src/components/NewTask";
     `,
     resolveDir: process.cwd(),
     loader: "ts",
@@ -59,6 +59,7 @@ const props = (detail) => ({
   taskId: detail.kind === "single" ? detail.state.task_id : "task_composite_root",
   detail,
   onIntervene: noop,
+  onFollowUp: noop,
   onCancel: noop,
   onRuling: noop,
 });
@@ -97,6 +98,48 @@ check("进度面板在复合线程上逐个子任务列出来", () => {
   for (const p of Object.values(detail.progress)) {
     assert.ok(html.includes(p.goal.slice(0, 12)), `没列出 ${p.task_id}`);
   }
+});
+
+// 「在想」「在排队」「上一步失败了」这三样以前在界面上都不存在（M12）
+check("模型在想的时候，界面说的是「在想」而不是上一步的动作", () => {
+  const p = {
+    task_id: "t", goal: "写个解析器", status: "RUNNING", terminal: false,
+    revision: 1, agent_id: "a", current_step: 4, max_steps: 60, tokens_used: 1200,
+    token_budget: 0, scope: [], workspace: "/ws", produced: [],
+    phase: "thinking", phase_started_at: Date.now() / 1000 - 42,
+    // 上一个动作停在第 3 步 —— 照着它说话就会说成「正在写 a.py」，而那步早完了
+    last_action: { step: 3, kind: "tool_call", name: "write_file", target: "a.py",
+                   thought: "先把骨架写出来" },
+    last_result: { step: 3, name: "write_file", ok: true, exit_code: 0, stderr: "" },
+    queue: null, started_at: Date.now() / 1000 - 300,
+  };
+  const detail = {
+    kind: "composite", state: null, root_goal: "x", plan: null, review: null,
+    tasks: {}, events: [], signals: {}, decisions: {},
+    pending_children: [], pending: {}, progress: { t: p },
+  };
+  const html = render(React.createElement(m.Progress, { detail, lite: true }));
+  assert.ok(html.includes("正在想下一步"), "模型在想的时候要说在想");
+  assert.ok(!html.includes("正在写 a.py"), "不能拿上一步的动作冒充此刻");
+  assert.ok(/4[0-9] 秒/.test(html), "想了多久要看得见 —— 那才是「卡没卡」的答案");
+});
+
+check("还没轮到的子任务说得出它在等第几批", () => {
+  const p = {
+    task_id: "t2", goal: "写报告", status: "PENDING", terminal: false,
+    revision: 1, agent_id: null, current_step: 0, max_steps: 60, tokens_used: 0,
+    token_budget: 0, scope: [], workspace: "/ws", produced: [],
+    phase: null, phase_started_at: null, last_action: null, last_result: null,
+    queue: { layer: 2, layers_total: 3, layer_size: 1, parallel: 1 },
+    started_at: Date.now() / 1000 - 30,
+  };
+  const detail = {
+    kind: "composite", state: null, root_goal: "x", plan: null, review: null,
+    tasks: {}, events: [], signals: {}, decisions: {},
+    pending_children: [], pending: {}, progress: { t2: p },
+  };
+  const html = render(React.createElement(m.Progress, { detail, lite: true }));
+  assert.ok(html.includes("第 2/3 批"), "「还没轮到」和「卡住了」必须分得开");
 });
 
 check("还没有子任务时，进度面板说人话而不是留白", () => {
@@ -142,6 +185,75 @@ check("排队中的任务不能被说成「已经结束」", () => {
   const html = render(React.createElement(m.LiteStream, props(entry[1])));
   assert.ok(!html.includes("已经结束"), "PENDING 不是终局");
   assert.ok(html.includes("还没开始跑"), "要说清它在等什么");
+});
+
+check("做完的任务还能接着改，而且说清了这会重新花钱", () => {
+  // 实测反馈：「当前任务完成之后就无法进行修改，很多时候一次不能做出符合
+  // 要求的产出」。原来这里是一句「这条任务已经结束了」+ 禁用的输入框。
+  const entry = details.find(
+    ([, d]) => d.kind === "single" && d.state.status === "COMPLETED",
+  );
+  assert.ok(entry, "fixtures 里该有一个做完的任务");
+  const html = render(React.createElement(m.LiteStream, props(entry[1])));
+  assert.ok(!html.includes("这条任务已经结束了"), "终局不再是死路");
+  assert.ok(html.includes("接着改"), "要有一个明确的入口");
+  assert.ok(
+    html.includes("带着已经做出来的东西"),
+    "得说清它不是从头再来 —— 否则人不知道产物会不会被推翻",
+  );
+  assert.ok(html.includes("token"), "会重新花钱这件事要说出来");
+});
+
+check("刚说完的那句话不会在界面上消失（202 之后那段真空）", () => {
+  // 追加要求是 202 + 后台 restore，restore 里还有一次模型调用 —— 这期间
+  // 服务端如实还在报「做完了」。不乐观渲染的话，人刚说的话无影无踪
+  // （同 §11.26 那条挂起卡的坑，这里是它的另一面）。
+  const entry = details.find(
+    ([, d]) => d.kind === "single" && d.state.status === "COMPLETED",
+  );
+  const p = props(entry[1]);
+  const before = render(React.createElement(m.LiteStream, p));
+  assert.ok(!before.includes("正在带着现有成果重新起跑"), "还没说话时不该有这条");
+
+  m.markSaid(p.taskId, "再补一节用法");
+  const after = render(React.createElement(m.LiteStream, p));
+  assert.ok(after.includes("再补一节用法"), "人说的那句话要立刻看得见");
+  assert.ok(after.includes("正在带着现有成果重新起跑"), "要说清它在干什么");
+});
+
+check("说明书勾选：有几份就列几份，勾了要看得出来", () => {
+  const list = {
+    root: "C:\\Users\\you\\cowork-skills",
+    exists: true,
+    skills: [
+      { name: "py-style", description: "风格约定", chars: 100, path: "a" },
+      { name: "commit-msg", description: "提交信息怎么写", chars: 50, path: "b" },
+    ],
+  };
+  const html = render(
+    React.createElement(m.SkillPicker, {
+      picked: ["py-style"],
+      onToggle: () => {},
+      list,
+    }),
+  );
+  assert.ok(html.includes("py-style"), "没列出来");
+  assert.ok(html.includes("风格约定"), "只给名字的话人不知道那是什么");
+  assert.ok(html.includes("checked"), "勾中的状态要渲出来");
+  assert.ok(html.includes("只有勾上的"), "得说清没勾的不会生效");
+});
+
+check("一份说明书都没有时，要说清该把文件放哪", () => {
+  // 同工作区那条：默认值必须是人找得到的地方，否则「功能是不是坏了」没法判断
+  const html = render(
+    React.createElement(m.SkillPicker, {
+      picked: [],
+      onToggle: () => {},
+      list: { root: "C:\\Users\\you\\cowork-skills", exists: false, skills: [] },
+    }),
+  );
+  assert.ok(html.includes("cowork-skills"), "目录路径要给出来");
+  assert.ok(html.includes("还不存在"), "目录不存在也要说明白");
 });
 
 // 4. 发布任务：第一屏要有输入框和按钮

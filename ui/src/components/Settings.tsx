@@ -587,6 +587,24 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
               </div>
               <div className="set-row">
                 <span className="set-k">
+                  同一批最多几个一起跑{" "}
+                  <span className="set-env">
+                    0 = 有几个跑几个。受你那把 key 的并发限制约束
+                  </span>
+                </span>
+                <input
+                  className="set-text"
+                  placeholder="4"
+                  value={settings.max_parallel ?? ""}
+                  onChange={(e) =>
+                    setSettings({ ...settings, max_parallel: e.target.value })
+                  }
+                  inputMode="numeric"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="set-row">
+                <span className="set-k">
                   允许联网抓取{" "}
                   <span className="set-env">fetch_url —— 取网页正文，不是搜索</span>
                 </span>

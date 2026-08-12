@@ -7,6 +7,7 @@
  *   GET  /api/tasks                 → fixtures/threads.json（views.thread_list）
  *   GET  /api/tasks/:id             → fixtures/<id>.json（views.task_detail）
  *   POST /api/tasks/:id/intervene   → 202（mock 不驱动任何任务）
+ *   POST /api/tasks/:id/follow-up   → 202（终局之后追加要求，同上不真的跑）
  *   POST /api/tasks/:id/cancel      → 202（真实服务：不在运行中回 409）
  *   POST /api/tasks/:id/ruling      → 202
  *   GET  /api/stream                → SSE，只发心跳
@@ -52,6 +53,7 @@ const DEFAULT_SETTINGS = {
   allowed_binaries: "",
   allow_network: "off",
   max_steps: "60",
+  max_parallel: "4",
   // 联网搜索（search_web）。**key 不在这里** —— 它只写不读，走
   // PUT /api/search/key，GET 只回末 4 位识别串。
   search: {
@@ -189,13 +191,36 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
       return sendJson(res, 200, readFixture("threads.json") ?? []);
     }
 
+    // 说明书清单（M12）。**只读** —— 增删改在文件系统里做。
+    // 给两条样例是为了让 `npm run dev` 里那个勾选区不是空的
+    if (req.method === "GET" && url.pathname === "/api/skills") {
+      return sendJson(res, 200, {
+        root: "C:\\Users\\you\\cowork-skills",
+        exists: true,
+        skills: [
+          {
+            name: "py-style",
+            description: "这个项目的 Python 风格约定",
+            chars: 640,
+            path: "C:\\Users\\you\\cowork-skills\\py-style\\SKILL.md",
+          },
+          {
+            name: "commit-msg",
+            description: "提交信息怎么写",
+            chars: 210,
+            path: "C:\\Users\\you\\cowork-skills\\commit-msg.md",
+          },
+        ],
+      });
+    }
+
     // 发布任务 → 拆解 → 裁决 → 派发。mock 不真的拆解，只把**形状**走一遍：
     // 第一次问是 RUNNING，之后回一份取自 fixtures 的拆解。
     // 端点在这里必须存在，否则 `npm run dev` 里那个按钮是死的，而真实服务上它是活的
     // —— mock 和服务层分叉正是 fixtures 这套东西要防的事。
     if (req.method === "POST" && url.pathname === "/api/tasks") {
       const body = JSON.parse((await drain(req)) || "{}") as
-        { goal?: string; workspace?: string; mode?: string };
+        { goal?: string; workspace?: string; mode?: string; skills?: string[] };
       if (!(body.goal ?? "").trim()) {
         return sendJson(res, 400, { error: "goal 不能为空" });
       }
@@ -292,7 +317,9 @@ const handler = (req: IncomingMessage, res: ServerResponse, next: Next) => {
       });
     }
 
-    const act = url.pathname.match(/^\/api\/tasks\/([\w-]+)\/(intervene|cancel|ruling)$/);
+    const act = url.pathname.match(
+      /^\/api\/tasks\/([\w-]+)\/(intervene|follow-up|cancel|ruling)$/,
+    );
     if (req.method === "POST" && act) {
       await drain(req);
       return sendJson(res, 202, { accepted: true });

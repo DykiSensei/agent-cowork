@@ -42,6 +42,14 @@ class TaskStatus(str, enum.Enum):
     ABANDONED = "ABANDONED"
 
 
+# 终局状态：这条任务自己不会再动了。
+# **定义只放这一处** —— 判据散成两份，早晚有一处忘了改（views 从这里 import）。
+# 注意 AWAITING_HUMAN **不在**里面：它在等人，人一答复就接着跑。
+TERMINAL_STATUSES = frozenset(
+    {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ABANDONED}
+)
+
+
 class Disposition(str, enum.Enum):
     PREEMPTED = "PREEMPTED"
     ESCALATED = "ESCALATED"
@@ -199,6 +207,11 @@ class TaskSpec:
     context_refs: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
 
+    # 这个任务带哪几份说明书（skill）。**存名字不存正文**：正文在拼提示词时
+    # 从磁盘读（`skills.render()`），和 `role_extra()` 每次读环境变量同一个语义
+    # —— 人改了说明书，下一次调用就生效。同 `tools`：**人挑，模型不挑**。
+    skills: list[str] = field(default_factory=list)
+
     def __post_init__(self) -> None:
         # acceptance 必填是刻意的硬约束（§4.1）：写不出验收标准的任务，
         # 说明拆解本身没想清楚，不应该派发。
@@ -248,6 +261,7 @@ class TaskSpec:
             "token_budget": self.token_budget,
             "context_refs": list(self.context_refs),
             "depends_on": list(self.depends_on),
+            "skills": list(self.skills),
         }
 
     @classmethod
@@ -272,6 +286,7 @@ class TaskSpec:
             token_budget=d.get("token_budget", 200_000),
             context_refs=list(d.get("context_refs", [])),
             depends_on=list(d.get("depends_on", [])),
+            skills=list(d.get("skills", [])),
         )
 
 

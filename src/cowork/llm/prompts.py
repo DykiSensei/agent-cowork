@@ -57,3 +57,24 @@ def with_extra(base: str, role: str) -> str:
     这样没用这个功能的人的缓存前缀和以前完全一致。"""
     extra = role_extra(role)
     return f"{base}{_HEADER}{extra}" if extra else base
+
+
+def skill_block(names: tuple[str, ...] | list[str]) -> str:
+    """这个任务选的说明书，拼成静态段**最末尾**的一块（M12）。
+
+    **为什么是最末尾而不是接在角色提示词后面**：`_call()` 会在 system 之后再
+    追加输出约束和 schema，所以「接在角色提示词后面」等于把 skill 插进静态段的
+    中间 —— 于是**勾了 skill 的任务和没勾的任务，连 schema 那一段都不再共享
+    前缀**。而 schema 是这条链上最长的静态文本之一。
+
+    按变化频率从稳到变排：内置提示词（永不变）→ 角色附加（一台机器一份）→
+    输出约束 + schema（一种调用一份）→ skill（**按任务变**）。
+    越靠后越易变，共享的前缀才最长（§11.14：拼装顺序就是缓存命中率）。
+
+    没选就返回空串 —— 不用这个功能的人一个字都不多付。
+    """
+    if not names:
+        return ""
+    from ..skills import render
+
+    return render(names)

@@ -434,6 +434,59 @@ class TestPromptCaching(unittest.TestCase):
         b.review_decomposition("目标", [])
         self.assertNotIn("prompt_cache_key", b.client.calls[0])
 
+    def test_skills_go_into_the_static_prefix_and_only_when_picked(self):
+        """skill 是**明知的**前缀分叉（M12，§11.31）：只带勾选的那几份。
+
+        两件事要钉住 ——
+        没勾时提示词逐字节不变（不用这个功能的人的命中率不该被动下降），
+        勾了时正文进 **system**（进 user 的话它每次都要重付费，且缓存不覆盖）。
+        """
+        import os
+        import shutil
+        import tempfile
+        from unittest import mock
+
+        from cowork.actions import Finish
+        from cowork.types import (
+            AgentContext, Criterion, SandboxProfile, TaskClass, TaskSpec,
+        )
+
+        root = tempfile.mkdtemp(prefix="cowork-skills-cache-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        ws = tempfile.mkdtemp(prefix="cowork-skills-ws-")
+        self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+        with open(os.path.join(root, "py-style.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: py-style\n---\n缩进用四个空格")
+
+        def ctx(skills):
+            spec = TaskSpec(
+                goal="干活", acceptance=[Criterion("c1", "做完")],
+                task_class=TaskClass.CODE,
+                sandbox=SandboxProfile(workspace=ws), scope=["a.py"], skills=skills,
+            )
+            return AgentContext(task_spec=spec)
+
+        action = json.dumps({
+            "kind": "finish", "thought": "", "tool": "", "path": "", "content": "",
+            "command": [], "pattern": "", "glob": "", "to": "", "url": "",
+            "query": "", "recursive": False, "signal_type": "", "detail": "",
+            "summary": "做完了", "output_json": "{}",
+        })
+        with mock.patch.dict(os.environ, {"COWORK_SKILLS_DIR": root}):
+            b = self._backend()
+            b.client = _FakeClient([action, action])
+            b.next_step(ctx([]))
+            b.next_step(ctx(["py-style"]))
+
+        plain, withskill = (c["messages"][0]["content"] for c in b.client.calls)
+        self.assertNotIn("缩进用四个空格", plain, "没勾的人一个字都不该多付")
+        self.assertIn("缩进用四个空格", withskill, "勾了就要真的进提示词")
+        self.assertTrue(withskill.startswith(plain), "分叉只能发生在前缀的**尾部**")
+        self.assertNotIn(
+            "缩进用四个空格", b.client.calls[1]["messages"][1]["content"],
+            "skill 是静态的，进 user 就等于每次重付费且缓存不覆盖",
+        )
+
 
 class TestCacheStats(unittest.TestCase):
     """各家报缓存用量的字段名不一样，两种形状都要认（§11.14）。"""

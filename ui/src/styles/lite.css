@@ -384,6 +384,8 @@
                  white-space:nowrap}
   #lite .pg-doing{font-size:12px;color:var(--l-dim);margin-top:2px}
   #lite .pg-bad{color:var(--l-red)}
+  /* 这一阶段待了多久。压暗一档：它是佐证，不是主语 */
+  #lite .pg-phase{color:#a8adb5;font-variant-numeric:tabular-nums}
   #lite .pg-thought{font-size:11.5px;color:#a8adb5;margin-top:2px;
                     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #lite .pg-nums{flex:none;width:150px;text-align:right}
@@ -422,6 +424,23 @@
                     line-height:1.6}
   #lite .nt-ws-note code{background:#f2f2ee;border-radius:5px;padding:1px 6px;
                          font-size:11px;word-break:break-all}
+  /* 说明书勾选（M12）。一份都没有时也要出现 —— 那时它回答的是「该放哪」 */
+  #lite .nt-skills{margin:0 0 16px}
+  #lite .nt-skills-hd{font-size:12px;color:var(--l-ink);margin-bottom:6px;
+                      display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  #lite .nt-skills-note{font-size:11.5px;color:var(--l-dim)}
+  #lite .nt-skills-list{display:flex;flex-direction:column;gap:4px;
+                        margin-bottom:6px}
+  #lite .nt-skill{display:flex;gap:8px;align-items:baseline;cursor:pointer;
+                  border:1px solid #ececea;border-radius:8px;padding:7px 10px;
+                  background:#fbfbf9}
+  #lite .nt-skill.on{border-color:#bfd4fb;background:#f4f8ff}
+  #lite .nt-skill-n{font:12px var(--mono);color:var(--l-ink);flex:none}
+  #lite .nt-skill-d{font-size:11.5px;color:var(--l-dim);overflow:hidden;
+                    text-overflow:ellipsis;white-space:nowrap}
+  #lite .nt-skills-root{font-size:11.5px;color:var(--l-dim)}
+  #lite .nt-skills-root code{background:#f2f2ee;border-radius:5px;padding:1px 6px;
+                             font-size:11px;word-break:break-all}
   #lite .pg-ws{font-size:11.5px;color:var(--l-dim);margin-bottom:8px}
   #lite .pg-ws code{background:#f2f2ee;border-radius:5px;padding:1px 6px;
                     font-size:11px;word-break:break-all}
