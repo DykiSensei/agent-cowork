@@ -34,8 +34,8 @@ from cowork.llm.scripted import ScriptedBackend
 
 # `Architect._apply_changes` 真正认的字段。用例表里的改动只能落在这些上面 ——
 # 写一个系统根本执行不了的改动，测的是幻想。
-APPLICABLE = {"goal", "added_criteria", "scope", "token_budget", "max_steps",
-              "deadline_s", "model"}
+APPLICABLE = {"goal", "added_criteria", "modified_criteria", "scope",
+              "token_budget", "max_steps", "deadline_s", "model"}
 
 
 class TestCaseTable(unittest.TestCase):

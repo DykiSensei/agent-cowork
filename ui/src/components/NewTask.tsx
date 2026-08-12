@@ -418,6 +418,12 @@ export default function NewTask({
   const [error, setError] = useState<string | null>(null);
   // 人改过的拆解。null = 没动过，显示架构师那份。
   const [edited, setEdited] = useState<TaskSpec[] | null>(null);
+  // 否决时写给架构师的意见 —— 带意见重新拆，不带就是纯否决（M12 之后）。
+  const [instruction, setInstruction] = useState("");
+  // 轮询重启的扳机：带意见重新拆会让 plan 回到 RUNNING，而轮询只在
+  // status===RUNNING 时自续 —— 从「等拍板」翻回「拆解中」时它已经停了，
+  // 得靠这个 nonce 把它重新拉起来（planId 没变，useEffect 不会自己重跑）。
+  const [pollNonce, setPollNonce] = useState(0);
   // 这次带哪几份说明书。**只有勾了的会进提示词**：代价是前缀缓存按组合分叉，
   // 换来的是 skill 多起来之后不必每个任务都驮着全部正文（M12）。
   const [picked, setPicked] = useState<string[]>([]);
@@ -458,7 +464,7 @@ export default function NewTask({
       alive = false;
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [planId]);
+  }, [planId, pollNonce]);
 
   // 从详情页「去裁决 / 去派发」跳转过来时，直接进入那条 plan，不再问一次目标。
   useEffect(() => {
@@ -512,7 +518,7 @@ export default function NewTask({
   }, [planId, busy, onDispatched]);
 
   const rule = useCallback(
-    (accept: boolean, specs?: TaskSpec[]) => {
+    (accept: boolean, specs?: TaskSpec[], instruction?: string) => {
       if (!planId || busy) return;
       setBusy(true);
       setError(null);
@@ -520,15 +526,23 @@ export default function NewTask({
         ? "人改过这份拆解"
         : accept
           ? "人确认按当前拆解执行"
-          : "人否决了这份拆解";
-      void rulePlan(planId, accept, note, specs)
+          : instruction
+            ? "人否决并提了意见，重新拆"
+            : "人否决了这份拆解";
+      void rulePlan(planId, accept, note, specs, instruction)
         .then((r) => {
           if (!r.ok) {
             setError(r.error ?? "裁决没有被接受");
             return;
           }
           setEdited(null); // 服务端已经收下，之后以它返回的为准
-          return fetchPlan(planId).then(setPlan);
+          if (instruction) {
+            // 带意见重拆：plan 回到 RUNNING，重启轮询盯着它拆完。
+            // 直接 fetchPlan 一次不够 —— 轮询已经停在「等拍板」那一步了。
+            setPollNonce((n) => n + 1);
+          } else {
+            return fetchPlan(planId).then(setPlan);
+          }
         })
         .finally(() => setBusy(false));
     },
@@ -711,6 +725,15 @@ export default function NewTask({
           </button>
         )}
         {needsRuling && !edited && (
+          <textarea
+            className="nt-instruction"
+            placeholder="哪里拆得不对？写一句，架构师会带着它重新拆（选填）…"
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            rows={2}
+          />
+        )}
+        {needsRuling && !edited && (
           <button
             type="button"
             className="nt-ghost"
@@ -720,7 +743,17 @@ export default function NewTask({
             否决这份拆解
           </button>
         )}
-        {(needsRuling || edited) && (
+        {needsRuling && !edited && instruction.trim() && (
+          <button
+            type="button"
+            className="nt-primary"
+            disabled={busy}
+            onClick={() => rule(false, undefined, instruction.trim())}
+          >
+            带着意见重新拆
+          </button>
+        )}
+        {((needsRuling && Boolean(plan?.specs?.length)) || edited) && (
           <button
             type="button"
             className="nt-primary"

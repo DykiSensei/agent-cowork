@@ -551,6 +551,60 @@ class TestBinaryApproval(LoopFixture):
 
         self.assertNotIn("allow_binary", VERDICT_SCHEMA["properties"])
 
+    def test_modified_criteria_replaces_the_broken_command(self):
+        """验收脚本语法错误时，架构师能用 modified_criteria 按 id 替换那条
+        command —— 「多次改任务修不好」的根因就是 added_criteria 只能追加，
+        原来那条错的 command 还在 acceptance 里，Runtime 每次都先跑它。"""
+        from cowork.agent.architect import Architect, AutoApproveGate
+        from cowork.policy import Policy
+        from cowork.types import Criterion, SandboxProfile, TaskClass, TaskSpec
+
+        spec = TaskSpec(
+            goal="算一下",
+            acceptance=[Criterion("c1", "跑得过", ["python", "-c", "import  sys"])],
+            task_class=TaskClass.CODE,
+            sandbox=SandboxProfile(workspace=str(self.ws)),
+        )
+        arch = Architect(
+            backend=ScriptedBackend({}), store=self.store,
+            human_gate=AutoApproveGate(), policy=Policy(),
+        )
+        new_spec = arch._apply_changes(
+            spec,
+            {"modified_criteria": [
+                {"id": "c1", "command": ["python", "-c", "import sys; sys.exit(0)"]}
+            ]},
+        )
+        self.assertEqual(
+            new_spec.acceptance[0].command,
+            ["python", "-c", "import sys; sys.exit(0)"],
+        )
+        self.assertEqual(
+            new_spec.acceptance[0].description, "跑得过",
+            "没传 description 就不该动它",
+        )
+        # 原来那份一个字没动 —— 只对这个任务的这一版生效
+        self.assertEqual(spec.acceptance[0].command, ["python", "-c", "import  sys"])
+
+    def test_modified_criteria_empty_command_falls_back_to_manual(self):
+        """command 给空数组 = 清空、退回人工判定（machine_checkable 变 False）。"""
+        from cowork.agent.architect import Architect, AutoApproveGate
+        from cowork.policy import Policy
+        from cowork.types import Criterion, SandboxProfile, TaskClass, TaskSpec
+
+        spec = TaskSpec(
+            goal="x", acceptance=[Criterion("c1", "y", ["python", "-c", "pass"])],
+            task_class=TaskClass.CODE,
+            sandbox=SandboxProfile(workspace=str(self.ws)),
+        )
+        arch = Architect(
+            backend=ScriptedBackend({}), store=self.store,
+            human_gate=AutoApproveGate(), policy=Policy(),
+        )
+        out = arch._apply_changes(spec, {"modified_criteria": [{"id": "c1", "command": []}]})
+        self.assertIsNone(out.acceptance[0].command)
+        self.assertFalse(out.acceptance[0].machine_checkable)
+
 
 class TestAppendWrite(unittest.TestCase):
     """`write_file` 的 append 模式（M12 之后）：写长文件时一次输出有限，分多次追加。"""

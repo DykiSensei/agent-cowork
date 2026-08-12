@@ -503,6 +503,73 @@ class TestServer(unittest.TestCase):
                 self.assertEqual(
                     client.post(f"/api/plans/{plan_id}/dispatch", json={}).status_code, 409
                 )
+                # 「否决」要落到终局 REJECTED，不能还停在 AWAITING_HUMAN ——
+                # 否则界面上那两个按钮永远都在，「否决」点了像没点一样。
+                self.assertEqual(
+                    client.get(f"/api/plans/{plan_id}").json()["status"], "REJECTED"
+                )
+
+    def test_reject_with_instruction_replans_with_it(self):
+        """否决 + 意见 → 带着人的意见重新拆（「否决点不动」的另一半）。
+
+        原来「否决」只设 dispatchable=False、没有任何后续，plan 永远卡在
+        AWAITING_HUMAN。现在带 instruction 就是重新拆一轮，而且人的原话要
+        喂回给生成者。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            feedbacks: list = []
+            # 初始 plan 报满 max_regenerate 次缺口才挂起；每次给**不同的**缺口，
+            # 否则「指纹重复」判据会提前升级，轮不到次数上限。
+            review_count = [0]
+
+            def decompose(_goal, feedback):
+                feedbacks.append(feedback)
+                return [
+                    SubtaskDraft(
+                        id="t1", goal="造 a.txt",
+                        acceptance=[{"id": "c1", "description": "a.txt 被造出来"}],
+                        scope=["a.txt"],
+                    )
+                ]
+
+            def review_for(*_args):
+                review_count[0] += 1
+                if review_count[0] <= 3:
+                    return (False, [f"缺口 {review_count[0]}"])
+                return (True, [])
+
+            backend = ScriptedBackend(
+                {(1, 0): Finish(output={}, summary="done")},
+                decompose_for=decompose, review_for=review_for,
+            )
+            client = self._app(backend, tmp)
+            with client:
+                plan_id = client.post("/api/tasks", json={"goal": "g"}).json()["plan_id"]
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("status")
+                    == "AWAITING_HUMAN",
+                    what="拆解挂起",
+                )
+                r = client.post(
+                    f"/api/plans/{plan_id}/ruling",
+                    json={"accept": False, "instruction": "第三个子任务要负责收口"},
+                )
+                self.assertEqual(r.status_code, 200, r.text)
+                plan = _wait_for(
+                    lambda: (
+                        p := client.get(f"/api/plans/{plan_id}").json()
+                    )["status"] == "ACCEPTED" and p or None,
+                    what="重拆收敛",
+                )
+                self.assertEqual(plan["status"], "ACCEPTED")
+                self.assertTrue(plan["dispatchable"])
+                # 重拆这一轮的 feedback 带着人的原话，不是空手再来一次
+                self.assertTrue(
+                    feedbacks
+                    and any("第三个子任务要负责收口" in f for f in (feedbacks[-1] or [])),
+                    f"重拆没带上人的意见：{feedbacks[-1]!r}",
+                )
 
     # ---------------------------------------------------------- #
     # 工作区与「接手已有项目」（§12 M10）

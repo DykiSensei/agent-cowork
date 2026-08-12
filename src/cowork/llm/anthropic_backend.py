@@ -107,13 +107,40 @@ VERDICT_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "id": {"type": "string"},
                     "description": {"type": "string"},
+                    # 架构师可以给验收标准配一条可执行命令。拆解时生成的 command
+                    # 若有语法错误，决策时能在这里补一条修正后的 —— 否则只能加
+                    # 描述、改不了脚本，验收会一直失败（真人反馈）。可选；
+                    # **这是改验收判据，会过写入侧复核（review_writes），防改成
+                    # 恒通过绕过验收。**
+                    "command": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["id", "description"],
                 "additionalProperties": False,
             },
         },
+        # 按 id 替换**已有**验收标准。added_criteria 只能追加，而验收脚本
+        # 语法错误时追加一条新的解决不了问题 —— 原来那条错的还在 spec 里，
+        # Runtime 每次验收还是先跑它。所以这里单独开一条：给一个已有 id，
+        # 替换它的 description / command（command 给空数组 = 清空、退回人工判定）。
+        # **同样是改验收判据，会过写入侧复核（review_writes）。**
+        "modified_criteria": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "command": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["action", "rationale", "complexity_score", "new_goal", "added_criteria"],
+    "required": [
+        "action", "rationale", "complexity_score", "new_goal",
+        "added_criteria", "modified_criteria",
+    ],
     "additionalProperties": False,
 }
 
@@ -205,7 +232,13 @@ complexity_score 是你对这次决策复杂度的自评（0.0~1.0）。诚实�
 证据为空却要改规格，是最该给高分的情形。
 
 MODIFY_TASK 时，new_goal 留空表示目标不变（只改验收标准/范围），
-added_criteria 是要补充的验收标准。"""
+added_criteria 是要补充的验收标准，modified_criteria 是替换已有验收标准
+（按 id 匹配，改它的 description 或 command）。
+
+**验收命令（command）报语法错误时，用 modified_criteria 替换那条命令本身**，
+不要只加一条描述、更不要追加一条新标准 —— 原来那条错的 command 会一直被
+Runtime 执行，追加再多新的也过不了验收。替换时 command 写 argv 数组
+（例如 ["python", "-c", "…"]），写对语法；确实判不了就给空数组退回人工判定。"""
 
 TRIAGE_SYSTEM = """你在做廉价批量分诊。对每条软信号只输出 ignore 或 escalate。
 escalate 只给「架构师必须介入才能推进」的信号。不要做完整推理。"""
@@ -558,6 +591,19 @@ def _render_spec_review_context(
     for c in changes.get("added_criteria") or []:
         cmd = f"（命令 {c.get('command')}）" if c.get("command") else ""
         lines.append(f"  【新增验收标准】{c.get('id')}: {c.get('description')}{cmd}")
+    for m in changes.get("modified_criteria") or []:
+        cid = m.get("id")
+        old = next((c for c in spec.acceptance if c.id == cid), None)
+        if old is None:
+            continue
+        desc = m.get("description") or old.description
+        if "command" in m and m.get("command"):
+            cmd = f"（命令 {old.command} → {m.get('command')}）"
+        elif "command" in m:
+            cmd = f"（命令 {old.command} → 清空，退回人工判定）"
+        else:
+            cmd = f"（命令 {old.command}）"
+        lines.append(f"  【替换验收标准】{cid}: {desc}{cmd}")
     for field_name, label in (
         ("scope", "scope"),
         ("max_steps", "步数上限"),
@@ -825,6 +871,8 @@ class AnthropicBackend:
             changes["goal"] = data["new_goal"]
         if data.get("added_criteria"):
             changes["added_criteria"] = data["added_criteria"]
+        if data.get("modified_criteria"):
+            changes["modified_criteria"] = data["modified_criteria"]
         return (
             ArchitectVerdict(
                 action=data["action"],

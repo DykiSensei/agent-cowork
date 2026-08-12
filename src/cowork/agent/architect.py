@@ -630,8 +630,9 @@ class Architect:
         if changes.get("goal"):
             kwargs["goal"] = changes["goal"]
         added = changes.get("added_criteria") or []
-        if added:
-            kwargs["acceptance"] = [
+        modified = changes.get("modified_criteria") or []
+        if added or modified:
+            acceptance = [
                 *spec.acceptance,
                 *(
                     Criterion(
@@ -642,6 +643,17 @@ class Architect:
                     for c in added
                 ),
             ]
+            if modified:
+                # 按 id 替换已有验收标准（问题 1 的根因）：added_criteria 只能
+                # 追加，而验收脚本语法错误时，原来那条错的 command 还在 acceptance
+                # 里、每次都会被 Runtime 先执行 —— 追加再多新的也过不了验收。
+                # 这里把指定 id 的 description / command 原地换掉。
+                patches = {m["id"]: m for m in modified if m.get("id")}
+                acceptance = [
+                    self._patch_criterion(c, patches.get(c.id))
+                    for c in acceptance
+                ]
+            kwargs["acceptance"] = acceptance
         for field_name in ("scope", "token_budget", "max_steps", "deadline_s", "model"):
             if field_name in changes:
                 kwargs[field_name] = changes[field_name]
@@ -663,6 +675,23 @@ class Architect:
                     allowed_binaries=(*sandbox.allowed_binaries, grant),
                 )
         return spec.bump(**kwargs)
+
+    @staticmethod
+    def _patch_criterion(c: Criterion, patch: dict | None) -> Criterion:
+        """按 id 替换一条已有验收标准（modified_criteria 的落地）。
+
+        `patch` 是 VERDICT_SCHEMA 里 modified_criteria 的一项，可能只有 id。
+        - description 空串当作「不改」，退回原值（清空 description 没有意义）。
+        - `"command" in patch` 才算「要改 command」：给数组就换，给空数组就清空
+          （退回人工判定，machine_checkable 变 False）。不传 command 键则不动。
+        """
+        if patch is None:
+            return c
+        desc = (patch.get("description") or "").strip() or c.description
+        cmd = c.command
+        if "command" in patch:
+            cmd = list(patch["command"] or []) or None
+        return Criterion(id=c.id, description=desc, command=cmd)
 
     # -- 人的裁决落地（M6 restore 路径）-------------------------------------- #
 
@@ -922,6 +951,7 @@ class Architect:
         existing: str | None = None,
         log: Callable[[str], None] = lambda _m: None,
         on_progress: Callable[[dict], None] | None = None,
+        initial_feedback: list[str] | None = None,
     ) -> DecompositionResult:
         """生成 → 复核 → 重生成 ≤N 次 → 升级给人（§12 M7 7.4）。
 
@@ -985,7 +1015,7 @@ class Architect:
         specs: list[TaskSpec] = []
         review: DecompositionReview | None = None
         tokens_before = self.tokens_used
-        feedback: list[str] | None = None
+        feedback: list[str] | None = list(initial_feedback) if initial_feedback else None
         attempt = 0
         reason: str | None = None
 
@@ -1061,7 +1091,11 @@ class Architect:
             # 复核意见喂回给生成者 —— 没有这一步，重生成就是「再抽一次」。
             # warnings 是「可能的隐患、不是必须修」—— 措辞要区分，否则生成者
             # 会把提示当错误，又硬凑出另一个拆法。
+            # 人的意见（initial_feedback）要跟着每一轮走：重拆本来就是「带着人的
+            # 意见再来一次」，第一轮复核又驳回时，第二轮不能只记得复核缺口、
+            # 把人最初说的那句话丢掉。
             feedback = [
+                *(initial_feedback or []),
                 *(f"{i.kind}: {i.detail}" for i in review.structural),
                 *review.missing,
                 *(

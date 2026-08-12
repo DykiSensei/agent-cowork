@@ -10,7 +10,7 @@
 > 取开头 8000、`write_file` 加 `append`、`run python` 加 `-X utf8`、`run` 补
 > `except OSError`（程序找不到不崩）、`repair_rounds` 1→2、`ACTION_SCHEMA` required
 > 缩到只剩 `kind`、`decompose` 加 `environment`（架构师纳入系统环境）、
-> `probe_provider` 返回 `models`（设置页动态拉取模型）。版本 0.2.2，测试 556。
+> `probe_provider` 返回 `models`（设置页动态拉取模型）。版本 0.2.3，测试 559。
 > **v0.23 变更**：跑完 M8 8.4 四轮（321 次调用 / 425k token）。
 > ①补提示词盲区：**J 0.686 → 0.829，FPR 恒 0** —— 补的是「证据为空时分辨
 > 『让失败可观测』与『声称知道原因』」，同族那个证据同样为空的负例没被误伤，
@@ -843,7 +843,7 @@ artifacts    (id, task_id, kind, content_ref, summary)
 | §12 M6 restore | `Orchestrator.restore()` / `resume_with_ruling()` / `Architect.apply_human_ruling()` | ✅ 人的裁决仍走架构师那扇门 |
 | §12 M6 时间线 | `events` 表 + `Orchestrator._event()` / `Scheduler._event()` | ✅ |
 
-556 个测试。不起 Docker / Postgres / LiteLLM 时依赖它们的 18 个 skip（7 PG + 5 LiteLLM + 6 Docker），再加 1 个要搜索 key = 19，其余照常跑。
+559 个测试。不起 Docker / Postgres / LiteLLM 时依赖它们的 18 个 skip（7 PG + 5 LiteLLM + 6 Docker），再加 1 个要搜索 key = 19，其余照常跑。
 
 ### 11.2 四条架构不变量已有测试守护
 
@@ -2271,6 +2271,45 @@ system 提示词列了 8 个工具，而 bench 任务的 `spec.tools` 只给 4 �
 要验证它得做一次真正的对照：同一个模型、同一批任务，只切换工具面。
 **在那之前不要动 `max_steps`** —— 从一份混淆的数据里推参数，正是 §11.19 那次
 过拟合的老路。
+
+---
+
+### 11.37 三条发布后反馈：验收脚本改不动、否决点不动、follow-up 后「任务跑完」误导（真人反馈，2026-08）
+
+三条独立反馈，对应一次做到一半中断的改动，这次收口。共同点是**「改」这条路
+没打通**：改不动命令、改不动拆解、改不动终局。
+
+1. **验收脚本自身频繁出现语法问题，多次「改一下任务」依旧。** 根因：架构师决策
+   MODIFY_TASK 时只能 `added_criteria`（**追加**），改不了**已有**验收标准的
+   `command`。于是那条语法错误的 command 永远留在 `spec.acceptance` 里，
+   `_run_acceptance` 每次还是先跑它 → 永远 TEST_FAILED，追加多少条新标准都过不了。
+   修法：`VERDICT_SCHEMA` 加 `modified_criteria`（`[{id, description?, command?}]`），
+   按 id 替换已有标准；`_apply_changes` 里新增 `_patch_criterion` 落地（command 给
+   空数组 = 清空、退回人工判定）。**同样是改验收判据**：`_render_spec_review_context`
+   渲染成「替换验收标准（旧 command → 新 command）」送进写入侧复核，`escalation`
+   的 `_irreversible_marker` 一并查 modified_criteria 的 command（否则「替换 command」
+   成了绕过不可逆判据的通道）。守它的测试：
+   `test_modified_criteria_replaces_the_broken_command` /
+   `test_modified_criteria_empty_command_falls_back_to_manual`。
+
+2. **拆解失败后只有「关闭」和「就按这个拆解跑」，否决点不动，也没有给架构师提意见
+   的入口。** 两层根因：`rule_plan` 的否决路径只设 `dispatchable=False`、不设
+   `result`，plan 永远卡在 AWAITING_HUMAN（「否决点不动」）；界面上「等拍板」时
+   只有同意/否决两个动作，人没法说「哪里拆得不对」。修法：`rule_plan` 收
+   `instruction` —— 带意见 = 重新拆一轮（`architect.plan(initial_feedback=[...])`，
+   人的原话喂回给生成者），不带意见 = 终局 `REJECTED`；前端 `NewTask` 加意见输入框 +
+   「带着意见重新拆」按钮。配套三处：specs 为空时不再显示「就按这份拆解跑」
+   （没东西可跑，点了派发必 409）；重拆让 plan 回到 RUNNING，而前端轮询只在
+   RUNNING 时自续，补了 `pollNonce` 把它重新拉起来；`initial_feedback` 要跟着
+   **每一轮**重生成走，不能第一轮复核又驳回时就把人的原话丢掉。守它的测试：
+   `test_reject_with_instruction_replans_with_it`，以及
+   `test_plan_rejection_stays_undispatchable` 补了「否决落到 REJECTED」的断言。
+
+3. **已完成任务在聊天框发命令后，弹「任务跑完」影响判断。** follow-up 是 202 +
+   后台 restore，提交后到 status 翻回 RUNNING 之间，服务端如实还在报「做完了」，
+   聊天框 hint 就写着「这一轮做完了」—— 人刚说的话看起来没生效。修法：
+   `LiteStream` 的 hint 在 `pendingSaid !== null` 时改口「已经收到，会带着做出来的
+   东西重新跑，状态还没翻过来」，复用 M12 就有的 `SAID` 乐观状态（按内容比对清除）。
 
 ---
 

@@ -95,6 +95,10 @@ def _irreversible_marker(
     if verdict:
         for crit in verdict.spec_changes.get("added_criteria", []):
             haystack.extend(crit.get("command", []) or [])
+        # modified_criteria 同样能塞进一条命令，不可逆标记要一并查 —— 否则
+        # 「替换已有验收 command」就成了一条绕过这条判据的通道。
+        for crit in verdict.spec_changes.get("modified_criteria", []):
+            haystack.extend(crit.get("command", []) or [])
     for token in haystack:
         base = token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
         if base in policy.irreversible_markers:

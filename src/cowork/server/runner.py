@@ -303,7 +303,7 @@ class Runner:
         ).start()
         return plan_id
 
-    def _plan_worker(self, plan_id: str, goal: str, backend) -> None:
+    def _plan_worker(self, plan_id: str, goal: str, backend, instruction: str | None = None) -> None:
         entry = self.plans[plan_id]
         log = self._plan_log(plan_id)
         try:
@@ -370,6 +370,7 @@ class Runner:
             result = architect.plan(
                 goal, template, existing=existing or None, log=log,
                 on_progress=on_progress,
+                initial_feedback=[instruction] if instruction else None,
             )
             log(
                 f"[PLAN] 终局 {result.status}：{len(result.specs)} 个子任务，"
@@ -438,6 +439,7 @@ class Runner:
         accept: bool,
         rationale: str = "",
         specs: list[dict] | None = None,
+        instruction: str | None = None,
     ) -> None:
         entry = self.plans.get(plan_id)
         if entry is None:
@@ -451,9 +453,37 @@ class Runner:
         elif accept:
             entry.dispatchable = True
             entry.ruling_note = rationale or "人确认拆解"
+        elif instruction and instruction.strip():
+            # 否决 + 提意见：带着人的意见重新拆（重新拆由生成者做，§2.3）。
+            # 原来「否决」只设 dispatchable=False、没有后续，plan 卡在 AWAITING_HUMAN，
+            # 界面还是那两个按钮 —— 人以为「否决」点不动。
+            note = instruction.strip()
+            with self._lock:
+                entry.ruling_note = note
+                entry.dispatchable = False
+                entry.result = None  # 回到 RUNNING（get_plan 报 RUNNING）
+                entry.error = None
+                entry.progress = None
+                entry.draft_specs = None
+            self.hub.publish_threadsafe({"type": "plan", "plan_id": plan_id})
+            threading.Thread(
+                target=self._plan_worker,
+                args=(plan_id, entry.goal, self._exec_backend(), note),
+                daemon=True,
+            ).start()
+            return
         else:
             entry.dispatchable = False
             entry.ruling_note = rationale or "人否决了这份拆解"
+            # 否决（无意见）= 终局 REJECTED。原来没设 result，plan 卡在 AWAITING_HUMAN
+            # —— 这就是「否决点不动」的根因。
+            entry.result = DecompositionResult(
+                status="REJECTED", specs=list(entry.specs), root_id=plan_id,
+                review=entry.result.review if entry.result else None,
+                attempts=entry.result.attempts if entry.result else 0,
+                tokens=entry.result.tokens if entry.result else 0,
+                decider="HUMAN", rationale=entry.ruling_note,
+            )
         self.hub.publish_threadsafe({"type": "plan", "plan_id": plan_id})
 
     def dispatch(self, plan_id: str, assignments: dict[str, str] | None = None) -> str:

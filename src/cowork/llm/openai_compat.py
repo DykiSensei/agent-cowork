@@ -390,6 +390,8 @@ class OpenAICompatBackend:
             changes["goal"] = data["new_goal"]
         if data.get("added_criteria"):
             changes["added_criteria"] = data["added_criteria"]
+        if data.get("modified_criteria"):
+            changes["modified_criteria"] = data["modified_criteria"]
         return (
             ArchitectVerdict(
                 action=data["action"],

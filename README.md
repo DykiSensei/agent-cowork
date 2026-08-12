@@ -77,7 +77,7 @@ docker compose up -d postgres litellm     # 可选，不起就 skip 掉相关的
 python -m unittest discover -s tests -t .
 ```
 
-556 个测试。三样基础设施（Postgres / LiteLLM / Docker）都不起时，依赖它们的
+559 个测试。三样基础设施（Postgres / LiteLLM / Docker）都不起时，依赖它们的
 18 个会 skip（7 PG + 5 LiteLLM + 6 Docker），再加 1 个要搜索 key = 19，其余照常跑；
 打真实供应商的用例需要 `.env` 里配 key。
 

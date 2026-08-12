@@ -254,6 +254,7 @@ def create_app(
                 accept=bool(body.get("accept")),
                 rationale=body.get("rationale") or "",
                 specs=body.get("specs"),
+                instruction=body.get("instruction"),
             )
         except KeyError:
             return err(404, "没有这次拆解")

@@ -182,11 +182,13 @@ export function rulePlan(
   accept: boolean,
   rationale = "",
   specs?: TaskSpec[],
+  instruction?: string,
 ) {
   return send(`/api/plans/${encodeURIComponent(planId)}/ruling`, {
     accept,
     rationale,
     ...(specs ? { specs } : {}),
+    ...(instruction ? { instruction } : {}),
   });
 }
 
