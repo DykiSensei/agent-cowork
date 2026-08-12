@@ -54,7 +54,8 @@ cowork composite --backend deepseek       # 复合任务：并行 + 冲突检测
 ```
 
 支持 **9 家供应商**（deepseek / kimi / openai / gemini / qwen / zhipu / xai / doubao /
-anthropic / litellm），端点、key 变量名、默认模型都在 `cli.PROVIDERS` 一张表里。
+anthropic）+ litellm 代理，端点、key 变量名、默认模型都在 `cli.PROVIDERS` 一张表里
+（共 10 行）。
 
 花钱有上限：`--budget` 默认 100 万 token，超了就升级给人而不是闷头烧钱
 （`0` 关闭）。
@@ -76,8 +77,9 @@ docker compose up -d postgres litellm     # 可选，不起就 skip 掉相关的
 python -m unittest discover -s tests -t .
 ```
 
-423 个测试。三样基础设施（Postgres / LiteLLM / Docker）都不起时，依赖它们的
-14 个会 skip，其余照常跑；打真实供应商的用例需要 `.env` 里配 key。
+548 个测试。三样基础设施（Postgres / LiteLLM / Docker）都不起时，依赖它们的
+18 个会 skip（7 PG + 5 LiteLLM + 6 Docker），再加 1 个要搜索 key = 19，其余照常跑；
+打真实供应商的用例需要 `.env` 里配 key。
 
 ---
 
@@ -125,7 +127,7 @@ Runtime 是纯确定性层（不含任何 LLM 调用）。
 
 ---
 
-## 功能一览（M0–M8 全部完成）
+## 功能一览（M0–M11 全部完成）
 
 | 里程碑 | 内容 |
 |---|---|
@@ -136,9 +138,12 @@ Runtime 是纯确定性层（不含任何 LLM 调用）。
 | M4 | 并行与冲突检测：复合任务分层执行 + 产出冲突仲裁 |
 | M5a | 停止判断：判别力 Youden J 0.12 → 0.60 |
 | M5b | 拆解复核：结构层（确定性）+ 语义层（验收标准反推） |
-| M6 | 群聊界面层：React 前端（简洁/专业双模式 + 设置页）+ FastAPI 服务层 |
+| M6 | 群聊界面层：React 前端（一套界面 + 设置页）+ FastAPI 服务层 |
 | M7 | 拆解三角色：生成者 / 复核者 / 人，一句话目标 → 可执行子任务集 |
 | M8 | 写入侧复核：架构师改 spec 前让独立复核者看一眼，默认开 |
+| M9 | 会话级 token 硬护栏：应用层预算强制，不依赖 LiteLLM |
+| M10 | 工作区与「接手已有项目」、按角色选供应商、工具面 4→8（search_web 是第 9 个） |
+| M11 | 真人实测一轮：三角色附加提示词、run 白名单放宽、max_steps 默认 60、进度落成事件 |
 
 ## 四条架构不变量（有测试守着）
 
@@ -156,7 +161,7 @@ Runtime 是纯确定性层（不含任何 LLM 调用）。
   用结构化输出直接返回「下一个动作」，控制流归系统持有。
 - 存储：SQLite（默认，零依赖）/ Postgres（正式，`docker-compose.yml` 起）。
 - 沙箱：本地白名单 / Docker 容器（workspace 只读挂载 + scope 内可写 + `--network none`）。
-- 前端：`ui/`（React 18 + TS + Vite，双模式，自带 mock API）。
+- 前端：`ui/`（React 18 + TS + Vite，一套界面，自带 mock API）。
 
 ## 目录结构
 
@@ -174,6 +179,8 @@ src/cowork/
   store/              sqlite / postgres
   plan.py             拓扑分层 / 可分解性 / 静态冲突（全确定性）
   scheduler.py        并行调度 + 产出层冲突检测 + 仲裁
+  workspace.py        工作区：路径校验 + 产物落点 + 接手快照
+  skills.py           人写的说明书：扫目录 + 解析 SKILL.md + 拼进提示词
   server/             M6 服务层：FastAPI + SSE + restore 路径
   views.py            界面层投影
   bench/              实测工具（不参与生产链路）
