@@ -182,7 +182,10 @@ def _isolated_dependencies(specs: list[TaskSpec]) -> list[PlanIssue]:
                         kind="isolated_dependency",
                         detail=(
                             f"{spec.id} 依赖 {dep.id}，但产出分别在 {mine}/ 和 {theirs}/ —— "
-                            "各自一个目录能满足 scope 不相交，代价是运行时互相 import 不到"
+                            "各自一个目录能满足 scope 不相交，代价是运行时互相 import 不到。"
+                            "修法：别一人一个目录。把共享的入口/公共模块放到根目录或同一个 "
+                            "src/ 目录（scope 按文件级不相交即可），依赖方从那里 import；"
+                            "或者把这条依赖改成顺序链，由依赖链末端的集成子任务收口"
                         ),
                         tasks=(spec.id, dep.id),
                     )
