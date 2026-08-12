@@ -468,12 +468,12 @@ class OpenAICompatBackend:
 
     def decompose(
         self, root_goal: str, *, feedback: list[str] | None = None,
-        existing: str | None = None,
+        existing: str | None = None, environment: str | None = None,
     ) -> tuple[list[SubtaskDraft], int]:
         data, tokens = self._call(
             model=self.architect_model,
             system=with_extra(self.decompose_system, "architect"),
-            user=_render_decompose_context(root_goal, feedback, existing),
+            user=_render_decompose_context(root_goal, feedback, existing, environment),
             schema=DECOMPOSE_SCHEMA,
             # 拆解是这里最长的一次输出：6 个子任务 × 若干条带命令的验收标准，
             # 加上推理型模型自己要烧掉的那部分，4096 实测不够（见 §11.12）。

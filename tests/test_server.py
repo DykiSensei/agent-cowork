@@ -599,6 +599,30 @@ class TestServer(unittest.TestCase):
                 )
             self.assertIsNone(backend.decompose_existing[0])
 
+    def test_architect_sees_the_system_environment(self):
+        """拆解时架构师要知道哪些程序实际在 PATH（M12 之后）。
+
+        白名单是「允许」，不是「装了」—— 架构师不知道 node 到底在不在，就会
+        拆出「用 node 写前端」而环境没装 node 的任务，失败要到执行才暴露。
+        环境独立于 existing：从零开始的任务 existing 为 None，环境却不是。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            backend = self._plan_backend()
+            client = self._app(backend, Path(td))
+            with client:
+                plan_id = client.post(
+                    "/api/tasks", json={"goal": "做点东西", "workspace": td}
+                ).json()["plan_id"]
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("status")
+                    != "RUNNING",
+                    what="拆解完成",
+                )
+            env = backend.decompose_environment[0]
+            self.assertIsNotNone(env, "拆解要带上系统环境")
+            self.assertIn("系统环境", env)
+            self.assertIn("可用", env)
+
     def test_a_bad_workspace_is_refused_before_anything_starts(self):
         with tempfile.TemporaryDirectory() as td:
             client = self._app(self._plan_backend(), Path(td))

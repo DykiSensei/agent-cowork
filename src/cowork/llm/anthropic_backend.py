@@ -83,11 +83,10 @@ ACTION_SCHEMA: dict[str, Any] = {
         },
         "detail": {"type": "string"},
     },
-    "required": [
-        "kind", "thought", "tool", "path", "content", "command",
-        "pattern", "glob", "to", "url", "query", "recursive", "append",
-        "output_json", "summary", "signal_type", "detail",
-    ],
+    # 只 required 一个 kind：其余字段按动作类型「条件必需」，缺了在 _parse_action
+    # 里用 .get() 给默认值或报语义错。原来 16 个全 required（用空值表示不适用），
+    # 模型每次都要凑齐、漏一个就「缺少必填字段」—— 频繁合规性失败的源头之一。
+    "required": ["kind"],
     "additionalProperties": False,
 }
 
@@ -395,13 +394,18 @@ DECOMPOSE_SCHEMA: dict[str, Any] = {
 
 
 def _render_decompose_context(
-    root_goal: str, feedback: list[str] | None, existing: str | None = None
+    root_goal: str, feedback: list[str] | None, existing: str | None = None,
+    environment: str | None = None,
 ) -> str:
     parts = [f"# 原始目标\n{root_goal}"]
     if existing:
         # 现状排在目标之后、复核意见之前：它是「这件事的前提」，
         # 而复核意见是「上一轮哪儿没做对」，后者更该贴着输出（见下面那条注释）
         parts.append(existing)
+    if environment:
+        # 系统环境排在现状之后、复核意见之前：同样是「前提」，但独立于 existing
+        # （从零开始的任务 existing 为 None，环境却不是）
+        parts.append(environment)
     if feedback:
         # 复核缺口放在最后：模型对上下文末尾的要求执行得更实在，而这一段是
         # 「必须修掉的东西」。同 _render_architect_context 里裁决历史的处理。
@@ -900,13 +904,13 @@ class AnthropicBackend:
 
     def decompose(
         self, root_goal: str, *, feedback: list[str] | None = None,
-        existing: str | None = None,
+        existing: str | None = None, environment: str | None = None,
     ) -> tuple[list[SubtaskDraft], int]:
         # 用架构师主模型：拆解是这个系统里最有杠杆的一次判断，拆错了后面全白干。
         data, tokens = self._call(
             model=self.architect_model,
             system=with_extra(DECOMPOSE_SYSTEM, "architect"),
-            user=_render_decompose_context(root_goal, feedback, existing),
+            user=_render_decompose_context(root_goal, feedback, existing, environment),
             schema=DECOMPOSE_SCHEMA,
         )
         return _parse_drafts(data), tokens
@@ -949,14 +953,14 @@ def _parse_action(d: dict[str, Any]) -> AgentAction:
     75 次运行有 3 次因此崩掉整个 run（§11.6b）。解析失败必须变成硬信号交给架构师，
     和模型调用失败走同一条路。
     """
-    kind = d["kind"]
+    kind = d.get("kind", "")
     if kind == "tool_call":
-        tool = d["tool"]
+        tool = d.get("tool", "")
         if tool == "write_file":
-            args = {"path": d["path"], "content": d["content"],
+            args = {"path": d.get("path", ""), "content": d.get("content", ""),
                     "append": bool(d.get("append"))}
         elif tool == "read_file":
-            args = {"path": d["path"]}
+            args = {"path": d.get("path", "")}
         elif tool == "list_files":
             args = {"path": d["path"] or ".", "recursive": bool(d.get("recursive"))}
         elif tool == "search_files":
@@ -964,34 +968,34 @@ def _parse_action(d: dict[str, Any]) -> AgentAction:
             # 理由同上面那条：schema 过了不等于语义有效
             if not (d.get("pattern") or "").strip():
                 raise ModelCallFailed("tool=search_files 但 pattern 为空")
-            args = {"pattern": d["pattern"], "glob": d.get("glob") or "**/*"}
+            args = {"pattern": d.get("pattern", ""), "glob": d.get("glob") or "**/*"}
         elif tool == "delete_file":
-            args = {"path": d["path"]}
+            args = {"path": d.get("path", "")}
         elif tool == "move_file":
             if not (d.get("to") or "").strip():
                 raise ModelCallFailed("tool=move_file 但 to 为空")
-            args = {"path": d["path"], "to": d["to"]}
+            args = {"path": d.get("path", ""), "to": d.get("to", "")}
         elif tool == "fetch_url":
             if not (d.get("url") or "").strip():
                 raise ModelCallFailed("tool=fetch_url 但 url 为空")
-            args = {"url": d["url"]}
+            args = {"url": d.get("url", "")}
         elif tool == "search_web":
             if not (d.get("query") or "").strip():
                 raise ModelCallFailed("tool=search_web 但 query 为空")
-            args = {"query": d["query"]}
+            args = {"query": d.get("query", "")}
         elif tool == "run":
-            args = {"command": list(d["command"])}
+            args = {"command": list(d.get("command") or [])}
         else:
             raise ModelCallFailed(f"kind=tool_call 但 tool 无效: {tool!r}")
         return ToolCall(name=tool, args=args, thought=d.get("thought", ""))
     if kind == "finish":
         try:
-            output = json.loads(d["output_json"] or "{}")
+            output = json.loads(d.get("output_json") or "{}")
         except json.JSONDecodeError:
             output = {}
         return Finish(output=output, summary=d.get("summary", ""), thought=d.get("thought", ""))
     if kind == "soft_signal":
-        raw = d["signal_type"]
+        raw = d.get("signal_type", "")
         try:
             signal_type = SignalType(raw)
         except ValueError:

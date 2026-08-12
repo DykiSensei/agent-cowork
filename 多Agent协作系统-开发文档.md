@@ -2267,6 +2267,29 @@ system 提示词列了 8 个工具，而 bench 任务的 `spec.tools` 只给 4 �
 
 ---
 
+### 11.36 架构师把系统环境纳入考量：白名单是「允许」，不是「装了」（真人反馈，2026-08）
+
+subagent 跑不了 node 的另一半（§11.35 第 1 条修的是「找不到时别崩」），是**架构师
+拆解时压根不知道 node 在不在**：`decompose` 的上下文只有「原始目标 + 现状快照
+（existing）+ 复核意见」，没有「这台机器上有什么」。于是架构师会拆出「用 node
+写前端」的任务，而环境没装 node —— 那个失败要到执行层才暴露，白烧一轮。
+
+根因是**两个语义不同的东西被混成一个概念**：白名单（`allowed_binaries`）是「允许」，
+不等于「装了」。`shutil.which` 才能回答后者。
+
+修法：`decompose` 加一个 `environment` 参数，**独立于 `existing`** —— `existing`
+是「工作区现状」（从零开始为 None，那是省钱快照的依据），`environment` 是「机器上
+有什么」（永远有）。`architect._render_environment` 用 `shutil.which` 把白名单分成
+「可用」和「当前找不到」两段，加上工具白名单，拼进 user 消息（不进 system，静态
+前缀不动）。改的是 7 处 `decompose` 签名：协议 + anthropic + openai + scripted +
+budget + routing + architect，`TestWrappersMatchTheProtocol` 钉着（同 §11.20 那条
+「加参数要改几处交给机器记」）。
+
+守它的测试：`test_architect_sees_the_system_environment`（从零开始 existing 为 None，
+environment 仍非空且含「可用」）。
+
+---
+
 ### 11.35 三个执行层边界：node 找不到不崩、JSON 多一次修复、模型动态拉取（真人反馈，2026-08）
 
 三条独立的真人反馈，都是「边界没兜住 / 没入口」这一族：
@@ -2284,8 +2307,13 @@ system 提示词列了 8 个工具，而 bench 任务的 `spec.tools` 只给 4 �
    16 字段、截断）没动，这次只做最便宜的一件：`repair_rounds` 1→2，转义/漏字段
    类错误多一次「带错误重问」的机会，比直接硬失败便宜得多。守它的测试
    `test_truncation_says_so_instead_of_blaming_the_json` 跟着改成 3 个 length 回复
-   （总共 3 次尝试）。**精简 required 没做** —— 要动 ACTION_SCHEMA + validate_schema
-   + _parse_action 三处，且和「结构化输出 required 列全」的设计冲突，单独一轮。
+   （总共 3 次尝试）。
+
+   **后续（同一轮）**：`repair_rounds` 不够，根因之一是 required 字段太多 ——
+   `ACTION_SCHEMA` 原来 16 个字段全 required（用空值表示不适用），模型每次都要
+   凑齐、漏一个就「缺少必填字段」。已把 required 缩减到只剩 `kind`，其余字段在
+   `_parse_action` 里用 `.get()` 给默认值（核心字段缺失走下游的语义检查或
+   `ToolResult`，不再是「缺少必填字段」硬失败）。这就是「放宽 JSON 字段」。
 
 3. **deepseek 只能用 flash 不能用 pro。** 根子在 `PROVIDERS["deepseek"]["models"]`
    写死 `("deepseek-v4-flash",) * 3`，pro 靠手动 `COWORK_ARCHITECT_MODEL`。

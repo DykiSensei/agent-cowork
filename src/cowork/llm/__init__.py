@@ -211,6 +211,7 @@ class Backend(Protocol):
         *,
         feedback: list[str] | None = None,
         existing: str | None = None,
+        environment: str | None = None,
     ) -> tuple[list[SubtaskDraft], int]:
         """把一个自然语言目标拆成子任务（§12 M7 7.3）。
 
@@ -222,6 +223,11 @@ class Backend(Protocol):
         没有它的话，一个有内容的目录会被当成空目录，架构师从零重建一遍 ——
         而那正是「半路接手」和「从零开始」的全部区别。它和 feedback 一样只进
         user 消息、不进 system：静态前缀一字不动，缓存命中率不受影响（§11.14）。
+
+        `environment` 是**系统环境**（run 白名单里哪些程序实际在 PATH、工具白名单）。
+        和 `existing` 分开是因为两者语义不同：`existing` 是「工作区现状」（从零
+        开始为 None），`environment` 是「机器上有什么」（永远有）。没有它架构师
+        会拆出「用 node 写前端」而环境没装 node 的任务，失败要到执行才暴露。
 
         模型只填**它有权决定的字段**：goal / acceptance / scope / depends_on /
         task_class。sandbox、tools、各类上限由调用方的模板决定 ——

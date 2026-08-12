@@ -860,10 +860,33 @@ class Architect:
         属于隔离与成本边界 —— 见 `SpecTemplate` 的说明。
         """
         drafts, tokens = self.backend.decompose(
-            root_goal, feedback=feedback, existing=existing
+            root_goal, feedback=feedback, existing=existing,
+            environment=self._render_environment(template),
         )
         self.tokens_used += tokens
         return [self._assemble(d, template) for d in drafts]
+
+    def _render_environment(self, template: SpecTemplate) -> str:
+        """系统环境：run 白名单里哪些程序**实际在 PATH**（白名单是「允许」，不是「装了」）。
+
+        架构师拆解时得知道 node / pytest 这些到底在不在，否则会拆出「用 node 写
+        前端」而环境没装 node 的任务 —— 那个失败要到执行时才暴露（真人反馈）。
+        探测在当前进程 PATH 上做，和 `run` 的 subprocess 是同一个环境。
+        """
+        import shutil
+
+        allowed = list(template.sandbox.allowed_binaries) if template.sandbox else []
+        available = [b for b in allowed if shutil.which(b)]
+        missing = [b for b in allowed if b not in available]
+        lines = ["# 系统环境（run 能实际执行的程序）"]
+        lines.append(
+            "可用：" + (", ".join(available) if available else "（白名单里没有在 PATH 上的）")
+        )
+        if missing:
+            lines.append("白名单里有但当前找不到、拆解时不要依赖：" + ", ".join(missing))
+        if template.tools:
+            lines.append("子任务可用的工具：" + ", ".join(template.tools))
+        return "\n".join(lines)
 
     def _assemble(self, draft, template: SpecTemplate) -> TaskSpec:
         task_class = TaskClass(draft.task_class)

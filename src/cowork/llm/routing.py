@@ -123,9 +123,9 @@ class RoutingBackend:
     def review_decomposition(self, root_goal, specs):
         return self.default.review_decomposition(root_goal, specs)
 
-    def decompose(self, root_goal, *, feedback=None, existing=None):
+    def decompose(self, root_goal, *, feedback=None, existing=None, environment=None):
         return self.default.decompose(
-            root_goal, feedback=feedback, existing=existing
+            root_goal, feedback=feedback, existing=existing, environment=environment
         )
 
     def profile_tasks(self, specs):

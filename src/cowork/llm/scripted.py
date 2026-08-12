@@ -49,6 +49,7 @@ class ScriptedBackend:
         self.decompose_calls = 0
         self.decompose_feedback: list[list[str] | None] = []
         self.decompose_existing: list[str | None] = []
+        self.decompose_environment: list[str | None] = []
         self.decide_feedback: list[list[str] | None] = []
         self.decide_history: list[dict] = []
 
@@ -122,7 +123,7 @@ class ScriptedBackend:
 
     def decompose(
         self, root_goal: str, *, feedback: list[str] | None = None,
-        existing: str | None = None,
+        existing: str | None = None, environment: str | None = None,
     ) -> tuple[list, int]:
         # 记下每一轮拿到的 feedback：生成-复核循环要断言「复核意见真的喂回去了」，
         # 那是 7.4 与「每轮都从零开始重拆」的唯一区别。
@@ -130,6 +131,7 @@ class ScriptedBackend:
         self.decompose_calls += 1
         self.decompose_feedback.append(list(feedback) if feedback else None)
         self.decompose_existing.append(existing)
+        self.decompose_environment.append(environment)
         if self.decompose_for is None:
             raise NotImplementedError("ScriptedBackend 未提供 decompose_for")
         return self.decompose_for(root_goal, feedback), self.token_cost
