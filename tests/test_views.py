@@ -481,5 +481,92 @@ class TestPendingRuling(unittest.TestCase):
         self.assertIsNone(pending["decision_id"])
 
 
+class TestLiveStepProgress(unittest.TestCase):
+    """跑到一半时进度必须是**真的**（M11）。
+
+    以前两个数据源都只在 cycle 边界更新：`current_step` 要等 `loop.run()` 返回
+    才 `+= steps_run`，「此刻在做什么」取自 checkpoint 而 `checkpoint()` 只在
+    中断 / PROBE / Finish 时落盘。于是一个顺利跑完的子任务在库里只有「初始」和
+    「终局」两个可观测状态 —— 界面从「还没动手」直接跳到「做完了」。
+    **那不是刷新不及时，是中间状态压根不存在。**
+    """
+
+    def _loop_fixture(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        from cowork.actions import Finish, ToolCall
+        from cowork.agent.subagent import Subagent
+        from cowork.llm.scripted import ScriptedBackend
+        from cowork.runtime.bus import SignalBus
+        from cowork.runtime.loop import StepLoop
+        from cowork.runtime.sandbox import Sandbox
+        from cowork.store import SqliteStore
+        from cowork.types import (
+            AgentContext, Criterion, SandboxProfile, TaskClass, TaskSpec,
+        )
+
+        ws = Path(tempfile.mkdtemp(prefix="cowork-prog-"))
+        self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+        store = SqliteStore()
+        spec = TaskSpec(
+            goal="写文件", acceptance=[Criterion("c1", "写出来")],
+            task_class=TaskClass.CODE, scope=["a.py", "b.py"],
+            sandbox=SandboxProfile(workspace=str(ws)),
+        )
+        steps = {
+            (1, 0): ToolCall("write_file", {"path": "a.py", "content": "x = 1"}),
+            (1, 1): ToolCall("write_file", {"path": "b.py", "content": "y = 2"}),
+            (1, 2): Finish(output={}, summary="done"),
+        }
+        loop = StepLoop(
+            sandbox=Sandbox(spec.sandbox, spec.scope), bus=SignalBus(), store=store,
+        )
+        agent = Subagent(ScriptedBackend(steps))
+        ctx = AgentContext(task_spec=spec)
+        return loop, agent, ctx, spec, store
+
+    def test_each_step_leaves_a_trace_before_the_task_ends(self):
+        from cowork.views import _latest_step
+
+        loop, agent, ctx, spec, store = self._loop_fixture()
+        loop.run(ctx, agent)
+
+        events = [e for e in store.events_for(spec.id, 0) if e.kind == "step"]
+        self.assertEqual(
+            len(events), 2, "两次工具调用就该留下两条 step 事件（Finish 不算一步动作）"
+        )
+        self.assertEqual([e.payload["step"] for e in events], [1, 2])
+        self.assertEqual(_latest_step(store, spec.id)["tool"], "write_file")
+
+    def test_progress_reads_the_live_step_while_running(self):
+        """在跑的时候读 step 事件，而不是等 checkpoint。"""
+        from cowork.types import TaskState, TaskStatus
+        from cowork.views import task_progress
+
+        loop, agent, ctx, spec, store = self._loop_fixture()
+        loop.run(ctx, agent)
+
+        running = TaskState(spec=spec, status=TaskStatus.RUNNING, current_step=0)
+        out = task_progress(store, running)
+        self.assertEqual(out["current_step"], 2, "该反映最后一条 step 事件，不是 0")
+        self.assertEqual(out["last_result"]["name"], "write_file")
+        self.assertIsNotNone(out["started_at"], "计时器要有起点")
+
+    def test_progress_writes_never_break_the_run(self):
+        """进度是锦上添花：存储写不进去也不能把任务搞挂。"""
+        from unittest import mock
+
+        from cowork.types import TaskStatus
+
+        loop, agent, ctx, spec, store = self._loop_fixture()
+        with mock.patch.object(
+            store, "append_event", side_effect=RuntimeError("库挂了")
+        ):
+            outcome = loop.run(ctx, agent)
+        self.assertIs(outcome.status, TaskStatus.COMPLETED)
+
+
 if __name__ == "__main__":
     unittest.main()

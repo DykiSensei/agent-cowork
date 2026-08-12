@@ -158,7 +158,9 @@ class StepLoop:
                         payload={"max_steps": spec.max_steps},
                     )
                 )
-            if time.monotonic() - started > spec.deadline_s:
+            # deadline_s = 0 是「不限」（M11 默认）。留着这条判据是因为
+            # bench 和显式设了上限的调用方还要用它
+            if spec.deadline_s and time.monotonic() - started > spec.deadline_s:
                 return interrupted(
                     self.bus.emit_hard(
                         SignalType.TIMEOUT, spec.id,
@@ -263,6 +265,7 @@ class StepLoop:
                         "stderr": result.stderr[-2000:],
                     }
                 )
+                self._emit_step(spec.id, step, action, result)
 
                 if action.name == "write_file" and result.ok:
                     art = Artifact(
@@ -401,6 +404,44 @@ class StepLoop:
         if call.name == "run":
             return self.sandbox.run(list(call.args["command"]))
         raise ScopeViolation(call.name, "未声明的工具")
+
+    def _emit_step(self, task_id: str, step: int, action, result) -> None:
+        """每走完一步发一条**轻量**事件（M11）。
+
+        为什么非有不可：进度面板的两个数据源以前都只在 **cycle 边界**更新 ——
+        `current_step` 是 `loop.run()` 返回之后才 `+= steps_run`，
+        而「此刻在做什么」取自 checkpoint，可 `checkpoint()` 只在中断 / PROBE /
+        Finish 时才落盘。于是一个顺利跑完的子任务在库里只留下两个可观测状态：
+        初始和终局 —— 界面因此从「还没动手」直接跳到「做完了」。
+        **那不是刷新不及时，是中间状态压根不存在。**
+
+        为什么不是「每步落一个 checkpoint」：`Checkpoint` 带着整份
+        `agent_context`（含不断变长的 reasoning_trace），每步写一次是 O(n²) 的
+        字节量，而步数上限刚被放开。这里只记「第几步、调了什么、成没成」——
+        和 `events` 表的定位一致：**到达序的索引，不是内容的第二份拷贝**。
+
+        **失败不许打断执行**：进度是锦上添花，写不进去也不能把任务搞挂。
+        """
+        from ..types import TaskEvent
+
+        append = getattr(self.store, "append_event", None)
+        if append is None:
+            return
+        try:
+            append(
+                TaskEvent(
+                    task_id=task_id,
+                    kind="step",
+                    text=f"step {step} {action.name}",
+                    payload={
+                        "step": step,
+                        "tool": action.name,
+                        "ok": bool(result.ok),
+                    },
+                )
+            )
+        except Exception:  # noqa: BLE001 - 进度写不进去不该让任务失败
+            pass
 
     def _run_acceptance(self, spec):
         """跑所有可机器检查的验收标准。返回第一个失败的 (criterion, result)。"""

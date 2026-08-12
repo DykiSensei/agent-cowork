@@ -234,6 +234,12 @@ export interface TaskProgress {
   scope: string[];
   /** 产物落在哪（spec.sandbox.workspace）。 */
   workspace: string;
+  /**
+   * 这个子任务开始的时刻（epoch 秒），只在没跑完时有。
+   * **没有超时上限了**（deadline 默认 0 = 不限），所以「跑太久了」由人看着
+   * 计时器决定 —— 界面要给的是事实，不是替他做的判断。
+   */
+  started_at?: number | null;
   last_action: {
     step: number | null;
     kind: string | null;

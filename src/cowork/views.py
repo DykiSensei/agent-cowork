@@ -251,6 +251,19 @@ def _composite_detail(
     }
 
 
+def _latest_step(store, task_id: str) -> dict | None:
+    """最近一条 step 事件的 payload。没有就 None（老库、或还没走第一步）。"""
+    for ev in reversed(_events(store, task_id, 0)):
+        if ev.kind == "step" and isinstance(ev.payload, dict):
+            return ev.payload
+    return None
+
+
+def _first_event_ts(store, task_id: str) -> float | None:
+    events = _events(store, task_id, 0)
+    return events[0].created_at if events else None
+
+
 def task_progress(store, state: TaskState) -> dict[str, Any]:
     """这个任务此刻在做什么 —— 界面上「进度」那一栏的全部素材。
 
@@ -283,6 +296,23 @@ def task_progress(store, state: TaskState) -> dict[str, Any]:
         "last_result": None,
         "produced": [],
     }
+    if state.status not in TERMINAL:
+        # **在跑的时候以 step 事件为准**（M11）。checkpoint 只在中断 / PROBE /
+        # Finish 时落盘，而 `state.current_step` 要等 `loop.run()` 返回才累加 ——
+        # 两个都只在 cycle 边界动，于是顺利跑完的任务在库里只有「初始」和
+        # 「终局」两个状态，界面就从「还没动手」直跳「做完了」。
+        live = _latest_step(store, spec.id)
+        if live:
+            out["current_step"] = live.get("step", out["current_step"])
+            out["last_result"] = {
+                "step": live.get("step"),
+                "name": live.get("tool"),
+                "ok": live.get("ok"),
+                "exit_code": 0 if live.get("ok") else 1,
+            }
+        # 开始时刻：界面上那个计时器要它。没有 deadline 了，「跑太久」归人判断
+        out["started_at"] = _first_event_ts(store, spec.id)
+
     if state.status in TERMINAL or not state.checkpoint_id:
         return out
 
