@@ -125,6 +125,33 @@ class TestPendingSuggestion(unittest.TestCase):
             TaskState(spec=target), [], AgentContext(task_spec=target))
         self.assertIsNone(rec.suggestion)
 
+    def test_blocked_binary_flows_from_signal_to_pending(self):
+        """撞 run 白名单 → 挂起 → 界面的「允许并继续」按钮要有程序名（M11）。
+
+        这条链路以前没有任何测试钉着：信号 payload 带 binary，`pending_ruling`
+        要从触发裁决的信号里把它取出来。断一环，「允许」按钮就悄悄消失，
+        而人只会看到四个通用选项 —— 正是「一次也没看到过」的形态。
+        """
+        from cowork.signals import SignalSource, SignalType
+        from cowork.types import Action, Decider, DecisionRecord, Signal
+
+        store = SqliteStore()
+        target = spec()
+        store.save_task(TaskState(spec=target, status=TaskStatus.AWAITING_HUMAN))
+        sig = Signal(
+            type=SignalType.SCOPE_VIOLATION, task_id=target.id,
+            source=SignalSource.SUBAGENT,
+            payload={"resource": "curl", "reason": "不在 run 白名单", "binary": "curl"},
+        )
+        store.save_signal(sig)
+        store.save_decision(DecisionRecord(
+            task_id=target.id, trigger=[sig.id], decider=Decider.LLM,
+            action=Action.CONTINUE, rationale="挂起",
+            escalation_reason="触发信号包含 SCOPE_VIOLATION",
+        ))
+        pending = views.pending_ruling(store, target.id)
+        self.assertEqual(pending["blocked_binary"], "curl")
+
 
 class TestSpecChanges(unittest.TestCase):
     """缺口 2：只存 new_spec 的话，「哪条验收标准是新增的」重建不出来。"""
