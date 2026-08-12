@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import type { ActionResult } from "../../api";
+import { dispatchPlan } from "../../api";
 import {
   LITE_ACTION,
   LITE_ACTION_SUGGEST,
@@ -17,6 +18,7 @@ import type {
   DecisionRecord,
   PendingRuling,
   PlanData,
+  PlanView,
   Signal,
   StreamEvent,
   TaskDetail,
@@ -311,6 +313,106 @@ function TermView({ ev }: { ev: Extract<StreamEvent, { kind: "terminal" }> }) {
   );
 }
 
+/** 详情页上的「没派发的拆解」面板（M12 待办 #1）。
+ *  拆解中 / 等拍板 / 等派发三个状态各有一个入口，发布框不再是唯一入口。 */
+function PlanPanel({
+  plan,
+  onResume,
+  onDispatched,
+}: {
+  plan: PlanView;
+  onResume: (planId: string) => void;
+  onDispatched: (rootId: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const dispatch = () => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    void dispatchPlan(plan.plan_id).then((r) => {
+      if (!r.ok || !r.root_id) {
+        setErr(r.error ?? "派发没有返回 root_id");
+        setBusy(false);
+        return;
+      }
+      onDispatched(r.root_id);
+      setBusy(false);
+    });
+  };
+
+  const n = plan.specs?.length ?? 0;
+  const status = plan.status;
+
+  return (
+    <div className="l-planpanel">
+      {status === "RUNNING" && (
+        <>
+          <div className="l-planpanel-t">正在拆解</div>
+          <div className="l-planpanel-b">
+            {plan.progress
+              ? `第 ${plan.progress.attempt}/${plan.progress.max_attempts} 轮 · ${
+                  plan.progress.phase === "generating" ? "生成中" : "复核中"
+                } · 已用 ${plan.progress.tokens} token`
+              : "拆解刚开始…"}
+          </div>
+          <div className="l-planpanel-note">
+            拆完会在这里接着走 —— 不用守着发布框。
+          </div>
+        </>
+      )}
+
+      {status === "ERROR" && (
+        <>
+          <div className="l-planpanel-t">拆解没成</div>
+          <div className="l-planpanel-b">{plan.error ?? "未知错误"}</div>
+        </>
+      )}
+
+      {status === "AWAITING_HUMAN" && !plan.dispatchable && (
+        <>
+          <div className="l-planpanel-t">架构师拆完了，等你拍板</div>
+          <div className="l-planpanel-b">{n} 个子任务</div>
+          <button className="nt-primary" onClick={() => onResume(plan.plan_id)}>
+            去裁决
+          </button>
+        </>
+      )}
+
+      {plan.dispatchable && !plan.dispatched_root && (
+        <>
+          <div className="l-planpanel-t">拆解通过，等你派发</div>
+          <div className="l-planpanel-b">
+            {n > 0 ? `${n} 个子任务，确认后就开始花钱执行。` : ""}
+          </div>
+          {plan.specs?.length ? (
+            <ol className="l-planpanel-specs">
+              {plan.specs.slice(0, 6).map((s, i) => (
+                <li key={i}>{s.goal}</li>
+              ))}
+              {plan.specs.length > 6 && <li>…</li>}
+            </ol>
+          ) : null}
+          {err && <div className="nt-line bad">{err}</div>}
+          <div className="l-planpanel-row">
+            <button className="nt-ghost" onClick={() => onResume(plan.plan_id)}>
+              回发布框看看
+            </button>
+            <button className="nt-primary" disabled={busy} onClick={dispatch}>
+              {busy ? "派发中…" : "开始执行"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {status === "REJECTED" && (
+        <div className="l-planpanel-t">这份拆解被否决了</div>
+      )}
+    </div>
+  );
+}
+
 export default function LiteStream({
   taskId,
   detail,
@@ -318,6 +420,8 @@ export default function LiteStream({
   onFollowUp,
   onCancel,
   onRuling,
+  onResumePlan,
+  onDispatched,
 }: {
   taskId: string;
   detail: TaskDetail;
@@ -330,6 +434,10 @@ export default function LiteStream({
     rationale: string,
     specChanges?: Record<string, unknown>,
   ) => Promise<ActionResult>;
+  /** 从详情页跳回发布框，接着裁决 / 派发那条拆解（M12 待办 #1）。 */
+  onResumePlan: (planId: string) => void;
+  /** 详情页直接派发成功后，选中并刷新那条线程。 */
+  onDispatched: (rootId: string) => void;
 }) {
   const [bar, setBar] = useState(false);
   // 刚追加、服务端还没回声的那句话 —— 状态在模块级的 `SAID` 里（见它的注释）
@@ -413,6 +521,14 @@ export default function LiteStream({
 
   return (
     <main className="l-stream">
+      {/* 没派发的拆解：拆解中 / 等拍板 / 等派发三个状态在这里接管（M12 待办 #1） */}
+      {detail.kind === "composite" && detail.plan_entry ? (
+        <PlanPanel
+          plan={detail.plan_entry}
+          onResume={onResumePlan}
+          onDispatched={onDispatched}
+        />
+      ) : null}
       {/* 「现在在干什么」—— 时间线说的是发生过什么，这里说的是此刻怎么样 */}
       <Progress detail={detail} lite />
       {/* 专业版弃用之后，它独有的信息（spec / 验收标准 / 硬信号 / 预算）在这里 */}

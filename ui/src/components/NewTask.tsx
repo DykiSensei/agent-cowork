@@ -395,9 +395,12 @@ function ReviewNotes({ plan }: { plan: PlanView }) {
 }
 
 export default function NewTask({
+  initialPlanId = null,
   onDispatched,
   onClose,
 }: {
+  /** 从一个没派发的 plan 恢复（详情页「去裁决 / 去派发」跳转过来）。 */
+  initialPlanId?: string | null;
   onDispatched: (rootId: string) => void;
   onClose: () => void;
 }) {
@@ -407,6 +410,9 @@ export default function NewTask({
   const [wsDefault, setWsDefault] = useState("");
   const [picking, setPicking] = useState(false);
   const [planId, setPlanId] = useState<string | null>(null);
+  // 派发成功了。**不自动关框**：关掉会让人以为「只能发一个」，而服务端本来
+  // 就并行 —— 发完一个接着发下一个是最自然的事（M12 待办 #2）。
+  const [dispatched, setDispatched] = useState(false);
   const [plan, setPlan] = useState<PlanView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -454,6 +460,14 @@ export default function NewTask({
     };
   }, [planId]);
 
+  // 从详情页「去裁决 / 去派发」跳转过来时，直接进入那条 plan，不再问一次目标。
+  useEffect(() => {
+    if (initialPlanId) {
+      setPlanId(initialPlanId);
+      setDispatched(false);
+    }
+  }, [initialPlanId]);
+
   const toggleSkill = useCallback((name: string) => {
     setPicked((prev) =>
       prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
@@ -491,11 +505,11 @@ export default function NewTask({
           setError(r.error ?? "派发没有返回 root_id");
           return;
         }
+        setDispatched(true);
         onDispatched(r.root_id);
-        onClose();
       })
       .finally(() => setBusy(false));
-  }, [planId, busy, onDispatched, onClose]);
+  }, [planId, busy, onDispatched]);
 
   const rule = useCallback(
     (accept: boolean, specs?: TaskSpec[]) => {
@@ -520,6 +534,34 @@ export default function NewTask({
     },
     [planId, busy],
   );
+
+  const reset = useCallback(() => {
+    setGoal("");
+    setPlanId(null);
+    setPlan(null);
+    setDispatched(false);
+    setEdited(null);
+    setPicked([]);
+  }, []);
+
+  if (dispatched) {
+    return (
+      <div className="nt">
+        <div className="nt-hd">已派发</div>
+        <div className="nt-line good">
+          任务已经开跑，正在后台并行执行 —— 接着发布下一个，系统会同时跑。
+        </div>
+        <div className="nt-actions">
+          <button type="button" className="nt-ghost" onClick={reset}>
+            再发一个
+          </button>
+          <button type="button" className="nt-primary" onClick={onClose}>
+            回到工作台
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!planId) {
     return (
@@ -625,7 +667,7 @@ export default function NewTask({
   return (
     <div className="nt">
       <div className="nt-hd">发布一个任务</div>
-      <div className="nt-goal">{goal}</div>
+      <div className="nt-goal">{goal || plan?.goal || ""}</div>
       {plan?.workspace && (
         <div className="nt-ws-note">
           {plan.takeover ? "接手" : "产物落在"}：<code>{plan.workspace}</code>

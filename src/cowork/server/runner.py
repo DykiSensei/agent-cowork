@@ -707,7 +707,69 @@ class Runner:
         }
 
     def list_threads(self):
-        return views.thread_list(self.store)
+        rows = views.thread_list(self.store)
+        # 未派发的拆解在侧栏是 PENDING（排队中），但那不等于真相（M12 待办 #1）：
+        # 等拍板 / 等派发都是「卡在人这一步」，得标成 AWAITING_HUMAN 让红点亮、
+        # 排到前面，否则人会错过「该你拍板了」。拆解中保持 PENDING（进度在详情页看）。
+        for row in rows:
+            entry = self.plans.get(row["task_id"])
+            if entry is None or entry.dispatched_root is not None:
+                continue
+            status = self._plan_list_status(entry)
+            if status is not None:
+                row["status"] = status
+        return rows
 
     def get_detail(self, task_id: str, after_seq: int = 0):
-        return views.task_detail(self.store, task_id, after_seq=after_seq)
+        detail = views.task_detail(self.store, task_id, after_seq=after_seq)
+        # 未派发的拆解要能在详情页接管（M12 待办 #1）：plan_id 原本只活在发布框
+        # 的组件状态里，关框即丢 —— 于是「拆解中 / 等拍板 / 等派发」三个状态在
+        # 界面上没有第二个入口。这里把 plan 的现状附给详情，界面据此给入口。
+        if detail is not None and detail.get("kind") == "composite":
+            entry = self.plans.get(task_id)
+            if entry is not None and entry.dispatched_root is None:
+                detail["plan_entry"] = self._plan_state(entry)
+        return detail
+
+    def _plan_list_status(self, entry: PlanEntry) -> str | None:
+        """未派发 plan 在侧栏该显示成什么 TaskStatus。None = 保持 PENDING。"""
+        if entry.error:
+            return TaskStatus.FAILED.value
+        if entry.result is None:
+            return None  # 拆解中：PENDING 没毛病，进度在详情页看
+        if entry.dispatchable or entry.result.status == "AWAITING_HUMAN":
+            return TaskStatus.AWAITING_HUMAN.value  # 等派发 / 等拍板，都是等人
+        if entry.result.status == "REJECTED":
+            return TaskStatus.FAILED.value
+        return None
+
+    def _plan_state(self, entry: PlanEntry) -> dict:
+        """未派发 plan 的轻量现状，附给详情页。**不带 profiles** —— 那是
+        LLM 调用（profile_tasks），详情页每次刷新都触发的话是笔真钱，还会让
+        GET /tasks/{id} 卡在模型调用上。"""
+        if entry.result is None:
+            return {
+                "plan_id": entry.id,
+                "goal": entry.goal,
+                "status": "ERROR" if entry.error else "RUNNING",
+                "error": entry.error,
+                "progress": entry.progress,
+                "started_at": entry.created_at,
+                "specs": entry.draft_specs,
+                "draft": True,
+                "workspace": entry.workspace,
+                "takeover": entry.takeover,
+                "dispatchable": False,
+                "dispatched_root": None,
+            }
+        out = entry.result.to_dict()
+        out.update(
+            plan_id=entry.id,
+            goal=entry.goal,  # to_dict() 不带 goal，详情页要显示人最初那句话
+            dispatchable=entry.dispatchable,
+            ruling_note=entry.ruling_note,
+            dispatched_root=entry.dispatched_root,
+            workspace=entry.workspace,
+            takeover=entry.takeover,
+        )
+        return out

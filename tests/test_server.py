@@ -315,6 +315,83 @@ class TestServer(unittest.TestCase):
                     what="派发出去的子任务收尾",
                 )
 
+    def test_an_unpatched_plan_is_takeoverable_from_the_detail(self):
+        """M12 待办 #1：拆解中 / 等拍板 / 等派发的 plan 要能在详情页接管。
+
+        发布框一关，plan_id 就丢在组件状态里了；服务端其实一直留着 plan。
+        钉住两件事：列表把「等拍板」标成 AWAITING_HUMAN（红点亮、排前面），
+        详情带上 plan_entry（界面据此给裁决 / 派发入口），派发之后它消失。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+
+            def decompose(_goal, _feedback):
+                return [
+                    SubtaskDraft(
+                        id="t1_build",
+                        goal="造出 a.txt",
+                        acceptance=[{"id": "c1", "description": "a.txt 被造出来"}],
+                        scope=["a.txt"],
+                    )
+                ]
+
+            backend = ScriptedBackend(
+                {(1, 0): Finish(output={}, summary="done")},
+                decompose_for=decompose,
+                review_for=lambda *_: (False, ["原始目标里的「一页」没有验收标准管它"]),
+            )
+            client = self._app(backend, tmp)
+            with client:
+                plan_id = client.post(
+                    "/api/tasks", json={"goal": "做一个造文件的小工具"}
+                ).json()["plan_id"]
+
+                _wait_for(
+                    lambda: client.get(f"/api/plans/{plan_id}").json().get("status")
+                    == "AWAITING_HUMAN",
+                    what="拆解升级给人",
+                )
+
+                # 列表：等拍板要标 AWAITING_HUMAN，而不是 PENDING「排队中」
+                row = next(
+                    t for t in client.get("/api/tasks").json()
+                    if t["task_id"] == plan_id
+                )
+                self.assertEqual(row["status"], "AWAITING_HUMAN")
+
+                # 详情：带上 plan_entry，界面据此给「去裁决」入口
+                d = client.get(f"/api/tasks/{plan_id}").json()
+                self.assertEqual(d["kind"], "composite")
+                self.assertIn("plan_entry", d)
+                self.assertEqual(d["plan_entry"]["status"], "AWAITING_HUMAN")
+                self.assertFalse(d["plan_entry"]["dispatchable"])
+
+                # 人拍板「就按这份跑」之后：等派发，plan_entry 跟着变
+                r = client.post(
+                    f"/api/plans/{plan_id}/ruling",
+                    json={"accept": True, "rationale": "人确认按当前拆解执行"},
+                )
+                self.assertEqual(r.status_code, 200, r.text)
+                d = client.get(f"/api/tasks/{plan_id}").json()
+                self.assertTrue(d["plan_entry"]["dispatchable"])
+
+                # 派发之后 plan_entry 消失（线程变成正常的复合线程）
+                r = client.post(f"/api/plans/{plan_id}/dispatch", json={})
+                self.assertEqual(r.status_code, 202, r.text)
+                d = client.get(f"/api/tasks/{plan_id}").json()
+                self.assertNotIn("plan_entry", d)
+
+                # 别让 TemporaryDirectory 在子任务还写文件时被删（同别处）
+                _wait_for(
+                    lambda: all(
+                        p["terminal"]
+                        for p in client.get(f"/api/tasks/{plan_id}")
+                        .json()["progress"].values()
+                    )
+                    or None,
+                    what="派发出去的子任务收尾",
+                )
+
     def test_the_journey_a_human_actually_takes(self):
         """实测走过的那条路，逐跳钉住 —— 它踩到了两个界面上无解的坑。
 

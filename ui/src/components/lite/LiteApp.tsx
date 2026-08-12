@@ -17,11 +17,24 @@ const LITE_DOT: Record<string, string> = {
 
 export default function LiteApp(props: AppProps) {
   const [composing, setComposing] = useState(false);
+  // 从详情页「去裁决 / 去派发」跳转回来要恢复的那条 plan（M12 待办 #1）。
+  const [resumePlanId, setResumePlanId] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [delErr, setDelErr] = useState<string | null>(null);
   // INTERRUPTED 是过渡态，不值得在 lite 里占一行
   const threads = props.threads.filter((t) => t.status !== "INTERRUPTED");
   const awaiting = threads.filter((t) => t.status === "AWAITING_HUMAN").length;
+  // 「此刻在跑几条」—— 服务端本来就并行，侧栏得让人一眼看到（M12 待办 #2）
+  const active = threads.filter((t) => !t.terminal).length;
+
+  const openCompose = (planId?: string) => {
+    setResumePlanId(planId ?? null);
+    setComposing(true);
+  };
+  const closeCompose = () => {
+    setComposing(false);
+    setResumePlanId(null);
+  };
 
   return (
     <div id="lite">
@@ -39,9 +52,10 @@ export default function LiteApp(props: AppProps) {
         <aside className="l-threads">
           <div className="l-threads-hd">
             任务
+            {active > 0 && <span className="l-run-tag">{active} 条进行中</span>}
             {awaiting > 0 && <span className="l-await-tag">{awaiting} 件等你处理</span>}
           </div>
-          <button className="nt-open" onClick={() => setComposing(true)}>
+          <button className="nt-open" onClick={() => openCompose()}>
             ＋ 发布新任务
           </button>
           {threads.map((t) => (
@@ -102,8 +116,9 @@ export default function LiteApp(props: AppProps) {
         {composing ? (
           <main className="l-stream nt-host">
             <NewTask
+              initialPlanId={resumePlanId}
               onDispatched={props.onDispatched}
-              onClose={() => setComposing(false)}
+              onClose={closeCompose}
             />
           </main>
         ) : props.detail && props.selected ? (
@@ -115,6 +130,8 @@ export default function LiteApp(props: AppProps) {
             onFollowUp={props.onFollowUp}
             onCancel={props.onCancel}
             onRuling={props.onRuling}
+            onResumePlan={openCompose}
+            onDispatched={props.onDispatched}
           />
         ) : (
           // 选中了但详情还没到（刚派发的线程有一小段真空期）。

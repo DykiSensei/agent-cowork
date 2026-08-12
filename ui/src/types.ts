@@ -348,6 +348,15 @@ export interface CompositeDetail extends DetailBase {
   pending: Record<string, PendingRuling | null>;
   /** 每个子任务此刻在做什么。 */
   progress: Record<string, TaskProgress>;
+  /**
+   * 这条线程还是一次**没派发的拆解**时的现状（M12 待办 #1）。
+   *
+   * 未派发的 plan 没有 tasks 行，详情页拿不到「拆解到哪了 / 该不该拍板 /
+   * 能不能派发」—— 于是发布框一关，这条任务在界面上就再没有入口。
+   * 服务端在 runner.get_detail 里把 plan 的现状附在这里（无 profiles），
+   * 派发之后（dispatched_root 非空）这个字段就不存在了。
+   */
+  plan_entry?: PlanView | null;
 }
 
 /** GET /api/tasks/:id（views.task_detail）。 */
