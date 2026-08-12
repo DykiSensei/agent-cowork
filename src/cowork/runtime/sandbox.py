@@ -410,6 +410,19 @@ class Sandbox:
             )
         except subprocess.TimeoutExpired:
             return ToolResult(ok=False, exit_code=124, stderr="command timed out")
+        except OSError as exc:
+            # `subprocess.run` 找不到可执行文件时抛 FileNotFoundError（OSError 子类）。
+            # 不接住的话它抛穿 run 工具、抛穿 `_exec_tool`（只接 ScopeViolation），
+            # 整个 run 崩掉 —— 而「程序不在 PATH / 没装」本该是回给模型的一句话，
+            # 让模型换一个能用的程序（同 errors="replace" 那条纪律：工具层的失败
+            # 必须以 ToolResult 回到循环，不许抛）。
+            return ToolResult(
+                ok=False, exit_code=127,
+                stderr=(
+                    f"找不到程序 {command[0]!r}：它不在 PATH 或没装（{exc}）。"
+                    f"可用的是 {list(self.profile.allowed_binaries)}"
+                ),
+            )
 
         result = ToolResult(
             ok=proc.returncode == 0,

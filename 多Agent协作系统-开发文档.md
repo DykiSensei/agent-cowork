@@ -2267,6 +2267,35 @@ system 提示词列了 8 个工具，而 bench 任务的 `spec.tools` 只给 4 �
 
 ---
 
+### 11.35 三个执行层边界：node 找不到不崩、JSON 多一次修复、模型动态拉取（真人反馈，2026-08）
+
+三条独立的真人反馈，都是「边界没兜住 / 没入口」这一族：
+
+1. **subagent 跑不了 node。** 白名单没限制（`DEFAULT_BINARIES` 里本就有 node/npm/...），
+   真问题是两处：`run` 工具只捕获 `TimeoutExpired`，node 不在 serve 进程的 PATH 时
+   `subprocess.run` 抛 `FileNotFoundError`，抛穿 `_exec_tool`（只接 `ScopeViolation`）、
+   **整个 run 崩掉** —— 而「找不到程序」本该是回给模型的一句话。补了
+   `except OSError`，返回 `ToolResult(ok=False, stderr=找不到程序 X，可用的是 …)`。
+   **环境那半还在**：本地沙箱靠宿主机 PATH（start.bat / GUI 启动时未必带 nodejs），
+   Docker 沙箱镜像 `python:3.12-slim` 里根本没有 node —— 要用 node 得换镜像或
+   宿主机 PATH 里放好，这是人的事、不是代码的事。
+
+2. **JSON 合规性依旧。** 上一轮定位的三个根因（写 JSON 文件的双重转义、required
+   16 字段、截断）没动，这次只做最便宜的一件：`repair_rounds` 1→2，转义/漏字段
+   类错误多一次「带错误重问」的机会，比直接硬失败便宜得多。守它的测试
+   `test_truncation_says_so_instead_of_blaming_the_json` 跟着改成 3 个 length 回复
+   （总共 3 次尝试）。**精简 required 没做** —— 要动 ACTION_SCHEMA + validate_schema
+   + _parse_action 三处，且和「结构化输出 required 列全」的设计冲突，单独一轮。
+
+3. **deepseek 只能用 flash 不能用 pro。** 根子在 `PROVIDERS["deepseek"]["models"]`
+   写死 `("deepseek-v4-flash",) * 3`，pro 靠手动 `COWORK_ARCHITECT_MODEL`。
+   `probe_provider` 本来就能拉到 `/v1/models`，但只拿去对比预设。现在它多返回一个
+   `models` 字段（服务端实际模型列表），设置页「测试连接」成功后把这列表摆出来、
+   点一个设给选中的角色（默认架构师 —— 动态拉 pro 主要是给推理档）。**没有**把
+   预设改成「自动选 pro」：选哪个模型归人，代码不替人猜哪家哪个 id 是「pro」。
+
+---
+
 ### 11.34 文书任务的编码问题：run python 默认 GBK，和 write_file 的 UTF-8 打架（真人反馈，2026-08）
 
 症状：含中文的文档类任务（「写一份中文说明 / 报告」）经常要改好几轮都过不了验收，

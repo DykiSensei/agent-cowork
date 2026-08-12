@@ -597,10 +597,12 @@ def probe_provider(name: str, *, timeout: float = 10.0) -> dict:
 
     where = "" if base == p["base"] else f"（走覆盖地址 {base}）"
     missing = [m for m in wanted if m not in served]
+    models = sorted(served)
     if missing:
-        return {"name": name, "status": "mismatch",
+        return {"name": name, "status": "mismatch", "models": models,
                 "detail": f"服务端没有 {missing}；实际有 {sorted(served)[:6]}{where}"}
-    return {"name": name, "status": "ok", "detail": f"{wanted} 都在服务端{where}"}
+    return {"name": name, "status": "ok", "models": models,
+            "detail": f"{wanted} 都在服务端{where}"}
 
 
 _PROBE_LABEL = {"ok": "OK", "mismatch": "对不上", "unreachable": "问不到",

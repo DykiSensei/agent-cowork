@@ -290,13 +290,21 @@ export function SearchCard({
   );
 }
 
-function ProviderCard({ p }: { p: ProviderInfo }) {
+function ProviderCard({
+  p,
+  onPickModel,
+}: {
+  p: ProviderInfo;
+  onPickModel: (role: keyof Settings["models"], model: string) => void;
+}) {
   const [input, setInput] = useState("");
   const [configured, setConfigured] = useState(p.configured);
   const [hint, setHint] = useState(p.key_hint);
   const [saving, setSaving] = useState(false);
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [testing, setTesting] = useState(false);
+  // 拉到的模型列表，点一个设给哪个角色（默认架构师 —— 动态拉 pro 主要是给推理档）
+  const [pickRole, setPickRole] = useState<keyof Settings["models"]>("architect");
   // 保存**可能失败**：值里有换行会被 400 拦（那是 .env 注入防线），.env 写不进去
   // 是 500。原来这里不看返回码，一律显示「已填 ····abcd」——
   // 于是唯一会拒绝的那条路径，恰好在界面上长得像成功。
@@ -403,6 +411,36 @@ function ProviderCard({ p }: { p: ProviderInfo }) {
           </span>
         )}
       </div>
+      {probe?.models && probe.models.length > 0 && (
+        <div className="set-models">
+          <div className="set-row">
+            <span className="set-k">拉到的模型</span>
+            <select
+              className="set-text"
+              value={pickRole}
+              onChange={(e) =>
+                setPickRole(e.target.value as keyof Settings["models"])
+              }
+            >
+              <option value="architect">点模型设给架构师</option>
+              <option value="subagent">点模型设给 Subagent</option>
+              <option value="triage">点模型设给分诊</option>
+            </select>
+          </div>
+          <div className="set-model-list">
+            {probe.models.map((m) => (
+              <button
+                key={m}
+                className="set-model"
+                title="点一下，把这个模型填进上方选中的角色"
+                onClick={() => onPickModel(pickRole, m)}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -457,7 +495,17 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             ? loadError
               ? null
               : "加载中…"
-            : providers.map((p) => <ProviderCard key={p.name} p={p} />)}
+            : providers.map((p) => (
+                <ProviderCard
+                  key={p.name}
+                  p={p}
+                  onPickModel={(role, model) =>
+                    setSettings((s) =>
+                      s ? { ...s, models: { ...s.models, [role]: model } } : s,
+                    )
+                  }
+                />
+              ))}
         </div>
 
         {settings && (

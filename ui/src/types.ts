@@ -398,6 +398,12 @@ export interface ProbeResult {
    */
   status: "ok" | "mismatch" | "unreachable" | "skipped";
   detail: string;
+  /**
+   * 服务端 `/v1/models` 实际返回的模型 id 列表（status 为 ok / mismatch 时有）。
+   * 设置页拿它做「动态拉取模型」，让用户从真实存在的模型里挑（M12 之后：
+   * deepseek 预设写死 flash，pro 只能靠这个列表选出来）。
+   */
+  models?: string[];
 }
 
 /** `GET /api/fs`：目录选择器的一层。 */

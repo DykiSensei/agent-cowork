@@ -338,7 +338,8 @@ class TestRepairRound(unittest.TestCase):
 
     def test_truncation_says_so_instead_of_blaming_the_json(self):
         b = self._backend([])
-        b.client = _FakeClient(["", ""], finish_reasons=["length", "length"])
+        # repair_rounds=2 → 总共 3 次尝试，全给截断回复，报错该说清是截断
+        b.client = _FakeClient(["", "", ""], finish_reasons=["length", "length", "length"])
         with self.assertRaises(ModelError) as caught:
             b.review_decomposition("目标", [])
         self.assertIn("截断", str(caught.exception))

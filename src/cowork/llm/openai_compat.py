@@ -146,7 +146,10 @@ class OpenAICompatBackend:
         # 想设仍然可以：显式传一个正数。
         max_tokens: int | None = None,
         max_retries: int = 2,
-        repair_rounds: int = 1,
+        # JSON 不合规时带着错误重问的轮数（总尝试 = repair_rounds + 1）。
+        # 从 1 提到 2：写 JSON 文件时的双重转义、漏必填字段这类错误，多一次
+        # 重试比直接硬失败便宜得多（M12 之后的合规性反馈）。
+        repair_rounds: int = 2,
         decompose_system: str | None = None,
         cache_key_supported: bool = False,
         effort_profile: str | None = None,
