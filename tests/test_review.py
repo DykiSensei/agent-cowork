@@ -147,6 +147,32 @@ class TestReviewWiring(unittest.TestCase):
         self.assertFalse(result.clean)
 
 
+    def test_isolated_dependency_is_a_warning_not_a_blocker(self):
+        """M12 之后：一人一目录「可能 import 不到」是启发式，不阻断拆解。
+
+        元素周期表那次死循环：确定性检查把「一人一目录」判成 import 不到，
+        而 feedback 只说错不说怎么修 → 生成者重生成还是一样的拆法，烧完
+        max_regenerate。现在它进 warnings（不影响 clean），仍显示给人、喂回给
+        生成者当「不必强制修」的提示。
+        """
+        arch = self._architect(review_for=lambda g, s: (True, []))
+        result = arch.review_decomposition(
+            GOAL,
+            [
+                spec("a", scope=("subtask1/parser.py",)),
+                spec("b", scope=("subtask2/renderer.py",)),
+                spec("c", scope=("subtask3/cli.py",), deps=["a", "b"]),
+            ],
+        )
+        # 语义复核通过 + 没有别的结构问题 → clean，尽管有 isolated_dependency 提示
+        self.assertTrue(result.clean)
+        self.assertEqual(result.structural, [])
+        self.assertEqual(
+            [w.kind for w in result.warnings],
+            ["isolated_dependency", "isolated_dependency"],
+        )
+
+
 class TestIndependentReviewer(unittest.TestCase):
     """复核者换一个后端（§12 M7 7.1）。
 

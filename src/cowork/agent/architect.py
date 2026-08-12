@@ -73,6 +73,11 @@ class DecompositionReview:
     tokens: int = 0
     reviewer: str = ""
     independent: bool = False
+    # 不阻断的启发式提示（M12 之后）：`isolated_dependency` 这类用目录结构推断
+    # 「import 不到」的判定，其实语言/运行方式相关 —— depends_on 也可能是数据
+    # 文件传递、不是代码 import。它仍然显示给人、喂回给生成者，但不再让
+    # sufficient 变 false（误报会白烧重生成，正是「元素周期表」那次死循环）。
+    warnings: list = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -86,6 +91,10 @@ class DecompositionReview:
             ],
             "sufficient": self.sufficient,
             "missing": list(self.missing),
+            "warnings": [
+                {"kind": i.kind, "detail": i.detail, "tasks": list(i.tasks)}
+                for i in self.warnings
+            ],
             "tokens": self.tokens,
             "reviewer": self.reviewer,
             "independent": self.independent,
@@ -810,20 +819,26 @@ class Architect:
         同模型没有的失败形态：对本来没问题的拆解报缺口。所以 7.2 必须两侧都测。
         """
         issues = deterministic_review(root_goal, specs)
+        # isolated_dependency 是启发式提示、不是硬缺陷（见 DecompositionReview.warnings）：
+        # 从阻断项里分出去，避免「一人一目录」这类其实未必 import 不到的拆解被反复
+        # 驳回 —— 元素周期表那次死循环的另一个面。
+        structural = [i for i in issues if i.kind != "isolated_dependency"]
+        warnings = [i for i in issues if i.kind == "isolated_dependency"]
         reviewer = self.reviewer_backend or self.backend
         independent = self.reviewer_backend is not None
         name = getattr(reviewer, "name", "?")
-        if any(i.kind in ("empty", "invalid_graph", "no_scope", "no_acceptance") for i in issues):
+        if any(i.kind in ("empty", "invalid_graph", "no_scope", "no_acceptance") for i in structural):
             # 结构就是坏的，语义复核没有意义，也不该为它花 token
-            return DecompositionReview(structural=issues, sufficient=False,
+            return DecompositionReview(structural=structural, sufficient=False,
                                        missing=["结构性缺陷未修复，跳过语义复核"], tokens=0,
-                                       reviewer="deterministic", independent=independent)
+                                       reviewer="deterministic", independent=independent,
+                                       warnings=warnings)
 
         sufficient, missing, tokens = reviewer.review_decomposition(root_goal, specs)
         self.tokens_used += tokens
         return DecompositionReview(
-            structural=issues, sufficient=sufficient, missing=missing, tokens=tokens,
-            reviewer=name, independent=independent,
+            structural=structural, sufficient=sufficient, missing=missing, tokens=tokens,
+            reviewer=name, independent=independent, warnings=warnings,
         )
 
     # -- 拆解生成（§12 M7 7.3 / 7.4）---------------------------------------- #
@@ -1020,10 +1035,16 @@ class Architect:
             if reason:
                 break
 
-            # 复核意见喂回给生成者 —— 没有这一步，重生成就是「再抽一次」
+            # 复核意见喂回给生成者 —— 没有这一步，重生成就是「再抽一次」。
+            # warnings 是「可能的隐患、不是必须修」—— 措辞要区分，否则生成者
+            # 会把提示当错误，又硬凑出另一个拆法。
             feedback = [
                 *(f"{i.kind}: {i.detail}" for i in review.structural),
                 *review.missing,
+                *(
+                    f"提示（不必强制修，确认即可）：{i.detail}"
+                    for i in review.warnings
+                ),
             ]
 
         return self._escalate_plan(

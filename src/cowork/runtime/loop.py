@@ -263,6 +263,20 @@ class StepLoop:
                         )
                     )
 
+                stdout = result.stdout
+                stderr = result.stderr[-2000:]
+                if action.name == "read_file" and stdout:
+                    # 读文件要看开头（import / 定义 / 签名），取末尾恰恰丢掉最重要的
+                    # 部分。而且文件大时要让模型知道「没读完」—— 否则它以为读到了
+                    # 全文、基于不完整的信息做决策（静默失败，比报错更糟）。
+                    if len(stdout) > 8000:
+                        stdout = (
+                            stdout[:8000]
+                            + f"\n…（文件共 {len(result.stdout)} 字符，这里只显示开头 "
+                            "8000；用 search_files 定位具体内容后重读）"
+                        )
+                else:
+                    stdout = stdout[-2000:]
                 ctx.reasoning_trace.append(
                     {
                         "role": "tool",
@@ -270,8 +284,8 @@ class StepLoop:
                         "name": action.name,
                         "ok": result.ok,
                         "exit_code": result.exit_code,
-                        "stdout": result.stdout[-2000:],
-                        "stderr": result.stderr[-2000:],
+                        "stdout": stdout,
+                        "stderr": stderr,
                     }
                 )
                 self._emit_progress(spec.id, step, "done", action=action, result=result)
