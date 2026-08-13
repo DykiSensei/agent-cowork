@@ -72,8 +72,16 @@ def deterministic_escalation(
         return f"要对 parent_id 为空的顶层任务执行 {verdict.action}"
 
     # 4. 已越界，需人确认边界是否该扩
+    # 但验收 command 撞白名单（payload.during == "acceptance"）不是「Subagent 越界
+    # 要扩边界」—— 那是架构师自己生成的验收脚本写错了程序（test/sh 这类 shell
+    # 命令），该让架构师决策换 command（modified_criteria），而不是升级给人：
+    # 人那边没有换 command 的入口，只会反复「改一下任务」而 spec 纹丝不动（真人反馈）。
     if policy.escalate_on_scope_violation and any(
-        s.type is SignalType.SCOPE_VIOLATION for s in signals
+        s.type is SignalType.SCOPE_VIOLATION
+        and not (
+            isinstance(s.payload, dict) and s.payload.get("during") == "acceptance"
+        )
+        for s in signals
     ):
         return "触发信号包含 SCOPE_VIOLATION"
 

@@ -915,6 +915,14 @@ class Architect:
             lines.append("白名单里有但当前找不到、拆解时不要依赖：" + ", ".join(missing))
         if template.tools:
             lines.append("子任务可用的工具：" + ", ".join(template.tools))
+        # 验收 command 也走同一个 run 白名单。`test`/`sh`/`[` 这类 shell 命令
+        # 不在白名单（白名单只放语言运行时、不含 shell），写进验收 command 会
+        # 当场 SCOPE_VIOLATION —— 检查文件在不在/条件用 python -c 写 os.path。
+        lines.append(
+            "验收 command 的程序只能用上面「可用」列出的；test / sh / bash / [ / "
+            "ls / grep / cat 是 shell 命令、不在白名单，检查文件在不在或条件判断请用 "
+            "python -c 写 os.path，或写一个 verify 脚本再 python verify.py。"
+        )
         return "\n".join(lines)
 
     def _assemble(self, draft, template: SpecTemplate) -> TaskSpec:

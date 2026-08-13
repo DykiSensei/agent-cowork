@@ -720,6 +720,43 @@ class TestToolFaceIsConsistent(unittest.TestCase):
                 self.fail(f"{tool} 在 _exec_tool 里没有派发分支: {exc}")
 
 
+class TestAcceptanceCommandWhitelist(unittest.TestCase):
+    """验收 command 的程序必须落在 run 白名单里。`test`/`sh`/`[` 这类 shell 命令
+    不在白名单，模型拆解生成 command 时条件反射写 `test -f`、决策替换时又换成
+    `sh -c` 变体 —— 三处提示词都得把这条说清楚，否则「没有 test / 没有 sh」会
+    一直失败（真人反馈）。"""
+
+    def test_decompose_states_shell_commands_are_off_whitelist(self):
+        from cowork.llm.anthropic_backend import DECOMPOSE_SYSTEM
+
+        self.assertIn("不在白名单", DECOMPOSE_SYSTEM)
+        self.assertIn("test", DECOMPOSE_SYSTEM)
+        self.assertIn("sh", DECOMPOSE_SYSTEM)
+
+    def test_architect_replacement_states_shell_variants_wont_help(self):
+        from cowork.llm.anthropic_backend import ARCHITECT_SYSTEM
+
+        self.assertIn("shell 变体", ARCHITECT_SYSTEM)
+        self.assertIn("allowed_binaries", ARCHITECT_SYSTEM)
+
+    def test_environment_renders_the_same_constraint(self):
+        from cowork.agent.architect import Architect, AutoApproveGate, SpecTemplate
+        from cowork.llm.scripted import ScriptedBackend
+        from cowork.policy import Policy
+        from cowork.types import SandboxProfile
+
+        arch = Architect(
+            backend=ScriptedBackend({}), store=None,
+            human_gate=AutoApproveGate(), policy=Policy(),
+        )
+        template = SpecTemplate(
+            sandbox=SandboxProfile(workspace=".", allowed_binaries=("python",))
+        )
+        env = arch._render_environment(template)
+        self.assertIn("验收 command", env)
+        self.assertIn("test", env)
+
+
 class TestSearchWeb(LoopFixture):
     """`search_web`：搜索这一步归我们自己持有（开发文档 §11.22）。
 

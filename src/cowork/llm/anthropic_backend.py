@@ -238,7 +238,14 @@ added_criteria 是要补充的验收标准，modified_criteria 是替换已有�
 **验收命令（command）报语法错误时，用 modified_criteria 替换那条命令本身**，
 不要只加一条描述、更不要追加一条新标准 —— 原来那条错的 command 会一直被
 Runtime 执行，追加再多新的也过不了验收。替换时 command 写 argv 数组
-（例如 ["python", "-c", "…"]），写对语法；确实判不了就给空数组退回人工判定。"""
+（例如 ["python", "-c", "…"]），写对语法；确实判不了就给空数组退回人工判定。
+
+**替换出来的 command，程序必须落在 TaskSpec 的 sandbox.allowed_binaries 白名单里。**
+信号说「X 不在白名单」时（典型是 `test` / `sh`），**别把 X 换成它的 shell 变体** ——
+`test` 换 `[`、或换 `sh -c "test ..."` 都没用，它们同样不在白名单，下一轮还是
+同样的失败。直接换成白名单里有的程序：检查「文件在不在 / 条件成不成立」用
+`["python", "-c", "import os,sys; sys.exit(0 if os.path.exists('...') else 1)"]`，
+或写一个 verify 脚本再 `["python", "verify.py"]`。"""
 
 TRIAGE_SYSTEM = """你在做廉价批量分诊。对每条软信号只输出 ignore 或 escalate。
 escalate 只给「架构师必须介入才能推进」的信号。不要做完整推理。"""
@@ -267,6 +274,11 @@ DECOMPOSE_SYSTEM = """你在把一个目标拆成若干可以独立派发的子�
   「formatter.py 存在且能 import」不是 —— 后者随便写点什么都能通过。
 - 能用一条命令判定就给 command（例如 ["python", "verify_x.py"]），
   Runtime 会自己跑它并在失败时产生硬信号；判不了就留空，交给人或模型判。
+  **command 的程序必须落在「系统环境」里列出的可用程序里。** `test` / `sh` /
+  `bash` / `[` / `ls` / `grep` / `cat` 是 shell 命令，**不在白名单**（白名单不含
+  shell）—— 检查「文件在不在 / 条件成不成立」用 `python -c` 写 os.path 判断
+  （例如 `["python", "-c", "import os,sys; sys.exit(0 if os.path.exists('x.txt') else 1)"]`），
+  或写一个 verify 脚本再 `["python", "verify.py"]`。**别写 `["test", "-f", ...]`。**
 - **子任务之间的衔接也要有人验收**。每个部件各自正确、拼起来不工作，
   是这类拆解最常见的失败。
 

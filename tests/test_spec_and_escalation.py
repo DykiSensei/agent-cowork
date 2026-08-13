@@ -175,6 +175,21 @@ class TestEscalation(unittest.TestCase):
         )
         self.assertIn("SCOPE_VIOLATION", reason)
 
+    def test_acceptance_scope_violation_stays_with_the_architect(self):
+        """验收 command 撞白名单（during=acceptance）不该升级给人 —— 那是架构师
+        生成的验收脚本写错了程序（test/sh），该让架构师决策换 command；升级给人的话，
+        人那边没有换 command 的入口，只会反复「改一下任务」而 spec 纹丝不动。"""
+        s = spec(parent_id="p")
+        st = TaskState(spec=s)
+        acceptance_sig = Signal(
+            type=SignalType.SCOPE_VIOLATION, task_id=s.id,
+            source=SignalSource.RUNTIME, payload={"during": "acceptance"},
+        )
+        reason = deterministic_escalation(
+            self.policy, s, st, [acceptance_sig], self.calm
+        )
+        self.assertIsNone(reason)
+
     def test_budget_overrun_escalates(self):
         s = spec(parent_id="p")
         st = TaskState(spec=s, tokens_used=900)  # 90% > 80%

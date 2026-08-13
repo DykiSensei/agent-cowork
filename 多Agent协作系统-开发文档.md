@@ -10,7 +10,7 @@
 > 取开头 8000、`write_file` 加 `append`、`run python` 加 `-X utf8`、`run` 补
 > `except OSError`（程序找不到不崩）、`repair_rounds` 1→2、`ACTION_SCHEMA` required
 > 缩到只剩 `kind`、`decompose` 加 `environment`（架构师纳入系统环境）、
-> `probe_provider` 返回 `models`（设置页动态拉取模型）。版本 0.2.3，测试 559。
+> `probe_provider` 返回 `models`（设置页动态拉取模型）。版本 0.2.4，测试 563。
 > **v0.23 变更**：跑完 M8 8.4 四轮（321 次调用 / 425k token）。
 > ①补提示词盲区：**J 0.686 → 0.829，FPR 恒 0** —— 补的是「证据为空时分辨
 > 『让失败可观测』与『声称知道原因』」，同族那个证据同样为空的负例没被误伤，
@@ -843,7 +843,7 @@ artifacts    (id, task_id, kind, content_ref, summary)
 | §12 M6 restore | `Orchestrator.restore()` / `resume_with_ruling()` / `Architect.apply_human_ruling()` | ✅ 人的裁决仍走架构师那扇门 |
 | §12 M6 时间线 | `events` 表 + `Orchestrator._event()` / `Scheduler._event()` | ✅ |
 
-559 个测试。不起 Docker / Postgres / LiteLLM 时依赖它们的 18 个 skip（7 PG + 5 LiteLLM + 6 Docker），再加 1 个要搜索 key = 19，其余照常跑。
+563 个测试。不起 Docker / Postgres / LiteLLM 时依赖它们的 18 个 skip（7 PG + 5 LiteLLM + 6 Docker），再加 1 个要搜索 key = 19，其余照常跑。
 
 ### 11.2 四条架构不变量已有测试守护
 
@@ -2271,6 +2271,37 @@ system 提示词列了 8 个工具，而 bench 任务的 `spec.tools` 只给 4 �
 要验证它得做一次真正的对照：同一个模型、同一批任务，只切换工具面。
 **在那之前不要动 `max_steps`** —— 从一份混淆的数据里推参数，正是 §11.19 那次
 过拟合的老路。
+
+---
+
+### 11.38 验收 command 用 test / sh 撞白名单，反复「改一下任务」修不好（真人反馈，2026-08）
+
+症状：验收脚本总是用 `test`（以及 `sh`），而白名单里没有它们 —— 执行验收时撞
+`allowed_binaries`，每一次失败的原因都一样「没有 test / 没有 sh」，人反复选
+「改一下任务」也修不好。
+
+两层根因，两层修：
+
+1. **架构师不知道 `test` / `sh` 这类 shell 命令不在白名单**（白名单只放语言运行时、
+   不含 shell）。于是拆解生成 command 时条件反射写 `["test", "-f", "x.txt"]`，
+   决策替换时又换成 `sh -c "test ..."` 的 shell 变体 —— 换汤不换药。
+   修在提示词三处：`DECOMPOSE_SYSTEM`（生成时）、`ARCHITECT_SYSTEM`（替换时）、
+   `_render_environment`（拆解环境信息）都写明「检查文件在不在 / 条件判断用
+   `python -c` 写 os.path，或写 verify 脚本，别写 test/sh」。
+
+2. **验收 command 撞白名单走了确定性升级给人，而人那边没有换 command 的入口。**
+   `escalation` 第 4 条对所有 SCOPE_VIOLATION 一律升级（`escalate_on_scope_violation`），
+   但验收撞白名单（`payload.during == "acceptance"`）和 Subagent 越界是两码事：
+   后者该让人决定要不要放行（`allow_binary`），前者是架构师自己写的验收脚本错了，
+   该让架构师决策换 command。原来验收撞白名单升级给人之后，人点「改一下任务」
+   不带 `spec_changes`（`_apply_changes({})` 只 bump revision），command 纹丝不动，
+   REBASE 后又在同一个地方失败 —— **这就是「每次原因都一样」的死循环**。
+   修在 `escalation` 第 4 条：排除 `during == "acceptance"` 的 SCOPE_VIOLATION，
+   让它走架构师决策（架构师用 §11.37 的 `modified_criteria` 换 command）。
+   Subagent 越界那条照旧升级给人（M11 的「允许并继续」不受影响）。
+
+守它的测试：`test_acceptance_scope_violation_stays_with_the_architect`（验收撞白名单
+不升级）、`TestAcceptanceCommandWhitelist`（三处提示词都写明 shell 命令不可用）。
 
 ---
 
